@@ -101,10 +101,20 @@ actor NeovimProcess {
     private let inbound: AsyncStream<Inbound>
     private let inboundContinuation: AsyncStream<Inbound>.Continuation
 
-    /// Notifications Neovim sends the client (e.g. redraw, progress), in wire
-    /// order. The stream finishes when the connection closes.
+    /// Notifications Neovim sends the client, in wire order. Once a UI is
+    /// attached, the controller consumes `redraw`, `vimenter`, `progress`, and
+    /// `modified`, so those no longer appear here. The stream finishes when the
+    /// connection closes.
     nonisolated let notifications: AsyncStream<RPCNotification>
     private let notificationsContinuation: AsyncStream<RPCNotification>.Continuation
+
+    /// UI model, present once `uiAttach` has run. Redraw notifications feed it.
+    private var ui: UIController?
+
+    /// Grid snapshots published on each flush, in order. The stream finishes
+    /// when the connection closes.
+    nonisolated let grids: AsyncStream<Grid>
+    private let gridsContinuation: AsyncStream<Grid>.Continuation
 
     init() {
         let inboundPair = AsyncStream.makeStream(of: Inbound.self)
@@ -114,6 +124,10 @@ actor NeovimProcess {
         let notificationPair = AsyncStream.makeStream(of: RPCNotification.self)
         notifications = notificationPair.stream
         notificationsContinuation = notificationPair.continuation
+
+        let gridsPair = AsyncStream.makeStream(of: Grid.self)
+        grids = gridsPair.stream
+        gridsContinuation = gridsPair.continuation
     }
 
     // MARK: Connecting
@@ -333,6 +347,30 @@ actor NeovimProcess {
     private func handleNotification(_ message: [MPValue]) {
         guard let method = message[1].stringValue,
               let arguments = message[2].arrayValue else { return }
+
+        // An attached UI absorbs its own notification channels; the rest flow
+        // to the public stream. Without a UI, every notif flows to the stream.
+        if let ui {
+            switch method {
+            case "redraw":
+                for grid in ui.redraw(arguments) { gridsContinuation.yield(grid) }
+                return
+            case "vimenter":
+                return
+            case "progress":
+                if arguments.count == 1, case .map(let event) = arguments[0] {
+                    ui.progress(event)
+                }
+                return
+            case "modified":
+                if arguments.count == 1, let value = arguments[0].boolValue {
+                    ui.setModified(value)
+                }
+                return
+            default:
+                break
+            }
+        }
         notificationsContinuation.yield(RPCNotification(method: method, arguments: arguments))
     }
 
@@ -359,6 +397,7 @@ actor NeovimProcess {
         }
 
         notificationsContinuation.finish()
+        gridsContinuation.finish()
         inboundContinuation.finish()
         io = nil
     }
@@ -382,6 +421,135 @@ actor NeovimProcess {
     private func isNotification(_ message: [MPValue]) -> Bool {
         message.count == 3 && message[0].integer?.unsigned == 2
             && message[1].stringValue != nil && message[2].arrayValue != nil
+    }
+}
+
+// MARK: - UI attachment
+
+extension NeovimProcess {
+    /// The most recent flushed grid, or nil if no UI has attached and drawn.
+    func currentGrid() -> Grid? { ui?.globalGrid }
+
+    /// A pending restart/connect handoff Neovim requested, if any.
+    func pendingHandoff() -> UIHandoff? { ui?.handoff }
+
+    /// The outcome of one negotiation request, awaited under a shared deadline.
+    private enum AttachOutcome {
+        case response(RPCResponse)
+        case timedOut
+        case transport(RPCTransportError)
+    }
+
+    /// Negotiates the API and attaches a UI of the given size.
+    ///
+    /// Runs the startup transaction under one shared deadline:
+    /// `nvim_get_api_info` → validate → `nvim_set_client_info` →
+    /// `nvim_ui_attach`, attaching only the options Neovim supports. On
+    /// success, redraw notifications feed the UI model and flushed grids are
+    /// published on `grids`.
+    func uiAttach(width: Int, height: Int, options: UIOptions,
+                  timeout: Duration = .seconds(5)) async -> UIAttachResult {
+        let controller = ui ?? UIController()
+        ui = controller
+
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+
+        let apiOutcome = await requestWaiting("nvim_get_api_info", [], until: deadline)
+        guard case .response(let api) = apiOutcome, !api.isError else {
+            return attachFailure(apiOutcome, "API negotiation")
+        }
+
+        let (validation, capabilities) = validateAPIMetadata(api.result, requested: options)
+        guard validation.status == .success else { return validation }
+
+        let clientOutcome = await requestWaiting(
+            "nvim_set_client_info", clientInfoArguments(), until: deadline)
+        guard case .response(let client) = clientOutcome, !client.isError else {
+            return attachFailure(clientOutcome, "Client registration")
+        }
+
+        let attachOptions = supportedOptions(requested: options,
+                                             supported: capabilities.uiOptions)
+        let attachArgs: [MPValue] = [.int(MPInteger(width)),
+                                     .int(MPInteger(height)), .map(attachOptions)]
+        let attachOutcome = await requestWaiting("nvim_ui_attach", attachArgs, until: deadline)
+        guard case .response(let attached) = attachOutcome, !attached.isError else {
+            return attachFailure(attachOutcome, "UI attachment")
+        }
+
+        var result = validation
+        result.status = .success
+        return result
+    }
+
+    /// Issues a request and awaits its response or the shared deadline,
+    /// whichever comes first. A timeout cancels the in-flight request.
+    private func requestWaiting(_ method: String, _ arguments: [MPValue],
+                                until deadline: ContinuousClock.Instant) async -> AttachOutcome {
+        let remaining = ContinuousClock.now.duration(to: deadline)
+        if remaining <= .zero { return .timedOut }
+
+        return await withTaskGroup(of: AttachOutcome.self) { group in
+            group.addTask {
+                do {
+                    return .response(try await self.request(method, arguments))
+                } catch let error as RPCError {
+                    switch error {
+                    case .timedOut: return .timedOut
+                    case .transport(let transport): return .transport(transport)
+                    }
+                } catch {
+                    return .transport(.connectionClosed)
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(for: remaining)
+                return .timedOut
+            }
+            let first = await group.next() ?? .transport(.connectionClosed)
+            group.cancelAll()
+            return first
+        }
+    }
+
+    private func attachFailure(_ outcome: AttachOutcome, _ operation: String) -> UIAttachResult {
+        var result = UIAttachResult()
+        switch outcome {
+        case .response(let response):
+            result.status = .rpcError
+            result.message = "\(operation) was rejected by Neovim"
+            result.rpcError = response.error
+        case .timedOut:
+            result.status = .timedOut
+            result.message = "\(operation) timed out"
+        case .transport(let error):
+            result.status = .transportError
+            result.message = "\(operation) failed because the RPC connection closed"
+            result.transportError = error
+            switch error {
+            case .readFailed(let code), .writeFailed(let code): result.systemError = code
+            case .connectionClosed: break
+            }
+        }
+        return result
+    }
+
+    /// The `nvim_set_client_info` arguments identifying this UI client.
+    private func clientInfoArguments() -> [MPValue] {
+        let version: MPValue = .map([(.string("major"), .int(0)), (.string("minor"), .int(1))])
+        let methods: MPValue = .map([])
+        let attributes: MPValue = .map([(.string("license"), .string("MIT"))])
+        return [.string("Nvmm"), version, .string("ui"), methods, attributes]
+    }
+
+    /// The requested options intersected with what Neovim supports, as map pairs.
+    private func supportedOptions(requested: UIOptions,
+                                  supported: [String]) -> [(MPValue, MPValue)] {
+        var pairs: [(MPValue, MPValue)] = []
+        for (name, value) in requestedOptionList(requested) where supported.contains(name) {
+            pairs.append((.string(name), .bool(value)))
+        }
+        return pairs
     }
 }
 
