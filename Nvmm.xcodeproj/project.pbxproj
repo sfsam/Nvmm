@@ -6,11 +6,6 @@
 	objectVersion = 77;
 	objects = {
 
-/* Begin PBXFileReference section */
-		9261A75E300CA65600B23EF8 /* Nvmm.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Nvmm.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		9261A7B1300CA65600B23EF8 /* NvmmTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NvmmTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-/* End PBXFileReference section */
-
 /* Begin PBXContainerItemProxy section */
 		9261A7B6300CA65600B23EF8 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -20,6 +15,11 @@
 			remoteInfo = Nvmm;
 		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		9261A75E300CA65600B23EF8 /* Nvmm.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Nvmm.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		9261A7B1300CA65600B23EF8 /* NvmmTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NvmmTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
 		9261A7A0300CA65600B23EF8 /* Exceptions for "Nvmm" folder in "Nvmm" target */ = {
@@ -171,14 +171,6 @@
 		};
 /* End PBXProject section */
 
-/* Begin PBXTargetDependency section */
-		9261A7B7300CA65600B23EF8 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = 9261A75D300CA65600B23EF8 /* Nvmm */;
-			targetProxy = 9261A7B6300CA65600B23EF8 /* PBXContainerItemProxy */;
-		};
-/* End PBXTargetDependency section */
-
 /* Begin PBXResourcesBuildPhase section */
 		9261A75C300CA65600B23EF8 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
@@ -233,6 +225,14 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		9261A7B7300CA65600B23EF8 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 9261A75D300CA65600B23EF8 /* Nvmm */;
+			targetProxy = 9261A7B6300CA65600B23EF8 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		9261A768300CA65800B23EF8 /* Debug */ = {

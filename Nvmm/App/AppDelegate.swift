@@ -9,6 +9,7 @@ import Cocoa
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var windowController: WindowController?
+    private let renderManager = RenderContextManager()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Startup wiring checks: confirm the two integration points the rest of
@@ -16,8 +17,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         logUTF8ProcVersion()
         logBundledNeovim()
 
-        let controller = WindowController()
+        let controller = WindowController(renderManager: renderManager)
         controller.showWindow(nil)
+        controller.start()
         windowController = controller
     }
 
