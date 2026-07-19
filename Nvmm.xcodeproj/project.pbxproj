@@ -10,9 +10,22 @@
 		9261A75E300CA65600B23EF8 /* Nvmm.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Nvmm.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		9261A7A0300CA65600B23EF8 /* Exceptions for "Nvmm" folder in "Nvmm" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				ThirdParty/utf8proc/utf8proc_data.c,
+			);
+			target = 9261A75D300CA65600B23EF8 /* Nvmm */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		9261A760300CA65600B23EF8 /* Nvmm */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				9261A7A0300CA65600B23EF8 /* Exceptions for "Nvmm" folder in "Nvmm" target */,
+			);
 			path = Nvmm;
 			sourceTree = "<group>";
 		};
@@ -55,6 +68,7 @@
 				9261A75A300CA65600B23EF8 /* Sources */,
 				9261A75B300CA65600B23EF8 /* Frameworks */,
 				9261A75C300CA65600B23EF8 /* Resources */,
+				9261A7A1300CA65600B23EF8 /* Bundle Neovim */,
 			);
 			buildRules = (
 			);
@@ -113,6 +127,27 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		9261A7A1300CA65600B23EF8 /* Bundle Neovim */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/build/nvim",
+			);
+			name = "Bundle Neovim";
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/$(EXECUTABLE_FOLDER_PATH)/nvim",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/lib",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/share",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\nSRC=\"$SRCROOT/build/nvim\"\nif [ ! -d \"$SRC\" ]; then\n  echo \"warning: build/nvim missing; run Scripts/download_nvim.sh to bundle Neovim\"\n  exit 0\nfi\nCONTENTS=\"$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH\"\nEXEC_DIR=\"$BUILT_PRODUCTS_DIR/$EXECUTABLE_FOLDER_PATH\"\nmkdir -p \"$EXEC_DIR\" \"$CONTENTS\"\nrm -rf \"$CONTENTS/lib\" \"$CONTENTS/share\" \"$EXEC_DIR/nvim\"\ncp -R \"$SRC/lib\" \"$CONTENTS/lib\"\ncp -R \"$SRC/share\" \"$CONTENTS/share\"\ncp \"$SRC/bin/nvim\" \"$EXEC_DIR/nvim\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		9261A75A300CA65600B23EF8 /* Sources */ = {
@@ -256,6 +291,7 @@
 				DEVELOPMENT_TEAM = HFT3T55WND;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -273,8 +309,9 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "Nvmm/Nvmm-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 			};
 			name = Debug;
 		};
@@ -289,6 +326,7 @@
 				DEVELOPMENT_TEAM = HFT3T55WND;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -306,8 +344,9 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "Nvmm/Nvmm-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 			};
 			name = Release;
 		};

@@ -1,0 +1,9 @@
+# Build artifacts (includes bundled Neovim from download_nvim.sh)
+/build/
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+DerivedData/
+
+.DS_Store
