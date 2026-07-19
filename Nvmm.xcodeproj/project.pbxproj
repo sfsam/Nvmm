@@ -8,7 +8,18 @@
 
 /* Begin PBXFileReference section */
 		9261A75E300CA65600B23EF8 /* Nvmm.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Nvmm.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		9261A7B1300CA65600B23EF8 /* NvmmTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NvmmTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
+
+/* Begin PBXContainerItemProxy section */
+		9261A7B6300CA65600B23EF8 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 9261A756300CA65600B23EF8 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 9261A75D300CA65600B23EF8;
+			remoteInfo = Nvmm;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
 		9261A7A0300CA65600B23EF8 /* Exceptions for "Nvmm" folder in "Nvmm" target */ = {
@@ -29,10 +40,22 @@
 			path = Nvmm;
 			sourceTree = "<group>";
 		};
+		9261A7B2300CA65600B23EF8 /* Tests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Tests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		9261A75B300CA65600B23EF8 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9261A7B4300CA65600B23EF8 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -46,6 +69,7 @@
 			isa = PBXGroup;
 			children = (
 				9261A760300CA65600B23EF8 /* Nvmm */,
+				9261A7B2300CA65600B23EF8 /* Tests */,
 				9261A75F300CA65600B23EF8 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -54,6 +78,7 @@
 			isa = PBXGroup;
 			children = (
 				9261A75E300CA65600B23EF8 /* Nvmm.app */,
+				9261A7B1300CA65600B23EF8 /* NvmmTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -84,6 +109,29 @@
 			productReference = 9261A75E300CA65600B23EF8 /* Nvmm.app */;
 			productType = "com.apple.product-type.application";
 		};
+		9261A7B0300CA65600B23EF8 /* NvmmTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9261A7B8300CA65600B23EF8 /* Build configuration list for PBXNativeTarget "NvmmTests" */;
+			buildPhases = (
+				9261A7B3300CA65600B23EF8 /* Sources */,
+				9261A7B4300CA65600B23EF8 /* Frameworks */,
+				9261A7B5300CA65600B23EF8 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				9261A7B7300CA65600B23EF8 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				9261A7B2300CA65600B23EF8 /* Tests */,
+			);
+			name = NvmmTests;
+			packageProductDependencies = (
+			);
+			productName = NvmmTests;
+			productReference = 9261A7B1300CA65600B23EF8 /* NvmmTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -96,6 +144,10 @@
 				TargetAttributes = {
 					9261A75D300CA65600B23EF8 = {
 						CreatedOnToolsVersion = 26.2;
+					};
+					9261A7B0300CA65600B23EF8 = {
+						CreatedOnToolsVersion = 26.2;
+						TestTargetID = 9261A75D300CA65600B23EF8;
 					};
 				};
 			};
@@ -114,12 +166,28 @@
 			projectRoot = "";
 			targets = (
 				9261A75D300CA65600B23EF8 /* Nvmm */,
+				9261A7B0300CA65600B23EF8 /* NvmmTests */,
 			);
 		};
 /* End PBXProject section */
 
+/* Begin PBXTargetDependency section */
+		9261A7B7300CA65600B23EF8 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 9261A75D300CA65600B23EF8 /* Nvmm */;
+			targetProxy = 9261A7B6300CA65600B23EF8 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin PBXResourcesBuildPhase section */
 		9261A75C300CA65600B23EF8 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9261A7B5300CA65600B23EF8 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -151,6 +219,13 @@
 
 /* Begin PBXSourcesBuildPhase section */
 		9261A75A300CA65600B23EF8 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9261A7B3300CA65600B23EF8 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -350,6 +425,56 @@
 			};
 			name = Release;
 		};
+		9261A7B9300CA65600B23EF8 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = HFT3T55WND;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.7;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.mowglii.NvmmTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Nvmm.app/Contents/MacOS/Nvmm";
+			};
+			name = Debug;
+		};
+		9261A7BA300CA65600B23EF8 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = HFT3T55WND;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.7;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.mowglii.NvmmTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Nvmm.app/Contents/MacOS/Nvmm";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -367,6 +492,15 @@
 			buildConfigurations = (
 				9261A76B300CA65800B23EF8 /* Debug */,
 				9261A76C300CA65800B23EF8 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		9261A7B8300CA65600B23EF8 /* Build configuration list for PBXNativeTarget "NvmmTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9261A7B9300CA65600B23EF8 /* Debug */,
+				9261A7BA300CA65600B23EF8 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
