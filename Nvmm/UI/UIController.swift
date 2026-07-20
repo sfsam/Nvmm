@@ -53,6 +53,8 @@ nonisolated final class UIController {
     private(set) var modified = false
     private(set) var title = "NVIM"
     private(set) var guifont = ""
+    // Set once Neovim fires `VimEnter`; stamped onto each flushed snapshot.
+    private(set) var vimentered = false
     private(set) var uiOptions = UIOptions()
     private(set) var viewport = ViewportState()
     private(set) var handoff: UIHandoff?
@@ -529,6 +531,7 @@ nonisolated final class UIController {
         writing.ambiguousWidthDouble = ambiguousWidthDouble
         writing.emojiWidthDouble = emojiWidthDouble
         writing.guifont = guifont
+        writing.startupComplete = vimentered
         globalGrid = writing
         return globalGrid
     }
@@ -592,6 +595,10 @@ nonisolated final class UIController {
         }
         return percent
     }
+
+    /// Records that Neovim has fired `VimEnter`, so subsequent snapshots are
+    /// marked startup-complete.
+    func vimenter() { vimentered = true }
 
     /// Updates the current buffer's modified state. Returns true when the value
     /// changed, so the caller can publish only on a transition.

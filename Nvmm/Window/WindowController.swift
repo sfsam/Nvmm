@@ -44,6 +44,15 @@ final class WindowController: NSWindowController, NSWindowDelegate {
     private var hasShownWindow = false
     private var shouldCenter = false
 
+    // The first paint is held until Neovim signals `VimEnter` (startup config,
+    // notably `guifont`, applied), so the window never appears at an interim
+    // font. `startupRelaxed` drops that requirement after a short fallback so a
+    // config that never reaches `VimEnter` still shows; `hasReceivedGrid` gates
+    // the relaxed show on there being something to draw.
+    private var startupRelaxed = false
+    private var hasReceivedGrid = false
+    private var startupTimeoutTask: Task<Void, Never>?
+
     // The title Neovim last set. Shown while the window is not being resized; a
     // live resize replaces it with the grid size and restores it when it ends.
     private var currentTitle = "NVIM"
@@ -322,16 +331,32 @@ final class WindowController: NSWindowController, NSWindowDelegate {
 
             guard let self else { return }
             self.isReady = true
+            self.startStartupTimeout()
 
             for await grid in process.grids {
                 self.applyGuifont(grid.guifont)
                 self.applyBackground(grid.defaultBackground)
                 self.gridView.setGrid(grid)
-                if !self.hasShownWindow { self.showInitialWindow() }
+                self.hasReceivedGrid = true
+                if !self.hasShownWindow, grid.startupComplete || self.startupRelaxed {
+                    self.showInitialWindow()
+                }
                 self.currentTitle = grid.title
                 if self.liveResizeDepth == 0 { self.window?.title = self.currentTitle }
                 self.reconcileWindowSize(to: grid.size)
             }
+        }
+    }
+
+    /// Drops the `VimEnter` requirement after a short delay, so a session that
+    /// never reaches `VimEnter` still shows its window; if a grid has already
+    /// arrived it is shown at once, otherwise the next grid shows it.
+    private func startStartupTimeout() {
+        startupTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard let self, !self.hasShownWindow else { return }
+            self.startupRelaxed = true
+            if self.hasReceivedGrid { self.showInitialWindow() }
         }
     }
 
@@ -479,5 +504,6 @@ final class WindowController: NSWindowController, NSWindowDelegate {
         renderTask?.cancel()
         inputTask?.cancel()
         modifiedTask?.cancel()
+        startupTimeoutTask?.cancel()
     }
 }

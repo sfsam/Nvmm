@@ -360,6 +360,22 @@ final class UIControllerTests: XCTestCase {
         XCTAssertFalse(controller.setModified(false))
     }
 
+    // MARK: Startup
+
+    func testFlushMarksStartupCompleteOnlyAfterVimenter() {
+        let controller = UIController()
+        let flush: MPValue = ["flush", []]
+
+        let before = controller.redraw([flush])
+        XCTAssertEqual(before.count, 1)
+        XCTAssertFalse(before[0].startupComplete)
+
+        controller.vimenter()
+        let after = controller.redraw([flush])
+        XCTAssertEqual(after.count, 1)
+        XCTAssertTrue(after[0].startupComplete)
+    }
+
     // MARK: Handoff
 
     func testRestartEventRecordsServerHandoff() {

@@ -474,6 +474,7 @@ actor NeovimProcess {
                 for grid in ui.redraw(arguments) { gridsContinuation.yield(grid) }
                 return
             case "vimenter":
+                ui.vimenter()
                 return
             case "progress":
                 if arguments.count == 1, case .map(let event) = arguments[0] {
@@ -587,6 +588,13 @@ extension NeovimProcess {
         guard case .response(let client) = clientOutcome, !client.isError else {
             return attachFailure(clientOutcome, "Client registration")
         }
+
+        // Register the VimEnter signal before attaching, so it is in place
+        // before Neovim finishes startup. It lets the window hold its first
+        // paint until startup config (notably `guifont`) has been applied.
+        // Channel 0 broadcasts, reaching this UI without hard-coding a channel.
+        notify("nvim_command",
+               [.string("autocmd VimEnter * silent! call rpcnotify(0, 'vimenter')")])
 
         let attachOptions = supportedOptions(requested: options,
                                              supported: capabilities.uiOptions)
