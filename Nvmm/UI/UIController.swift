@@ -524,6 +524,8 @@ nonisolated final class UIController {
 
     private func flush() -> Grid {
         writing.drawTick += 1
+        writing.title = title
+        writing.defaultBackground = defaultBackgroundColor
         globalGrid = writing
         return globalGrid
     }

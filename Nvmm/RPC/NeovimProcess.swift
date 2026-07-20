@@ -265,6 +265,27 @@ actor NeovimProcess {
         send { $0.encodeNotification(method: method, arguments: arguments) }
     }
 
+    /// Applies one input command as its `nvim_*` notification. Callers funnel
+    /// key, mouse, resize, and focus events through a single ordered channel and
+    /// `perform` here so they reach Neovim in the order the user produced them.
+    func perform(_ command: NvimCommand) {
+        switch command {
+        case .input(let text):
+            notify("nvim_input", [.string(text)])
+        case .mouse(let button, let action, let modifiers, let row, let col):
+            notify("nvim_input_mouse",
+                   [.string(button), .string(action), .string(modifiers),
+                    0, .int(MPInteger(row)), .int(MPInteger(col))])
+        case .resize(let width, let height):
+            notify("nvim_ui_try_resize",
+                   [.int(MPInteger(width)), .int(MPInteger(height))])
+        case .focus(let focused):
+            notify("nvim_ui_set_focus", [.bool(focused)])
+        case .paste(let data):
+            notify("nvim_paste", [.string(data), false, -1])
+        }
+    }
+
     private func startSync(method: String, arguments: [MPValue],
                            timeout: Duration, waiter: SyncWaiter) {
         guard state == .connected else {

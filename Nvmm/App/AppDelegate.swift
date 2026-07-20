@@ -18,7 +18,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         logBundledNeovim()
 
         let controller = WindowController(renderManager: renderManager)
-        controller.showWindow(nil)
+        // The controller shows its window once Neovim's first grid is ready,
+        // so the first paint is the intro screen rather than a blank frame.
         controller.start()
         windowController = controller
     }

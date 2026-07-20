@@ -208,6 +208,12 @@ nonisolated struct Grid: Sendable {
     /// Monotonic counter bumped on each flush; 0 means never drawn.
     var drawTick: UInt64 = 0
     var cursorHidden = false
+    /// The window title Neovim last set (`set_title`), carried on the snapshot
+    /// so the window can restore it after showing the grid size during resize.
+    var title = "NVIM"
+    /// Neovim's default background color, carried on the snapshot so the window
+    /// can tint its margins and pick a matching title-bar appearance.
+    var defaultBackground = RGBColor()
 
     init() {
         // Start in normal mode so the first `mode_info_set` can match by short

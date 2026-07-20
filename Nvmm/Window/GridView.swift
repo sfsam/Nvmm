@@ -13,10 +13,17 @@
 //
 
 import AppKit
+import Carbon.HIToolbox
 import CoreText
 import Metal
 import QuartzCore
 import simd
+
+/// Rounds `value` up to the nearest multiple of `multiple`.
+private func roundUp(_ value: CGFloat, toMultipleOf multiple: Int) -> CGFloat {
+    let mult = CGFloat(multiple)
+    return (value / mult).rounded(.up) * mult
+}
 
 /// The procedural cell-graphic kinds understood by the cell-graphic shader.
 private enum CellGraphicKind: UInt32 {
@@ -75,6 +82,40 @@ final class GridView: NSView, CALayerDelegate {
 
     private enum BlinkPhase { case off, on }
 
+    // MARK: Input
+
+    /// Sends a key-notation payload to Neovim (`nvim_input`).
+    var sendInput: ((String) -> Void)?
+
+    /// Sends a mouse event to Neovim (`nvim_input_mouse`).
+    var sendMouse: ((_ button: String, _ action: String, _ modifiers: String,
+                     _ row: Int, _ col: Int) -> Void)?
+
+    /// Per-button drag state. A `nil` origin means the press began outside the
+    /// grid, so its drag and release are ignored. `location` and `modifiers`
+    /// hold the most recent drag so the drag timer can resend it.
+    private struct MousePress {
+        var origin: GridPoint?
+        var isDragging = false
+        var location = GridPoint(row: 0, column: 0)
+        var modifiers = ""
+    }
+    private var mouseState: [MousePress] = [MousePress(), MousePress(), MousePress()]
+
+    /// Resends the active drags at a fixed rate. A drag held past the grid edge
+    /// keeps scrolling Neovim even while the pointer is stationary, so the drag
+    /// must be resent when no mouse-moved events are arriving. Runs only while
+    /// at least one button is dragging.
+    private var dragTimer: DispatchSourceTimer?
+    private var draggingButtons = 0
+    private static let dragResendHz = 120
+
+    /// Accumulated fractional trackpad scroll, in backing pixels, spent one
+    /// whole cell at a time.
+    private var scrollingDelta = SIMD2<Double>(0, 0)
+
+    private var trackingArea: NSTrackingArea?
+
     // MARK: - Setup
 
     override init(frame frameRect: NSRect) {
@@ -120,11 +161,22 @@ final class GridView: NSView, CALayerDelegate {
     func setFont(_ font: FontFamily) {
         fontFamily = font
 
-        let leading = floor(font.leading)
-        let descent = floor(font.descent)
-        let ascent = floor(font.ascent)
-        let cellHeight = leading + descent + ascent
-        let cellWidth = floor(font.width)
+        let leading = font.leading.rounded(.down)
+        let descent = font.descent.rounded(.down)
+        let ascent = font.ascent.rounded(.down)
+        let width = font.width.rounded(.down)
+
+        // Cell metrics are in backing pixels. Quantize the cell to a whole
+        // number of points so its point size is not fractional: otherwise a
+        // grid with an odd cell count needs a fractional-point window size,
+        // which AppKit rounds to a whole point, leaving the drawable a pixel
+        // larger than the grid it holds — a thin strip of the clear color along
+        // an edge. Rounding the cell up to a whole point keeps every window
+        // size integral and the drawable exactly grid-sized. The extra pixels
+        // fall below the descent as padding.
+        let scale = max(1, Int(font.scaleFactor.rounded()))
+        let cellHeight = roundUp(leading + descent + ascent, toMultipleOf: scale)
+        let cellWidth = roundUp(width, toMultipleOf: scale)
 
         cellSizePixels = SIMD2<Float>(Float(cellWidth), Float(cellHeight))
         backingCellSize = convertSize(from: NSSize(width: cellWidth,
@@ -562,5 +614,373 @@ final class GridView: NSView, CALayerDelegate {
 
     private func convertSize(from backing: NSSize) -> NSSize {
         convertFromBacking(backing)
+    }
+
+    // MARK: - Geometry
+
+    /// The grid cell under a window-space point. May fall outside the grid.
+    private func cellLocation(_ windowPoint: NSPoint) -> GridPoint {
+        let viewPoint = convert(windowPoint, from: nil)
+        return GridPoint(row: Int(floor(viewPoint.y / backingCellSize.height)),
+                         column: Int(floor(viewPoint.x / backingCellSize.width)))
+    }
+
+    private func pointInGrid(_ point: GridPoint, _ size: GridSize) -> Bool {
+        point.row >= 0 && point.row < size.height &&
+            point.column >= 0 && point.column < size.width
+    }
+
+    /// Clamps a point into the grid, or nil if the grid is empty.
+    private func clampToGrid(_ point: GridPoint, _ size: GridSize) -> GridPoint? {
+        guard size.width > 0, size.height > 0 else { return nil }
+        return GridPoint(row: min(max(point.row, 0), size.height - 1),
+                         column: min(max(point.column, 0), size.width - 1))
+    }
+
+    // MARK: - First responder
+
+    override var acceptsFirstResponder: Bool { true }
+
+    // MARK: - Key input
+
+    override func keyDown(with event: NSEvent) {
+        handleKeyDown(event, keyEvent: makeKeyboardEvent(event))
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let keyEvent = makeKeyboardEvent(event)
+        let menuOwnsEvent = Self.menuContainsKeyEquivalent(NSApp.mainMenu, event)
+        let action = arbitrateKeyEquivalent(
+            isKeyDown: event.type == .keyDown,
+            hasEnabledMenuEquivalent: menuOwnsEvent, event: keyEvent)
+        if action == .forwardToKeyDown {
+            handleKeyDown(event, keyEvent: keyEvent)
+            return true
+        }
+        return false
+    }
+
+    private func handleKeyDown(_ event: NSEvent, keyEvent: KeyboardEvent) {
+        NSCursor.setHiddenUntilMouseMoves(true)
+        let input = routeKeyEvent(keyEvent)
+        if !input.isEmpty { sendInput?(input) }
+    }
+
+    /// Builds a normalized keyboard event from an `NSEvent`.
+    private func makeKeyboardEvent(_ event: NSEvent) -> KeyboardEvent {
+        let flags = event.modifierFlags
+        let resolved = event.charactersIgnoringModifiers ?? ""
+
+        // Shift folded into a symbol (for example `^` from Shift-6) carries no
+        // letter, so re-encoding S- would change the key. Detect that here.
+        var shiftIsEmbodied = false
+        if flags.contains(.shift), !resolved.isEmpty {
+            shiftIsEmbodied = resolved.rangeOfCharacter(from: .letters) == nil
+        }
+
+        let needsUnmodified =
+            flags.contains(.command) || flags.contains(.control)
+
+        var result = KeyboardEvent(
+            keyCode: event.keyCode,
+            characters: event.characters ?? "",
+            keyCharacters: needsUnmodified
+                ? Self.unmodifiedKeyCharacters(event.keyCode) : "",
+            resolvedKeyCharacters: resolved,
+            modifierKeys: KeyModifiers(
+                shift: flags.contains(.shift),
+                control: flags.contains(.control),
+                option: flags.contains(.option),
+                command: flags.contains(.command)),
+            named: Self.namedKey(event.keyCode),
+            physical: Self.physicalKey(event.keyCode),
+            capsLock: flags.contains(.capsLock),
+            shiftIsEmbodied: shiftIsEmbodied,
+            isRepeat: event.isARepeat)
+        setOptionSides(&result, rawFlags: UInt(flags.rawValue))
+        return result
+    }
+
+    /// The unshifted, layout-resolved characters for a key code, obtained from
+    /// a synthetic modifier-free event. Only the Command/Control routing path
+    /// needs it, so it is computed lazily.
+    private static func unmodifiedKeyCharacters(_ keyCode: UInt16) -> String {
+        guard let cgEvent = CGEvent(keyboardEventSource: nil,
+                                    virtualKey: keyCode, keyDown: true) else {
+            return ""
+        }
+        cgEvent.flags = []
+        guard let event = NSEvent(cgEvent: cgEvent) else { return "" }
+        return (event.charactersIgnoringModifiers ?? "").lowercased()
+    }
+
+    private static func namedKey(_ code: UInt16) -> NamedKey? {
+        switch Int(code) {
+        case kVK_Return:        return .carriageReturn
+        case kVK_Tab:           return .tab
+        case kVK_Space:         return .space
+        case kVK_Delete:        return .backspace
+        case kVK_ForwardDelete: return .deleteForward
+        case kVK_Escape:        return .escape
+        // macOS reports Insert-labelled external keys as kVK_Help too, so there
+        // is no distinct Insert mapping available here.
+        case kVK_Help:          return .help
+        case kVK_Home:          return .home
+        case kVK_End:           return .end
+        case kVK_PageUp:        return .pageUp
+        case kVK_PageDown:      return .pageDown
+        case kVK_LeftArrow:     return .left
+        case kVK_RightArrow:    return .right
+        case kVK_UpArrow:       return .up
+        case kVK_DownArrow:     return .down
+        case kVK_VolumeUp:      return .volumeUp
+        case kVK_VolumeDown:    return .volumeDown
+        case kVK_Mute:          return .mute
+        case kVK_F1:  return .f1;  case kVK_F2:  return .f2;  case kVK_F3:  return .f3
+        case kVK_F4:  return .f4;  case kVK_F5:  return .f5;  case kVK_F6:  return .f6
+        case kVK_F7:  return .f7;  case kVK_F8:  return .f8;  case kVK_F9:  return .f9
+        case kVK_F10: return .f10; case kVK_F11: return .f11; case kVK_F12: return .f12
+        case kVK_F13: return .f13; case kVK_F14: return .f14; case kVK_F15: return .f15
+        case kVK_F16: return .f16; case kVK_F17: return .f17; case kVK_F18: return .f18
+        case kVK_F19: return .f19; case kVK_F20: return .f20
+        default: return nil
+        }
+    }
+
+    private static func physicalKey(_ code: UInt16) -> PhysicalKey {
+        switch Int(code) {
+        case kVK_ANSI_2:      return .digit2
+        case kVK_ANSI_6:      return .digit6
+        case kVK_ANSI_Minus:  return .minus
+        case kVK_ANSI_Period: return .period
+        default:              return .other
+        }
+    }
+
+    /// Whether the main menu has an enabled item whose key equivalent matches
+    /// the event, so AppKit should own it rather than routing it to Neovim.
+    private static func menuContainsKeyEquivalent(_ menu: NSMenu?,
+                                                  _ event: NSEvent) -> Bool {
+        guard let menu else { return false }
+        let mask: NSEvent.ModifierFlags = [.shift, .control, .option, .command]
+        let eventFlags = event.modifierFlags.intersection(mask)
+        guard let characters = event.charactersIgnoringModifiers,
+              !characters.isEmpty else { return false }
+
+        for item in menu.items {
+            if let submenu = item.submenu,
+               menuContainsKeyEquivalent(submenu, event) {
+                return true
+            }
+            guard item.isEnabled, item.action != nil,
+                  !item.keyEquivalent.isEmpty else { continue }
+            if item.keyEquivalentModifierMask.intersection(mask) != eventFlags {
+                continue
+            }
+            if item.keyEquivalent.caseInsensitiveCompare(characters) == .orderedSame {
+                return true
+            }
+        }
+        return false
+    }
+
+    // MARK: - Mouse input
+
+    private static let mouseButtonNames = ["left", "right", "middle"]
+
+    /// Vim-notation modifier prefix for a mouse event, e.g. `S-C-`.
+    private func mouseModifiers(_ flags: NSEvent.ModifierFlags) -> String {
+        var result = ""
+        if flags.contains(.shift)   { result += "S-" }
+        if flags.contains(.command) { result += "D-" }
+        if flags.contains(.control) { result += "C-" }
+        if flags.contains(.option)  { result += "M-" }
+        return result
+    }
+
+    private func mousePress(_ event: NSEvent, button: Int) {
+        let location = cellLocation(event.locationInWindow)
+        guard let grid, pointInGrid(location, grid.size) else {
+            mouseState[button] = MousePress(origin: nil)
+            return
+        }
+        mouseState[button] = MousePress(origin: location)
+        sendMouse?(Self.mouseButtonNames[button], "press",
+                   mouseModifiers(event.modifierFlags),
+                   location.row, location.column)
+    }
+
+    private func mouseDrag(_ event: NSEvent, button: Int) {
+        guard mouseState[button].origin != nil else { return }
+        // Unclamped: a drag past an edge yields an out-of-grid cell, which
+        // Neovim reads as a request to scroll the window in that direction.
+        mouseState[button].location = cellLocation(event.locationInWindow)
+        mouseState[button].modifiers = mouseModifiers(event.modifierFlags)
+        if !mouseState[button].isDragging {
+            mouseState[button].isDragging = true
+            draggingButtons += 1
+            startDragTimer()
+        }
+        sendDrag(button: button)
+    }
+
+    private func mouseRelease(_ event: NSEvent, button: Int) {
+        guard mouseState[button].origin != nil else { return }
+        let wasDragging = mouseState[button].isDragging
+        mouseState[button] = MousePress(origin: nil)
+        if wasDragging {
+            draggingButtons -= 1
+            if draggingButtons == 0 { stopDragTimer() }
+        }
+        guard let grid,
+              let location = clampToGrid(cellLocation(event.locationInWindow),
+                                         grid.size) else { return }
+        sendMouse?(Self.mouseButtonNames[button], "release",
+                   mouseModifiers(event.modifierFlags),
+                   location.row, location.column)
+    }
+
+    /// Sends a button's most recent drag, used both by the live drag handler and
+    /// the resend timer.
+    private func sendDrag(button: Int) {
+        let state = mouseState[button]
+        sendMouse?(Self.mouseButtonNames[button], "drag", state.modifiers,
+                   state.location.row, state.location.column)
+    }
+
+    /// Starts the drag-resend timer if it is not already running.
+    private func startDragTimer() {
+        guard dragTimer == nil else { return }
+        let interval = DispatchTimeInterval.nanoseconds(1_000_000_000 / Self.dragResendHz)
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + interval, repeating: interval,
+                       leeway: .milliseconds(1))
+        timer.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                for button in self.mouseState.indices
+                where self.mouseState[button].isDragging {
+                    self.sendDrag(button: button)
+                }
+            }
+        }
+        timer.resume()
+        dragTimer = timer
+    }
+
+    private func stopDragTimer() {
+        dragTimer?.cancel()
+        dragTimer = nil
+    }
+
+    override func mouseDown(with event: NSEvent) { mousePress(event, button: 0) }
+    override func mouseDragged(with event: NSEvent) { mouseDrag(event, button: 0) }
+    override func mouseUp(with event: NSEvent) { mouseRelease(event, button: 0) }
+
+    override func rightMouseDown(with event: NSEvent) { mousePress(event, button: 1) }
+    override func rightMouseDragged(with event: NSEvent) { mouseDrag(event, button: 1) }
+    override func rightMouseUp(with event: NSEvent) { mouseRelease(event, button: 1) }
+
+    override func otherMouseDown(with event: NSEvent) { mousePress(event, button: 2) }
+    override func otherMouseDragged(with event: NSEvent) { mouseDrag(event, button: 2) }
+    override func otherMouseUp(with event: NSEvent) { mouseRelease(event, button: 2) }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let grid else { return }
+        let location = cellLocation(event.locationInWindow)
+        guard pointInGrid(location, grid.size) else { return }
+
+        var flags = event.modifierFlags
+        var deltaX = event.scrollingDeltaX
+        var deltaY = event.scrollingDeltaY
+
+        if event.hasPreciseScrollingDeltas {
+            let cell = backingCellSize
+            if event.phase == .began { scrollingDelta = SIMD2<Double>(0, 0) }
+
+            scrollingDelta.y += deltaY
+            deltaY = floor(scrollingDelta.y / cell.height)
+            scrollingDelta.y -= deltaY * cell.height
+
+            scrollingDelta.x += deltaX
+            deltaX = floor(scrollingDelta.x / cell.width)
+            scrollingDelta.x -= deltaX * cell.width
+        } else {
+            // A real scroll wheel: Shift flips the axis, so ignore it, and clamp
+            // each notch to a single line.
+            flags.remove(.shift)
+            deltaY = deltaY > 0 ? 1 : (deltaY < 0 ? -1 : 0)
+            deltaX = deltaX > 0 ? 1 : (deltaX < 0 ? -1 : 0)
+        }
+
+        let modifiers = mouseModifiers(flags)
+        emitScroll(count: Int(abs(deltaY)),
+                   direction: deltaY > 0 ? "up" : "down",
+                   modifiers: modifiers, location: location, active: deltaY != 0)
+        emitScroll(count: Int(abs(deltaX)),
+                   direction: deltaX > 0 ? "left" : "right",
+                   modifiers: modifiers, location: location, active: deltaX != 0)
+    }
+
+    private func emitScroll(count: Int, direction: String, modifiers: String,
+                            location: GridPoint, active: Bool) {
+        guard active else { return }
+        for _ in 0..<count {
+            sendMouse?("wheel", direction, modifiers, location.row, location.column)
+        }
+    }
+
+    // MARK: - Mouse cursor
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow,
+                      .inVisibleRect],
+            owner: self)
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        updateMouseCursor(event.locationInWindow)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        NSCursor.arrow.set()
+    }
+
+    /// Sets a context-sensitive mouse cursor: a resize cursor over a window
+    /// separator or status line, an arrow over the tab line, and an I-beam
+    /// where the editor accepts text input.
+    private func updateMouseCursor(_ windowPoint: NSPoint) {
+        guard let grid else { return }
+        let size = grid.size
+        let cell = cellLocation(windowPoint)
+        guard pointInGrid(cell, size) else {
+            NSCursor.arrow.set()
+            return
+        }
+
+        let group = grid.pointerStyle(cell.row, cell.column)
+        // The last row is always the command line — never show resize there.
+        let isResizable = cell.row < size.height - 1
+        let isTabline = cell.row == 0 && group.contains(.tabline)
+        let isSeparator = grid.isVerticalSeparatorChar(cell.row, cell.column) &&
+            group.contains(.separator)
+
+        if isTabline {
+            NSCursor.arrow.set()
+        } else if isResizable && isSeparator {
+            NSCursor.resizeLeftRight.set()
+        } else if isResizable && group.contains(.statusLine) {
+            NSCursor.resizeUpDown.set()
+        } else if grid.acceptsTextInput {
+            NSCursor.iBeam.set()
+        } else {
+            NSCursor.arrow.set()
+        }
     }
 }

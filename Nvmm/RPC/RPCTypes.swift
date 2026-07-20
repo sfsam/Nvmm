@@ -11,6 +11,24 @@
 
 import Foundation
 
+/// A user-input command applied to Neovim as a fire-and-forget notification.
+/// Views produce these on the main actor and hand them to the process actor
+/// through one ordered channel, so key, mouse, resize, and focus events reach
+/// Neovim in the order the user produced them. See `NeovimProcess.perform`.
+nonisolated enum NvimCommand: Sendable {
+    /// A key-notation payload for `nvim_input`.
+    case input(String)
+    /// A mouse event for `nvim_input_mouse`: button and action names,
+    /// Vim-notation modifiers, and the target cell.
+    case mouse(button: String, action: String, modifiers: String, row: Int, col: Int)
+    /// A grid resize request for `nvim_ui_try_resize`, in cells.
+    case resize(width: Int, height: Int)
+    /// A focus change for `nvim_ui_set_focus`.
+    case focus(Bool)
+    /// Text pasted at the cursor via `nvim_paste`.
+    case paste(String)
+}
+
 /// A completed RPC response. `error` is `.null` on success; otherwise it carries
 /// Neovim's error value and `result` is meaningless.
 nonisolated struct RPCResponse: Sendable, Equatable {

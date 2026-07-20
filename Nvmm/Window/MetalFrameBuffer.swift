@@ -35,8 +35,9 @@ final class MetalFrameBuffer: @unchecked Sendable {
         inUse.exchange(true, ordering: .acquiring) == false
     }
 
-    /// Releases the buffer. Safe to call from any thread.
-    func unlock() {
+    /// Releases the buffer. Safe to call from any thread — the command buffer's
+    /// completion handler unlocks off the main actor, so this must be nonisolated.
+    nonisolated func unlock() {
         inUse.store(false, ordering: .releasing)
     }
 
