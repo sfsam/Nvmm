@@ -348,6 +348,10 @@ actor NeovimProcess {
             notify("nvim_ui_set_focus", [.bool(focused)])
         case .paste(let data):
             notify("nvim_paste", [.string(data), false, -1])
+        case .errorWriteln(let text):
+            notify("nvim_echo",
+                   [.array([.array([.string(text)])]), true,
+                    .map([(.string("err"), true)])])
         }
     }
 

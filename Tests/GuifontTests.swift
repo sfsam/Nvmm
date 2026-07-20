@@ -1,0 +1,78 @@
+//
+//  NvmmTests
+//  GuifontTests.swift
+//
+//  Coverage for `parseGuifont`: single and multiple entries, the `:h<size>`
+//  suffix, the default size fallback, backslash-escaped commas, and space
+//  handling around separators. Pure value logic, so it is exempt from the
+//  RenderTests teardown crash.
+//
+
+import CoreGraphics
+import XCTest
+@testable import Nvmm
+
+final class GuifontTests: XCTestCase {
+
+    func testEmptyStringYieldsNoEntries() {
+        XCTAssertEqual(parseGuifont("", defaultSize: 15), [])
+    }
+
+    func testNameWithoutSizeUsesDefault() {
+        XCTAssertEqual(parseGuifont("Menlo", defaultSize: 15),
+                       [GuifontEntry(name: "Menlo", size: 15)])
+    }
+
+    func testHeightSuffixSetsSize() {
+        XCTAssertEqual(parseGuifont("Menlo:h13", defaultSize: 15),
+                       [GuifontEntry(name: "Menlo", size: 13)])
+    }
+
+    func testMultiDigitSize() {
+        XCTAssertEqual(parseGuifont("Menlo:h120", defaultSize: 15),
+                       [GuifontEntry(name: "Menlo", size: 120)])
+    }
+
+    func testSpaceInName() {
+        XCTAssertEqual(parseGuifont("Fira Code:h14", defaultSize: 15),
+                       [GuifontEntry(name: "Fira Code", size: 14)])
+    }
+
+    func testMultipleEntriesInOrder() {
+        XCTAssertEqual(
+            parseGuifont("Menlo:h13,Fira Code:h14", defaultSize: 15),
+            [GuifontEntry(name: "Menlo", size: 13),
+             GuifontEntry(name: "Fira Code", size: 14)])
+    }
+
+    func testSpacesAfterSeparatorAreSkipped() {
+        XCTAssertEqual(
+            parseGuifont("Menlo:h13,  Fira Code", defaultSize: 15),
+            [GuifontEntry(name: "Menlo", size: 13),
+             GuifontEntry(name: "Fira Code", size: 15)])
+    }
+
+    func testEscapedCommaStaysInName() {
+        // A backslash-escaped comma does not split the list; the whole name,
+        // backslash retained, is one entry.
+        XCTAssertEqual(
+            parseGuifont("Weird\\,Font:h12", defaultSize: 15),
+            [GuifontEntry(name: "Weird\\,Font", size: 12)])
+    }
+
+    func testTrailingCommaDoesNotAddEmptyEntry() {
+        XCTAssertEqual(parseGuifont("Menlo,", defaultSize: 15),
+                       [GuifontEntry(name: "Menlo", size: 15)])
+    }
+
+    func testColonWithoutHeightIsPartOfName() {
+        // Only a `:h` suffix is a size; a bare colon-digit stays in the name.
+        XCTAssertEqual(parseGuifont("Menlo:13", defaultSize: 15),
+                       [GuifontEntry(name: "Menlo:13", size: 15)])
+    }
+
+    func testAllDigitsNameKeepsDefaultSize() {
+        XCTAssertEqual(parseGuifont("123", defaultSize: 15),
+                       [GuifontEntry(name: "123", size: 15)])
+    }
+}

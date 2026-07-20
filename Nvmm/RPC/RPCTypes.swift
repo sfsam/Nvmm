@@ -27,6 +27,8 @@ nonisolated enum NvimCommand: Sendable {
     case focus(Bool)
     /// Text pasted at the cursor via `nvim_paste`.
     case paste(String)
+    /// An error message written to Neovim via `nvim_echo` (`err: true`).
+    case errorWriteln(String)
 }
 
 /// A completed RPC response. `error` is `.null` on success; otherwise it carries

@@ -18,6 +18,7 @@
 //
 
 import Cocoa
+import CoreText
 
 final class WindowController: NSWindowController, NSWindowDelegate {
     private let gridView = GridView(frame: .zero)
@@ -70,6 +71,14 @@ final class WindowController: NSWindowController, NSWindowDelegate {
     // The grid size the window opens at.
     private let startColumns = 80
     private let startRows = 24
+
+    // The unscaled point size used for the default font, and for any `guifont`
+    // entry that omits a `:h<size>` suffix.
+    private let defaultFontSize: CGFloat = 15
+
+    // The `guifont` option last applied, so the font is only rebuilt on a
+    // change (an empty string is the default: the monospaced system font).
+    private var currentGuifont = ""
 
     // Constraints kept so later work can adjust them without rebuilding the
     // layout: the min-size pair on a font change, the trailing inset when a
@@ -124,7 +133,7 @@ final class WindowController: NSWindowController, NSWindowDelegate {
 
         let descriptor = FontManager.defaultDescriptor()
         let font = renderManager.fontManager.family(
-            descriptor: descriptor, size: 15,
+            descriptor: descriptor, size: defaultFontSize,
             scaleFactor: screen.backingScaleFactor)
         gridView.setFont(font)
 
@@ -306,6 +315,7 @@ final class WindowController: NSWindowController, NSWindowDelegate {
             self.isReady = true
 
             for await grid in process.grids {
+                self.applyGuifont(grid.guifont)
                 self.applyBackground(grid.defaultBackground)
                 self.gridView.setGrid(grid)
                 if !self.hasShownWindow { self.showInitialWindow() }
@@ -342,6 +352,51 @@ final class WindowController: NSWindowController, NSWindowDelegate {
         let lightness = (0.299 * r * r + 0.587 * g * g + 0.114 * b * b).squareRoot()
         let appearance: NSAppearance.Name = lightness > 127.5 ? .aqua : .darkAqua
         window?.appearance = NSAppearance(named: appearance)
+    }
+
+    /// Rebuilds the grid view's font from a `guifont` option string. Only acts
+    /// on a change; the empty default keeps the monospaced system font set at
+    /// launch, so no work is done until the user sets `guifont`.
+    private func applyGuifont(_ guifont: String) {
+        guard guifont != currentGuifont else { return }
+        currentGuifont = guifont
+        guard let screen = window?.screen ?? NSScreen.main else { return }
+
+        let (descriptor, size) = resolveFont(guifont)
+        let font = renderManager.fontManager.family(
+            descriptor: descriptor, size: size,
+            scaleFactor: screen.backingScaleFactor)
+        setFont(font)
+    }
+
+    /// Resolves a `guifont` list to a descriptor and size: the first installed
+    /// face wins. When the list is non-empty but none of its fonts exist, the
+    /// error is reported to Neovim and the default monospaced font is used at
+    /// the default size. An empty list quietly uses the default.
+    private func resolveFont(_ guifont: String) -> (CTFontDescriptor, CGFloat) {
+        let fonts = parseGuifont(guifont, defaultSize: defaultFontSize)
+        for entry in fonts {
+            if let descriptor = FontManager.makeDescriptor(entry.name) {
+                return (descriptor, entry.size)
+            }
+        }
+        if !fonts.isEmpty {
+            enqueue(.errorWriteln("Error: Invalid font(s): guifont=\(guifont)"))
+        }
+        return (FontManager.defaultDescriptor(), defaultFontSize)
+    }
+
+    /// Applies a new font: the grid keeps its size in cells while the window's
+    /// pixel size, resize increment, and minimum-size constraints are recomputed
+    /// from the new cell size.
+    private func setFont(_ font: FontFamily) {
+        gridView.setFont(font)
+        let cell = gridView.cellSize
+        window?.resizeIncrements = cell
+        gridMinWidthConstraint?.constant = cell.width * CGFloat(minGridColumns)
+        gridMinHeightConstraint?.constant = cell.height * CGFloat(minGridRows)
+        resizeWindow(in: window?.screen)
+        saveFrame()
     }
 
     // MARK: - Window delegate

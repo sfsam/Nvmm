@@ -218,6 +218,9 @@ nonisolated struct Grid: Sendable {
     /// view's composition width policy matches Neovim without a live query.
     var ambiguousWidthDouble = false
     var emojiWidthDouble = true
+    /// The `guifont` option string (`option_set`), carried on the snapshot so
+    /// the window can rebuild its font without a live query.
+    var guifont = ""
 
     init() {
         // Start in normal mode so the first `mode_info_set` can match by short

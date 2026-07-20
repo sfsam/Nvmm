@@ -528,6 +528,7 @@ nonisolated final class UIController {
         writing.defaultBackground = defaultBackgroundColor
         writing.ambiguousWidthDouble = ambiguousWidthDouble
         writing.emojiWidthDouble = emojiWidthDouble
+        writing.guifont = guifont
         globalGrid = writing
         return globalGrid
     }
