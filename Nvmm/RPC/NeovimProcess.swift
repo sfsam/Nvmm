@@ -181,6 +181,11 @@ actor NeovimProcess {
     nonisolated let grids: AsyncStream<Grid>
     private let gridsContinuation: AsyncStream<Grid>.Continuation
 
+    /// The current buffer's `modified` state, published on each transition so
+    /// the window can show a document-edited dot. Finishes on disconnect.
+    nonisolated let modifiedStates: AsyncStream<Bool>
+    private let modifiedStatesContinuation: AsyncStream<Bool>.Continuation
+
     init() {
         let inboundPair = AsyncStream.makeStream(of: Inbound.self)
         inbound = inboundPair.stream
@@ -193,6 +198,10 @@ actor NeovimProcess {
         let gridsPair = AsyncStream.makeStream(of: Grid.self)
         grids = gridsPair.stream
         gridsContinuation = gridsPair.continuation
+
+        let modifiedPair = AsyncStream.makeStream(of: Bool.self)
+        modifiedStates = modifiedPair.stream
+        modifiedStatesContinuation = modifiedPair.continuation
     }
 
     // MARK: Connecting
@@ -472,8 +481,9 @@ actor NeovimProcess {
                 }
                 return
             case "modified":
-                if arguments.count == 1, let value = arguments[0].boolValue {
-                    ui.setModified(value)
+                if arguments.count == 1, let value = arguments[0].boolValue,
+                   ui.setModified(value) {
+                    modifiedStatesContinuation.yield(value)
                 }
                 return
             default:
@@ -507,6 +517,7 @@ actor NeovimProcess {
 
         notificationsContinuation.finish()
         gridsContinuation.finish()
+        modifiedStatesContinuation.finish()
         inboundContinuation.finish()
         io = nil
     }
@@ -586,9 +597,33 @@ extension NeovimProcess {
             return attachFailure(attachOutcome, "UI attachment")
         }
 
+        installModifiedAutocmd()
+
         var result = validation
         result.status = .success
         return result
+    }
+
+    /// Installs the autocmd group that reports the current buffer's `modified`
+    /// state back over RPC (consumed on `modifiedStates`), for the window's
+    /// document-edited dot. `BufModifiedSet` fires on the flag's transitions;
+    /// `BufEnter`/`WinEnter` cover the buffer changing without the flag itself
+    /// changing; `OptionSet pattern=modified` covers `:set (no)modified`, which
+    /// `BufModifiedSet` does not fire for. The trailing `notify()` seeds the
+    /// initial state. Fire-and-forget, matching the post-attach convention.
+    private func installModifiedAutocmd() {
+        let lua = """
+            local group = vim.api.nvim_create_augroup('NvmmModified', {clear=true})
+            local function notify()
+              vim.rpcnotify(0, 'modified', vim.bo.modified)
+            end
+            vim.api.nvim_create_autocmd({'BufModifiedSet', 'BufEnter', 'WinEnter'},
+              {group=group, callback=notify})
+            vim.api.nvim_create_autocmd('OptionSet',
+              {group=group, pattern='modified', callback=notify})
+            notify()
+            """
+        notify("nvim_exec_lua", [.string(lua), .array([])])
     }
 
     /// Issues a request and awaits its response or the shared deadline,

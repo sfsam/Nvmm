@@ -593,8 +593,14 @@ nonisolated final class UIController {
         return percent
     }
 
-    /// Updates the current buffer's modified state.
-    func setModified(_ value: Bool) { modified = value }
+    /// Updates the current buffer's modified state. Returns true when the value
+    /// changed, so the caller can publish only on a transition.
+    @discardableResult
+    func setModified(_ value: Bool) -> Bool {
+        guard value != modified else { return false }
+        modified = value
+        return true
+    }
 }
 
 /// Extracts a signed `Int` from a MessagePack integer, or nil for non-integers.

@@ -27,6 +27,7 @@ final class WindowController: NSWindowController, NSWindowDelegate {
 
     private var renderTask: Task<Void, Never>?
     private var inputTask: Task<Void, Never>?
+    private var modifiedTask: Task<Void, Never>?
 
     // The ordered channel from main-actor input handlers to the process actor.
     private let commands: AsyncStream<NvimCommand>
@@ -293,6 +294,14 @@ final class WindowController: NSWindowController, NSWindowDelegate {
             }
         }
 
+        // Mirror the current buffer's modified state into the window's
+        // document-edited dot as Neovim reports transitions.
+        modifiedTask = Task { [weak self] in
+            for await modified in process.modifiedStates {
+                self?.window?.isDocumentEdited = modified
+            }
+        }
+
         renderTask = Task { [weak self] in
             do {
                 try await process.spawn(path: launch.path, argv: launch.argv)
@@ -469,5 +478,6 @@ final class WindowController: NSWindowController, NSWindowDelegate {
         commandsContinuation.finish()
         renderTask?.cancel()
         inputTask?.cancel()
+        modifiedTask?.cancel()
     }
 }

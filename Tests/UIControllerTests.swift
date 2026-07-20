@@ -345,6 +345,21 @@ final class UIControllerTests: XCTestCase {
         }
     }
 
+    // MARK: Modified
+
+    func testSetModifiedReportsOnlyTransitions() {
+        let controller = UIController()
+        XCTAssertFalse(controller.modified)
+
+        XCTAssertTrue(controller.setModified(true))
+        XCTAssertTrue(controller.modified)
+        XCTAssertFalse(controller.setModified(true))
+
+        XCTAssertTrue(controller.setModified(false))
+        XCTAssertFalse(controller.modified)
+        XCTAssertFalse(controller.setModified(false))
+    }
+
     // MARK: Handoff
 
     func testRestartEventRecordsServerHandoff() {
@@ -392,6 +407,49 @@ final class UIControllerTests: XCTestCase {
             group.cancelAll()
             return result
         }
+    }
+
+    /// Awaits the first `modifiedStates` value matching `predicate`, or nil on
+    /// timeout.
+    private func awaitModified(_ process: NeovimProcess, timeout: Duration,
+                              where predicate: @escaping @Sendable (Bool) -> Bool) async -> Bool? {
+        await withTaskGroup(of: Bool?.self) { group in
+            group.addTask {
+                for await value in process.modifiedStates where predicate(value) {
+                    return value
+                }
+                return nil
+            }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                return nil
+            }
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result
+        }
+    }
+
+    func testModifiedStatePublishedWhenBufferChanges() async throws {
+        guard let nvim = await MainActor.run(body: { NeovimBundle.executableURL }) else {
+            throw XCTSkip("bundled nvim executable not available")
+        }
+        let process = NeovimProcess()
+        try await process.spawn(path: nvim.path, argv: [nvim.path, "--clean", "--embed"])
+
+        var options = UIOptions()
+        options.extLinegrid = true
+        let result = await process.uiAttach(width: 80, height: 24, options: options)
+        guard result.status == .success else {
+            await process.disconnect()
+            return XCTFail("attach failed: \(result.status) \(result.message)")
+        }
+
+        _ = try await process.request("nvim_input", [.string("ihello")])
+        let modified = await awaitModified(process, timeout: .seconds(5)) { $0 }
+        await process.disconnect()
+
+        XCTAssertEqual(modified, true)
     }
 
     func testAttachAndTypedTextLandsInGrid() async throws {
