@@ -143,6 +143,12 @@ final class WindowController: NSWindowController, NSWindowDelegate {
             self?.enqueue(.mouse(button: button, action: action,
                                  modifiers: modifiers, row: row, col: col))
         }
+        gridView.sendPaste = { [weak self] text in
+            self?.enqueue(.paste(text))
+        }
+        gridView.fetchCompositionGeometry = { [weak self] in
+            await self?.process?.getCompositionGeometry() ?? nil
+        }
 
         startNeovim()
     }

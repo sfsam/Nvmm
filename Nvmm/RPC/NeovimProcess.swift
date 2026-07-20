@@ -78,6 +78,71 @@ private nonisolated enum Pending {
     }
 }
 
+// MARK: - Composition geometry
+
+/// The current window's editable-text geometry, in zero-based grid coordinates.
+/// `textCol`/`textWidth` exclude the gutters where a preedit must not displace
+/// buffer cells; `rightToLeft` marks a `rightleft` window; `cellwidthOverrides`
+/// carries the buffer's `getcellwidths()` entries.
+nonisolated struct CompositionGeometry: Sendable, Equatable {
+    var windowID: Int32 = 0
+    var textRow: Int32 = 0
+    var textCol: Int32 = 0
+    var textWidth: Int32 = 0
+    var textHeight: Int32 = 0
+    var rightToLeft = false
+    var cellwidthOverrides: [CellwidthOverride] = []
+}
+
+/// Parses the `getCompositionGeometry` reply into normalized zero-based grid
+/// coordinates, returning nil for any malformed or out-of-range shape.
+///
+/// Expected result array:
+/// `[winid, winrow, wincol, width, height, textoff, rightleft, cellwidths]`,
+/// with row/column values 1-based as the Vimscript-facing APIs report them.
+nonisolated func parseCompositionGeometry(_ result: MPValue) -> CompositionGeometry? {
+    guard let values = result.arrayValue, values.count == 8,
+          let windowID = values[0].integer?.signed,
+          let winRow = values[1].integer?.signed,
+          let winCol = values[2].integer?.signed,
+          let width = values[3].integer?.signed,
+          let textHeight = values[4].integer?.signed,
+          let textOffset = values[5].integer?.signed,
+          let rightToLeft = values[6].boolValue,
+          let overrides = values[7].arrayValue
+    else { return nil }
+
+    let textRow = winRow - 1
+    let windowColumn = winCol - 1
+    guard windowID > 0, textRow >= 0, windowColumn >= 0, textHeight > 0,
+          textOffset >= 0, width > textOffset else { return nil }
+
+    var geometry = CompositionGeometry()
+    geometry.windowID = Int32(truncatingIfNeeded: windowID)
+    geometry.textRow = Int32(truncatingIfNeeded: textRow)
+    geometry.textHeight = Int32(truncatingIfNeeded: textHeight)
+    geometry.rightToLeft = rightToLeft
+    // LTR windows draw text after the left gutter/textoff; RTL windows start the
+    // editable text at wincol with the offset on the opposite edge.
+    let textColumn = rightToLeft ? windowColumn : windowColumn + textOffset
+    geometry.textCol = Int32(truncatingIfNeeded: textColumn)
+    geometry.textWidth = Int32(truncatingIfNeeded: width - textOffset)
+
+    for item in overrides {
+        guard let range = item.arrayValue, range.count == 3,
+              let first = range[0].integer?.signed,
+              let last = range[1].integer?.signed,
+              let cellWidth = range[2].integer?.signed,
+              first >= 0, last >= first, cellWidth == 1 || cellWidth == 2
+        else { return nil }
+        geometry.cellwidthOverrides.append(CellwidthOverride(
+            first: Int32(truncatingIfNeeded: first),
+            last: Int32(truncatingIfNeeded: last),
+            width: Int32(truncatingIfNeeded: cellWidth)))
+    }
+    return geometry
+}
+
 // MARK: - Process actor
 
 /// An RPC connection to one Neovim process.
@@ -284,6 +349,25 @@ actor NeovimProcess {
         case .paste(let data):
             notify("nvim_paste", [.string(data), false, -1])
         }
+    }
+
+    /// Queries the current window's editable-text geometry for composition
+    /// layout. Returns nil when Neovim has no usable window info, the request
+    /// errors, or the connection is down. This is `async`; the caller
+    /// generation-checks the reply on the main actor and caches it, so the
+    /// synchronous text-input geometry queries never block on the actor.
+    func getCompositionGeometry() async -> CompositionGeometry? {
+        let lua = """
+            local w = vim.api.nvim_get_current_win()
+            local i = vim.fn.getwininfo(w)[1]
+            if not i then return nil end
+            return {w, i.winrow, i.wincol, i.width, i.height, i.textoff,
+                    vim.wo[w].rightleft, vim.fn.getcellwidths()}
+            """
+        guard let response = try? await request("nvim_exec_lua",
+                                                [.string(lua), .array([])]),
+              !response.isError else { return nil }
+        return parseCompositionGeometry(response.result)
     }
 
     private func startSync(method: String, arguments: [MPValue],

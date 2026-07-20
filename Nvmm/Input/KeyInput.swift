@@ -7,10 +7,11 @@
 //  A normalized Cocoa key event becomes a `KeyboardEvent`; `routeKeyEvent` turns
 //  it into one `nvim_input` payload, or the empty string for events that produce
 //  no input. This layer is value logic with no AppKit dependency, so it is unit
-//  tested in isolation, mirroring the reference's `input.hpp`. The marked-text /
-//  IME composition policy also in `input.hpp` (offering events to Cocoa, dead-key
-//  and IME cancellation, committed-text transport) lands with text input in a
-//  later phase; this file covers the direct key-to-notation path.
+//  tested in isolation. It also holds the marked-text / IME composition policy:
+//  whether to offer an event to Cocoa, how dead-key and IME sessions treat
+//  Escape/Delete/focus loss, how a Cocoa handle-event transaction resolves, and
+//  how committed text is transported. The single-row preedit geometry math lives
+//  in `Composition.swift`.
 //
 
 import Foundation
@@ -215,4 +216,120 @@ nonisolated func arbitrateKeyEquivalent(isKeyDown: Bool,
         return .forwardToKeyDown
     }
     return .unhandled
+}
+
+// MARK: - Composition policy
+
+/// The lifecycle phase of a Cocoa marked-text session.
+nonisolated enum CompositionPhase: Sendable, Equatable {
+    case inactive, marked, suspended, cancelling
+}
+
+/// The source of a marked-text session, which selects its Escape/Delete/focus
+/// policy. Captured once when the session starts.
+///
+///   dead key: Escape commits, Delete cancels before Cocoa, focus loss cancels.
+///   IME:      Escape cancels, Delete edits through Cocoa, focus loss suspends.
+///   unknown:  conservative cancellation behavior.
+nonisolated enum CompositionKind: Sendable, Equatable {
+    case unknown, deadKey, ime
+}
+
+nonisolated func deadKeyEscapeCommits(_ kind: CompositionKind) -> Bool {
+    kind == .deadKey
+}
+
+nonisolated func deleteCancelsBeforeCocoa(_ kind: CompositionKind) -> Bool {
+    kind == .deadKey
+}
+
+nonisolated func focusLossSuspends(_ kind: CompositionKind) -> Bool {
+    kind == .ime
+}
+
+/// Whether a key event should be offered to Cocoa's text-input system rather
+/// than routed straight to Neovim.
+nonisolated func shouldOfferToCocoa(mode: TextEntryMode,
+                                    compositionActive: Bool,
+                                    event: KeyboardEvent) -> Bool {
+    if compositionActive { return true }
+    if mode == .directNeovim { return false }
+    if event.modifierKeys.command || event.modifierKeys.control { return false }
+
+    // Cocoa owns text production in text-entry modes: ordinary layout text,
+    // Option transformations, dead keys, IME input, and key repeat. Named
+    // editing/navigation keys stay on Neovim's direct path; Space is text.
+    return event.named == nil || event.named == .space
+}
+
+/// The routing decision after a Cocoa handle-event transaction.
+nonisolated enum CocoaEventResult: Sendable, Equatable {
+    case consume
+    case routeToNeovim
+    case commitAndConsume
+    case commitAndRouteToNeovim
+    case cancelAndConsume
+}
+
+/// What Cocoa's synchronous callbacks did during a handle-event transaction.
+nonisolated enum CocoaCallbackEffect: Sendable, Equatable {
+    case none, text, editingCommand
+}
+
+/// The observable results of one `NSTextInputContext.handleEvent` call: its
+/// return value, the callback side effect, and whether marked text remains.
+nonisolated struct CocoaEventTransaction: Sendable {
+    var handleEventReturned = false
+    var callbackEffect: CocoaCallbackEffect = .none
+    var markedTextRemains = false
+}
+
+/// Folds a handle-event transaction into one routing decision.
+///
+/// An editing-command callback means Cocoa declined text ownership, so Neovim
+/// gets the original key. A text callback or a true return consumes it. If Cocoa
+/// leaves marked text behind after returning false, Escape/Delete apply
+/// composition-kind policy; other keys commit first and then route to Neovim.
+nonisolated func resolveCocoaEventTransaction(_ transaction: CocoaEventTransaction,
+                                              escape: Bool,
+                                              deleteKey: Bool = false) -> CocoaEventResult {
+    if transaction.callbackEffect == .editingCommand { return .routeToNeovim }
+    if transaction.handleEventReturned { return .consume }
+    if transaction.callbackEffect == .text { return .consume }
+    if !transaction.markedTextRemains { return .routeToNeovim }
+    if deleteKey { return .cancelAndConsume }
+    return escape ? .commitAndConsume : .commitAndRouteToNeovim
+}
+
+/// The upper bound, in bytes, of committed text sent as `nvim_input`; larger
+/// commits are pasted instead.
+nonisolated let committedTextInputLimit = 4096
+
+/// How committed text should reach Neovim.
+nonisolated enum CommittedTextTransport: Sendable, Equatable {
+    case none, input, paste
+}
+
+/// One committed-text delivery: the transport and the payload it carries.
+nonisolated struct CommittedTextOperation: Sendable, Equatable {
+    var transport: CommittedTextTransport = .none
+    var utf8 = ""
+}
+
+/// Routes committed Cocoa text to `nvim_input` or `nvim_paste`. Multiline text
+/// and anything longer than the input limit are pasted (unescaped); everything
+/// else is escaped key-notation input.
+nonisolated func routeCommittedText(_ text: String) -> CommittedTextOperation {
+    if text.isEmpty { return CommittedTextOperation() }
+    // Scan scalars, not Characters: a CR+LF is one grapheme, so a Character-wise
+    // search for "\n"/"\r" would miss it.
+    if text.unicodeScalars.contains(where: { $0 == "\n" || $0 == "\r" }) {
+        return CommittedTextOperation(transport: .paste, utf8: text)
+    }
+
+    let escaped = escapeText(text)
+    if escaped.utf8.count > committedTextInputLimit {
+        return CommittedTextOperation(transport: .paste, utf8: text)
+    }
+    return CommittedTextOperation(transport: .input, utf8: escaped)
 }

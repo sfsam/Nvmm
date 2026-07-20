@@ -8,8 +8,16 @@
 //  graphics (block and shade characters), glyphs, line decorations, and the
 //  cursor. Rendering is independent of the view's size — too small crops the
 //  output, too large pads it. A grid, a font, and a render context must all be
-//  set before the first draw. Input handling and IME composition are added in
-//  later phases; this view is the renderer.
+//  set before the first draw.
+//
+//  The view is also the `NSTextInputClient`. Keyboard events in a text-entry
+//  mode are offered to Cocoa so dead keys, multi-scalar emoji, and IMEs work;
+//  the marked-text state machine lives in `TextInputCoordinator`, and the
+//  provisional preedit is drawn in-grid as a sixth pass overlaid on the cursor's
+//  row. Preedit placement uses the window's editable-text geometry, fetched
+//  asynchronously from Neovim and cached, so the synchronous text-input queries
+//  never block; a generation counter discards geometry a later resize or focus
+//  change has invalidated.
 //
 
 import AppKit
@@ -48,7 +56,8 @@ private enum CellGraphicKind: UInt32 {
     }
 }
 
-final class GridView: NSView, CALayerDelegate {
+final class GridView: NSView, CALayerDelegate, NSTextInputClient,
+                      TextInputCoordinatorDelegate {
     private var metalLayer: CAMetalLayer!
 
     private var renderContext: RenderContext?
@@ -69,6 +78,7 @@ final class GridView: NSView, CALayerDelegate {
     private var undercurl = line_metrics()
     private var overline = line_metrics()
     private var strikethrough = line_metrics()
+    private var compositionUnderline = line_metrics()
 
     // A small ring of frame buffers keeps frames from stalling on the GPU.
     private let frameBuffers = [MetalFrameBuffer(), MetalFrameBuffer(),
@@ -90,6 +100,14 @@ final class GridView: NSView, CALayerDelegate {
     /// Sends a mouse event to Neovim (`nvim_input_mouse`).
     var sendMouse: ((_ button: String, _ action: String, _ modifiers: String,
                      _ row: Int, _ col: Int) -> Void)?
+
+    /// Sends committed text too large or multiline for `nvim_input` as a paste.
+    var sendPaste: ((String) -> Void)?
+
+    /// Fetches the current window's editable-text geometry for preedit layout.
+    /// Async so it never blocks the main thread; the reply is generation-checked
+    /// and cached (see `refreshCompositionGeometry`).
+    var fetchCompositionGeometry: (() async -> CompositionGeometry?)?
 
     /// Per-button drag state. A `nil` origin means the press began outside the
     /// grid, so its drag and release are ignored. `location` and `modifiers`
@@ -116,6 +134,54 @@ final class GridView: NSView, CALayerDelegate {
 
     private var trackingArea: NSTrackingArea?
 
+    // MARK: Composition
+
+    /// The marked-text state machine. Created in `init`; `self` is its delegate.
+    private var textInputCoordinator: TextInputCoordinator!
+
+    /// One synthetic preedit cell: the cell to draw, its grid position, the UTF-16
+    /// range of the source marked grapheme (for hit testing), and whether it is
+    /// marked text (underlined) or a displaced buffer cell.
+    private struct CompositionRenderCell {
+        var cell: Cell
+        var position: SIMD2<Int16>
+        var utf16Range: NSRange
+        var marked: Bool
+    }
+
+    /// Protects async geometry-request ordering: `generation` invalidates a reply
+    /// whose request a later resize/focus change superseded.
+    private struct CompositionRequestState {
+        var pending = false
+        var generation: UInt64 = 0
+    }
+
+    /// The client-side anchor for the active marked session and the commit bridge
+    /// that carries a just-committed width across to the next preedit's anchor.
+    private struct CompositionSessionState {
+        var anchored = false
+        var awaitingCommitRedraw = false
+        var anchor = GridPoint(row: 0, column: 0)
+        var pendingAnchorAdvance = 0
+    }
+
+    /// The cached synthetic cells for the current preedit, plus the row and the
+    /// half-open clear range they occupy.
+    private struct CompositionRenderState {
+        var cells: [CompositionRenderCell] = []
+        var clearStart = 0
+        var clearEnd = 0
+        var row = 0
+        var valid = false
+        var background = RGBColor()
+    }
+
+    private var compositionRequest = CompositionRequestState()
+    private var compositionSession = CompositionSessionState()
+    private var compositionRender = CompositionRenderState()
+    private var compositionGeometry: CompositionGeometry?
+    private var compositionWidthPolicy = CompositionWidthPolicy()
+
     // MARK: - Setup
 
     override init(frame frameRect: NSRect) {
@@ -126,6 +192,7 @@ final class GridView: NSView, CALayerDelegate {
         // Force the backing layer so metalLayer is ready before any geometry or
         // configuration call touches it.
         _ = layer
+        textInputCoordinator = TextInputCoordinator(delegate: self)
     }
 
     required init?(coder: NSCoder) {
@@ -196,6 +263,12 @@ final class GridView: NSView, CALayerDelegate {
         underline = line_metrics(ytranslate: underlineTranslate, period: 0,
                                  thickness: lineThickness, style: 0)
 
+        // A preedit underline is heavier than a normal underline so the marked
+        // text reads as provisional.
+        compositionUnderline = underline
+        compositionUnderline.thickness = max(underline.thickness * 2,
+                                             UInt16((2 * scaleFactor).rounded(.up)))
+
         underdouble = underline
         underdouble.ytranslate -= Int16(lineThickness) * 2
 
@@ -217,6 +290,7 @@ final class GridView: NSView, CALayerDelegate {
 
         cursorLineThickness = UInt32(2 * scaleFactor)
         metalLayer.contentsScale = scaleFactor
+        updateCompositionLayout()
         needsDisplay = true
     }
 
@@ -243,8 +317,34 @@ final class GridView: NSView, CALayerDelegate {
 
     /// Publishes a new grid snapshot, redrawing and restarting the blink loop.
     func setGrid(_ newGrid: Grid) {
+        let previousSize = grid?.size
         grid = newGrid
         cursorVisible = true
+        // A new grid means any commit we were holding the final preedit frame
+        // for has now landed.
+        compositionSession.awaitingCommitRedraw = false
+
+        let gridSizeChanged = previousSize != nil && previousSize != newGrid.size
+        // A resize can reflow the buffer and move the cursor to a different
+        // screen row while Cocoa keeps the same marked session alive. Across a
+        // size change the newly published cursor is the authoritative location
+        // of that insertion point.
+        if gridSizeChanged, textInputCoordinator.isActive {
+            let cursor = newGrid.cursor
+            compositionSession.anchor = GridPoint(row: cursor.row,
+                                                  column: cursor.column)
+            compositionSession.pendingAnchorAdvance = 0
+        }
+
+        if textInputCoordinator.isActive, !newGrid.acceptsTextInput {
+            textInputCoordinator.cancel(inputContext: inputContext)
+            compositionStateDidChange()
+        } else {
+            if textInputCoordinator.isActive { compositionGeometry = nil }
+            updateCompositionLayout()
+            if textInputCoordinator.isActive { refreshCompositionGeometry() }
+        }
+
         restartBlink()
         needsDisplay = true
     }
@@ -254,6 +354,12 @@ final class GridView: NSView, CALayerDelegate {
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         metalLayer.drawableSize = convertToBacking(newSize)
+        textInputGeometryDidChange()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        textInputGeometryDidChange()
     }
 
     /// Disables blinking and forces a block-outline cursor, as inactive windows
@@ -261,6 +367,8 @@ final class GridView: NSView, CALayerDelegate {
     func setInactive() {
         guard !inactive else { return }
         inactive = true
+        // Losing focus suspends an IME session but cancels a dead-key one.
+        textInputCoordinator.suspendOrCancel(inputContext: inputContext)
         blinkTimer?.invalidate()
         blinkTimer = nil
         cursorVisible = true
@@ -271,6 +379,7 @@ final class GridView: NSView, CALayerDelegate {
     func setActive() {
         guard inactive else { return }
         inactive = false
+        textInputCoordinator.resume(inputContext: inputContext)
         restartBlink()
         needsDisplay = true
     }
@@ -343,11 +452,21 @@ final class GridView: NSView, CALayerDelegate {
         let lineStride = MemoryLayout<line_data>.stride
         let cellGraphicStride = MemoryLayout<cell_graphic_data>.stride
 
+        // Preedit cells are drawn on top of the grid: their glyphs and underlines
+        // extend the glyph and line buffers, and their backgrounds (plus the
+        // cleared range behind them) are full-block cell graphics.
+        let compositionCellCount = compositionRender.valid
+            ? compositionRender.cells.count : 0
+        let compositionClearCount = compositionRender.valid
+            ? max(0, compositionRender.clearEnd - compositionRender.clearStart) : 0
+        let compositionBackgroundCount = compositionClearCount + compositionCellCount
+        let renderCellCapacity = gridSize + compositionCellCount
+
         let uniformSize = MemoryLayout<uniform_data>.stride
         let backgroundSize = gridSize * MemoryLayout<UInt32>.stride
-        let glyphSize = gridSize * stride
-        let cellGraphicSize = gridSize * cellGraphicStride
-        let lineSize = gridSize * lineStride * 4
+        let glyphSize = renderCellCapacity * stride
+        let cellGraphicSize = (gridSize + compositionBackgroundCount) * cellGraphicStride
+        let lineSize = renderCellCapacity * lineStride * 4
 
         // Pad for per-region alignment overallocation.
         let total = (256 * 5) + uniformSize + backgroundSize + glyphSize
@@ -365,11 +484,12 @@ final class GridView: NSView, CALayerDelegate {
         let backgrounds = backgroundRegion.ptr.bindMemory(to: UInt32.self,
                                                           capacity: gridSize)
         let glyphs = glyphRegion.ptr.bindMemory(to: glyph_data.self,
-                                                capacity: gridSize)
+                                                capacity: renderCellCapacity)
         let cellGraphics = cellGraphicRegion.ptr.bindMemory(
-            to: cell_graphic_data.self, capacity: gridSize)
+            to: cell_graphic_data.self,
+            capacity: gridSize + compositionBackgroundCount)
         let lines = lineRegion.ptr.bindMemory(to: line_data.self,
-                                              capacity: gridSize * 4)
+                                              capacity: renderCellCapacity * 4)
 
         let drawable = metalLayer.drawableSize
         let pixelSize = SIMD2<Float>(2, -2)
@@ -489,6 +609,18 @@ final class GridView: NSView, CALayerDelegate {
             }
         }
 
+        let gridGlyphCount = glyphCount
+        let gridCellGraphicCount = cellGraphicCount
+        let gridLineCount = lineCount
+
+        if compositionRender.valid {
+            appendComposition(glyphs: glyphs, glyphCount: &glyphCount,
+                              cellGraphics: cellGraphics,
+                              cellGraphicCount: &cellGraphicCount,
+                              lines: lines, lineCount: &lineCount,
+                              glyphManager: glyphManager, font: font)
+        }
+
         frame.didModify(from: 0, length: cellGraphicRegion.offset
                         + cellGraphicCount * cellGraphicStride)
         if lineCount > 0 {
@@ -506,20 +638,102 @@ final class GridView: NSView, CALayerDelegate {
                frame: frame, index: index, gridSize: gridSize,
                uniformOffset: uniformRegion.offset,
                backgroundOffset: backgroundRegion.offset,
-               glyphOffset: glyphRegion.offset, glyphCount: glyphCount,
+               glyphOffset: glyphRegion.offset, gridGlyphCount: gridGlyphCount,
+               compositionGlyphCount: glyphCount - gridGlyphCount,
                cellGraphicOffset: cellGraphicRegion.offset,
-               cellGraphicCount: cellGraphicCount,
-               lineOffset: lineRegion.offset, lineCount: lineCount,
+               gridCellGraphicCount: gridCellGraphicCount,
+               compositionCellGraphicCount: cellGraphicCount - gridCellGraphicCount,
+               lineOffset: lineRegion.offset, gridLineCount: gridLineCount,
+               compositionLineCount: lineCount - gridLineCount,
                cursorShape: drawnShape)
+    }
+
+    /// Appends the preedit's synthetic cells after the grid's: full-block cell
+    /// graphics for the cleared range and each cell's background, a glyph per
+    /// non-blank cell, and a heavier accent underline under each marked cell —
+    /// dimmed outside the active clause. Drawn after the grid so they layer on
+    /// top.
+    private func appendComposition(glyphs: UnsafeMutablePointer<glyph_data>,
+                                   glyphCount: inout Int,
+                                   cellGraphics: UnsafeMutablePointer<cell_graphic_data>,
+                                   cellGraphicCount: inout Int,
+                                   lines: UnsafeMutablePointer<line_data>,
+                                   lineCount: inout Int,
+                                   glyphManager: GlyphManager, font: FontFamily) {
+        let accent = compositionAccentColor()
+        let activeClause = textInputCoordinator.selectedRange()
+        let hasActiveClause = activeClause.location != NSNotFound &&
+                              activeClause.length > 0
+        let row = Int16(compositionRender.row)
+
+        let clear = compositionRender.background.opaque
+        for col in compositionRender.clearStart..<compositionRender.clearEnd {
+            cellGraphics[cellGraphicCount] = cell_graphic_data(
+                grid_position: SIMD2<Int16>(Int16(col), row), cell_width: 1,
+                color: clear, background_color: clear,
+                kind: CellGraphicKind.fullBlock.rawValue)
+            cellGraphicCount += 1
+        }
+
+        for entry in compositionRender.cells {
+            let cell = entry.cell
+            let background = cell.background.opaque
+            cellGraphics[cellGraphicCount] = cell_graphic_data(
+                grid_position: entry.position, cell_width: UInt32(cell.width),
+                color: background, background_color: background,
+                kind: CellGraphicKind.fullBlock.rawValue)
+            cellGraphicCount += 1
+
+            if !cell.isEmpty {
+                let glyph = glyphManager.glyph(family: font, cell: cell,
+                                               background: cell.background,
+                                               foreground: cell.foreground)
+                glyphs[glyphCount] = glyph_data(grid_position: entry.position,
+                                                cell_width: UInt32(cell.width),
+                                                rect: glyph)
+                glyphCount += 1
+            }
+
+            if entry.marked {
+                let active = !hasActiveClause ||
+                    NSIntersectionRange(entry.utf16Range, activeClause).length > 0
+                let opacity: UInt8 = active ? 255 : 102 // 40% for inactive clauses
+                lines[lineCount] = makeLine(entry.position, accent,
+                                            compositionUnderline, opacity: opacity)
+                lineCount += 1
+                if cell.width == 2 {
+                    let second = SIMD2<Int16>(entry.position.x + 1, entry.position.y)
+                    lines[lineCount] = makeLine(second, accent, compositionUnderline,
+                                                count: 1, opacity: opacity)
+                    lineCount += 1
+                }
+            }
+        }
+    }
+
+    /// The control-accent color in sRGB, used for the preedit underline.
+    private func compositionAccentColor() -> RGBColor {
+        let color = NSColor.controlAccentColor.usingColorSpace(.sRGB)
+        guard let color else { return RGBColor(red: 0, green: 122, blue: 255) }
+        return RGBColor(red: UInt8((color.redComponent * 255).rounded()),
+                        green: UInt8((color.greenComponent * 255).rounded()),
+                        blue: UInt8((color.blueComponent * 255).rounded()))
     }
 
     private func encode(context: RenderContext, drawable: CAMetalDrawable,
                         buffer: MTLBuffer, frame: MetalFrameBuffer, index: Int,
                         gridSize: Int, uniformOffset: Int, backgroundOffset: Int,
-                        glyphOffset: Int, glyphCount: Int,
-                        cellGraphicOffset: Int, cellGraphicCount: Int,
-                        lineOffset: Int, lineCount: Int,
+                        glyphOffset: Int, gridGlyphCount: Int,
+                        compositionGlyphCount: Int,
+                        cellGraphicOffset: Int, gridCellGraphicCount: Int,
+                        compositionCellGraphicCount: Int,
+                        lineOffset: Int, gridLineCount: Int,
+                        compositionLineCount: Int,
                         cursorShape: CursorShape?) {
+        let glyphStride = MemoryLayout<glyph_data>.stride
+        let lineStride = MemoryLayout<line_data>.stride
+        let cellGraphicStride = MemoryLayout<cell_graphic_data>.stride
+
         let descriptor = MTLRenderPassDescriptor()
         descriptor.colorAttachments[0].texture = drawable.texture
         descriptor.colorAttachments[0].clearColor = MTLClearColor(
@@ -537,26 +751,54 @@ final class GridView: NSView, CALayerDelegate {
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
                                vertexCount: 4, instanceCount: gridSize)
 
-        if cellGraphicCount > 0 {
+        if gridCellGraphicCount > 0 {
             encoder.setRenderPipelineState(context.cellGraphicPipeline)
             encoder.setVertexBufferOffset(cellGraphicOffset, index: 1)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
-                                   vertexCount: 4, instanceCount: cellGraphicCount)
+                                   vertexCount: 4, instanceCount: gridCellGraphicCount)
         }
 
-        if glyphCount > 0 {
+        if gridGlyphCount > 0 {
             encoder.setRenderPipelineState(context.glyphPipeline)
             encoder.setVertexBufferOffset(glyphOffset, index: 1)
             encoder.setFragmentTexture(context.glyphManager.texture, index: 0)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
-                                   vertexCount: 4, instanceCount: glyphCount)
+                                   vertexCount: 4, instanceCount: gridGlyphCount)
         }
 
-        if lineCount > 0 {
+        if gridLineCount > 0 {
             encoder.setRenderPipelineState(context.linePipeline)
             encoder.setVertexBufferOffset(lineOffset, index: 1)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
-                                   vertexCount: 4, instanceCount: lineCount)
+                                   vertexCount: 4, instanceCount: gridLineCount)
+        }
+
+        // Preedit passes reuse the same pipelines, drawn after the grid so the
+        // marked text and its cleared background land on top.
+        if compositionCellGraphicCount > 0 {
+            encoder.setRenderPipelineState(context.cellGraphicPipeline)
+            encoder.setVertexBufferOffset(
+                cellGraphicOffset + gridCellGraphicCount * cellGraphicStride, index: 1)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
+                                   vertexCount: 4,
+                                   instanceCount: compositionCellGraphicCount)
+        }
+
+        if compositionGlyphCount > 0 {
+            encoder.setRenderPipelineState(context.glyphPipeline)
+            encoder.setVertexBufferOffset(
+                glyphOffset + gridGlyphCount * glyphStride, index: 1)
+            encoder.setFragmentTexture(context.glyphManager.texture, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
+                                   vertexCount: 4, instanceCount: compositionGlyphCount)
+        }
+
+        if compositionLineCount > 0 {
+            encoder.setRenderPipelineState(context.linePipeline)
+            encoder.setVertexBufferOffset(
+                lineOffset + gridLineCount * lineStride, index: 1)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
+                                   vertexCount: 4, instanceCount: compositionLineCount)
         }
 
         switch cursorShape {
@@ -588,11 +830,20 @@ final class GridView: NSView, CALayerDelegate {
     }
 
     /// The cursor shape to draw this frame, or nil to draw no cursor. Inactive
-    /// views always outline; a hidden or blinked-off cursor draws nothing.
+    /// views always outline; a hidden or blinked-off cursor, or a visible preedit
+    /// covering the insertion point, draws nothing.
     private func renderedCursorShape(grid: Grid, cursor: Cursor) -> CursorShape? {
         if grid.hideCursor || !cursorVisible { return nil }
+        if shouldSuppressNvimCursorForComposition() { return nil }
         if inactive { return .blockOutline }
         return cursor.shape
+    }
+
+    /// True while a visible preedit should hide Neovim's own cursor, or while the
+    /// final preedit frame is held until the committing redraw lands.
+    private func shouldSuppressNvimCursorForComposition() -> Bool {
+        textInputCoordinator.suppressesNvimCursor ||
+            compositionSession.awaitingCommitRedraw
     }
 
     private func makeLine(_ position: SIMD2<Int16>, _ color: RGBColor,
@@ -650,6 +901,11 @@ final class GridView: NSView, CALayerDelegate {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let keyEvent = makeKeyboardEvent(event)
         let menuOwnsEvent = Self.menuContainsKeyEquivalent(NSApp.mainMenu, event)
+        // A menu is about to run its action, so commit any preedit first rather
+        // than leaving it stranded.
+        if event.type == .keyDown, menuOwnsEvent, textInputCoordinator.isActive {
+            textInputCoordinator.commitForExternalAction(inputContext: inputContext)
+        }
         let action = arbitrateKeyEquivalent(
             isKeyDown: event.type == .keyDown,
             hasEnabledMenuEquivalent: menuOwnsEvent, event: keyEvent)
@@ -662,6 +918,48 @@ final class GridView: NSView, CALayerDelegate {
 
     private func handleKeyDown(_ event: NSEvent, keyEvent: KeyboardEvent) {
         NSCursor.setHiddenUntilMouseMoves(true)
+        let wasComposing = textInputCoordinator.isActive
+        // Dead-key Delete must cancel before Cocoa sees it: keyboard-layout
+        // input otherwise commits the standalone accent. IME Delete stays
+        // Cocoa-owned so it can edit the provisional string.
+        if wasComposing, textInputCoordinator.shouldCancelDeleteBeforeCocoa(),
+           keyEvent.named == .backspace || keyEvent.named == .deleteForward {
+            textInputCoordinator.cancel(inputContext: inputContext)
+            compositionStateDidChange()
+            return
+        }
+
+        let mode = grid?.textEntryMode ?? .directNeovim
+        if shouldOfferToCocoa(mode: mode, compositionActive: wasComposing,
+                              event: keyEvent) {
+            textInputCoordinator.beginInputContextEvent()
+            // handleEvent may synchronously call back into this view's
+            // NSTextInputClient methods before it returns.
+            let handled = inputContext?.handleEvent(event) ?? false
+            let deleteKey = keyEvent.named == .backspace ||
+                            keyEvent.named == .deleteForward
+            let result = textInputCoordinator.finishInputContextEvent(
+                handled: handled, escape: keyEvent.named == .escape,
+                deleteKey: deleteKey)
+            switch result {
+            case .consume:
+                return
+            case .routeToNeovim:
+                break
+            case .commitAndConsume:
+                textInputCoordinator.commit()
+                compositionStateDidChange()
+                return
+            case .commitAndRouteToNeovim:
+                textInputCoordinator.commit()
+                compositionStateDidChange()
+            case .cancelAndConsume:
+                textInputCoordinator.cancel(inputContext: inputContext)
+                compositionStateDidChange()
+                return
+            }
+        }
+
         let input = routeKeyEvent(keyEvent)
         if !input.isEmpty { sendInput?(input) }
     }
@@ -982,5 +1280,333 @@ final class GridView: NSView, CALayerDelegate {
         } else {
             NSCursor.arrow.set()
         }
+    }
+
+    // MARK: - Text input (NSTextInputClient)
+
+    func insertText(_ string: Any, replacementRange: NSRange) {
+        textInputCoordinator.insertText(string, replacementRange: replacementRange)
+        compositionStateDidChange()
+    }
+
+    func setMarkedText(_ string: Any, selectedRange: NSRange,
+                       replacementRange: NSRange) {
+        textInputCoordinator.setMarkedText(string, selectedRange: selectedRange,
+                                           replacementRange: replacementRange)
+        compositionStateDidChange()
+    }
+
+    func unmarkText() {
+        textInputCoordinator.unmarkText()
+        compositionStateDidChange()
+    }
+
+    func hasMarkedText() -> Bool { textInputCoordinator.hasMarkedText() }
+    func markedRange() -> NSRange { textInputCoordinator.markedRange() }
+    func selectedRange() -> NSRange { textInputCoordinator.selectedRange() }
+    func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
+
+    func attributedSubstring(forProposedRange range: NSRange,
+                             actualRange: NSRangePointer?) -> NSAttributedString? {
+        textInputCoordinator.attributedSubstring(forProposedRange: range,
+                                                  actualRange: actualRange)
+    }
+
+    override func doCommand(by selector: Selector) {
+        textInputCoordinator.doCommandBySelector(selector, inputContext: inputContext)
+    }
+
+    func characterIndex(for point: NSPoint) -> Int {
+        guard compositionRender.valid, let window else { return NSNotFound }
+        // Map a screen point to a UTF-16 index in the marked string. The render
+        // cache holds each visible marked grapheme's cell span and UTF-16 range,
+        // so double-width and surrogate-pair graphemes are never split.
+        let windowPoint = window.convertPoint(fromScreen: point)
+        let viewPoint = convert(windowPoint, from: nil)
+        let col = Int(floor(viewPoint.x / backingCellSize.width))
+        let row = Int(floor(viewPoint.y / backingCellSize.height))
+        for entry in compositionRender.cells {
+            guard entry.marked, entry.utf16Range.location != NSNotFound,
+                  row == Int(entry.position.y), col >= Int(entry.position.x),
+                  col < Int(entry.position.x) + entry.cell.width else { continue }
+            let midpoint = (Double(entry.position.x) + Double(entry.cell.width) * 0.5)
+                * Double(backingCellSize.width)
+            return Double(viewPoint.x) < midpoint
+                ? entry.utf16Range.location : NSMaxRange(entry.utf16Range)
+        }
+        return NSNotFound
+    }
+
+    func firstRect(forCharacterRange range: NSRange,
+                   actualRange: NSRangePointer?) -> NSRect {
+        // Candidate windows follow Cocoa UTF-16 ranges, but the visible preedit
+        // is synthetic grid cells. Prefer the rendered marked-cell mapping and
+        // fall back to the Neovim cursor when the range is not visible.
+        if compositionRender.valid, let window, range.location != NSNotFound {
+            for entry in compositionRender.cells {
+                guard entry.marked,
+                      entry.utf16Range.location != NSNotFound else { continue }
+                let insertionAtEnd = range.length == 0 &&
+                    range.location == NSMaxRange(entry.utf16Range)
+                if !insertionAtEnd,
+                   !NSLocationInRange(range.location, entry.utf16Range) { continue }
+                var x = Double(entry.position.x) * Double(backingCellSize.width)
+                if insertionAtEnd {
+                    x += Double(entry.cell.width) * Double(backingCellSize.width)
+                }
+                let viewRect = NSRect(
+                    x: x, y: Double(entry.position.y) * Double(backingCellSize.height),
+                    width: insertionAtEnd
+                        ? 1 : Double(entry.cell.width) * Double(backingCellSize.width),
+                    height: Double(backingCellSize.height))
+                actualRange?.pointee = range.length > 0
+                    ? entry.utf16Range : NSRange(location: range.location, length: 0)
+                return window.convertToScreen(convert(viewRect, to: nil))
+            }
+        }
+        actualRange?.pointee = NSRange(location: 0, length: 0)
+        guard let window else { return .zero }
+        guard let grid, backingCellSize.width > 0, backingCellSize.height > 0,
+              grid.width > 0, grid.height > 0 else {
+            return window.convertToScreen(convert(NSRect.zero, to: nil))
+        }
+        let cursor = grid.cursor
+        let col = min(cursor.column, grid.width - 1)
+        let row = min(cursor.row, grid.height - 1)
+        let viewRect = NSRect(
+            x: Double(col) * Double(backingCellSize.width),
+            y: Double(row) * Double(backingCellSize.height),
+            width: Double(max(1, cursor.width)) * Double(backingCellSize.width),
+            height: Double(backingCellSize.height))
+        return window.convertToScreen(convert(viewRect, to: nil))
+    }
+
+    // MARK: - Composition support
+
+    func commitCompositionString(_ text: String) {
+        // Cocoa can commit the current dead-key composition and start a new
+        // marked session in the same handleEvent transaction. Neovim cannot
+        // redraw its cursor between those synchronous callbacks, so advance the
+        // client-side anchor by the committed display width to avoid anchoring
+        // the new preedit one transaction behind.
+        if compositionSession.anchored, !text.isEmpty {
+            compositionSession.awaitingCommitRedraw = true
+            refreshCompositionWidthPolicy()
+            let widthPolicy = compositionWidthPolicy
+            var committedCells = 0
+            text.enumerateSubstrings(in: text.startIndex..<text.endIndex,
+                                     options: .byComposedCharacterSequences) {
+                substring, _, _, _ in
+                if let substring {
+                    committedCells += compositionGraphemeWidth(substring, widthPolicy)
+                }
+            }
+            let rightToLeft = compositionGeometry?.rightToLeft ?? false
+            compositionSession.pendingAnchorAdvance +=
+                rightToLeft ? -committedCells : committedCells
+            // Clear the pending advance next runloop turn if no redraw used it.
+            DispatchQueue.main.async { [weak self] in
+                self?.compositionSession.pendingAnchorAdvance = 0
+            }
+            compositionSession.anchored = false
+        }
+        sendCommittedString(text)
+    }
+
+    private func sendCommittedString(_ text: String) {
+        let operation = routeCommittedText(text)
+        switch operation.transport {
+        case .none: return
+        case .input: sendInput?(operation.utf8)
+        case .paste: sendPaste?(operation.utf8)
+        }
+    }
+
+    private func refreshCompositionWidthPolicy() {
+        guard let grid else { return }
+        compositionWidthPolicy.ambiguousIsDouble = grid.ambiguousWidthDouble
+        compositionWidthPolicy.emojiIsDouble = grid.emojiWidthDouble
+    }
+
+    /// Notes a change to the preedit state and relayouts, refreshing geometry
+    /// when a fresh session needs its anchor bounds.
+    private func compositionStateDidChange() {
+        if textInputCoordinator.isActive, !compositionSession.anchored {
+            compositionGeometry = nil
+            refreshCompositionGeometry()
+        }
+        updateCompositionLayout()
+        needsDisplay = true
+    }
+
+    /// Relayouts against a safe fallback and refreshes geometry when the view's
+    /// geometry changes underneath an active session.
+    func textInputGeometryDidChange() {
+        if textInputCoordinator?.isActive == true {
+            compositionGeometry = nil
+            if compositionRequest.pending {
+                compositionRequest.generation += 1
+                compositionRequest.pending = false
+            }
+            refreshCompositionGeometry()
+        }
+        updateCompositionLayout()
+        inputContext?.invalidateCharacterCoordinates()
+    }
+
+    /// Fetches the window's editable-text geometry asynchronously. A generation
+    /// number lets a later resize, split, or focus change invalidate an older
+    /// request before its reply installs stale bounds.
+    private func refreshCompositionGeometry() {
+        guard textInputCoordinator.isActive, let fetch = fetchCompositionGeometry,
+              !compositionRequest.pending else { return }
+        compositionRequest.pending = true
+        compositionRequest.generation += 1
+        let generation = compositionRequest.generation
+        Task { [weak self] in
+            let geometry = await fetch()
+            guard let self,
+                  generation == self.compositionRequest.generation else { return }
+            self.compositionRequest.pending = false
+            if let geometry {
+                self.compositionWidthPolicy.overrides = geometry.cellwidthOverrides
+            }
+            self.compositionGeometry = geometry
+            self.updateCompositionLayout()
+        }
+    }
+
+    /// Rebuilds the preedit render cache from the marked string, the cached
+    /// geometry, and the width policy, converting the pure layout result into
+    /// synthetic cells.
+    private func updateCompositionLayout() {
+        guard textInputCoordinator != nil else { return }
+        if !textInputCoordinator.isActive, compositionSession.awaitingCommitRedraw,
+           compositionRender.valid {
+            // Cocoa committed, but Neovim has not published the redraw yet.
+            // Preserve the final preedit frame so displaced cells do not snap
+            // back for a single frame.
+            needsDisplay = true
+            return
+        }
+        guard textInputCoordinator.isActive, let grid,
+              grid.width > 0, grid.height > 0,
+              backingCellSize.width > 0, backingCellSize.height > 0 else {
+            compositionRender.cells.removeAll(keepingCapacity: true)
+            compositionRender.valid = false
+            compositionSession.anchored = false
+            return
+        }
+
+        let cursor = grid.cursor
+        if !compositionSession.anchored {
+            // The first layout of a session captures the Neovim cursor as a
+            // stable client-side anchor. Later redraws must not drag the preedit
+            // unless a resize/reflow explicitly resets the session.
+            compositionSession.anchor = GridPoint(
+                row: cursor.row,
+                column: cursor.column + compositionSession.pendingAnchorAdvance)
+            compositionSession.pendingAnchorAdvance = 0
+            compositionSession.anchored = true
+        }
+
+        let row = clampCompositionRow(compositionSession.anchor.row,
+                                      gridHeight: grid.height)
+        var left = 0
+        var right = grid.width
+        var geometryApplies = false
+        var rightToLeft = false
+        // Geometry is usable only while the anchor still falls in the editable
+        // text rectangle. Otherwise use full-grid LTR overwrite fallback rather
+        // than displacing cells with stale bounds.
+        if let geometry = compositionGeometry,
+           compositionSession.anchor.row >= Int(geometry.textRow),
+           compositionSession.anchor.row < Int(geometry.textRow) + Int(geometry.textHeight),
+           compositionSession.anchor.column >= Int(geometry.textCol),
+           compositionSession.anchor.column < Int(geometry.textCol) + Int(geometry.textWidth) {
+            left = max(0, Int(geometry.textCol))
+            right = min(grid.width, Int(geometry.textCol) + Int(geometry.textWidth))
+            geometryApplies = left < right
+            rightToLeft = geometryApplies && geometry.rightToLeft
+        }
+
+        refreshCompositionWidthPolicy()
+        let marked = textInputCoordinator.markedText?.string ?? ""
+        struct Grapheme { var text: String; var range: NSRange; var width: Int }
+        var graphemes: [Grapheme] = []
+        marked.enumerateSubstrings(in: marked.startIndex..<marked.endIndex,
+                                   options: .byComposedCharacterSequences) {
+            substring, substringRange, _, _ in
+            guard let substring else { return }
+            let nsRange = NSRange(substringRange, in: marked)
+            let width = compositionGraphemeWidth(substring, self.compositionWidthPolicy)
+            graphemes.append(Grapheme(text: substring, range: nsRange, width: width))
+        }
+
+        let selection = textInputCoordinator.selectedRange()
+        var input = CompositionLayoutInput()
+        input.gridWidth = grid.width
+        input.gridHeight = grid.height
+        input.anchorRow = compositionSession.anchor.row
+        input.anchorColumn = compositionSession.anchor.column
+        input.textLeft = left
+        input.textWidth = right - left
+        input.geometryValid = geometryApplies
+        input.rightToLeft = rightToLeft
+        input.insertMode = grid.displacesForComposition
+        input.selectionLocation = UInt32(selection.location)
+        input.graphemes = graphemes.map {
+            CompositionGrapheme(width: $0.width,
+                                utf16Location: UInt32($0.range.location),
+                                utf16Length: UInt32($0.range.length))
+        }
+        // Only valid LTR Insert-mode geometry can safely displace existing cells;
+        // other cases render the preedit as an overwrite overlay.
+        if input.geometryValid, input.insertMode, !rightToLeft {
+            var col = min(max(compositionSession.anchor.column, left), right - 1)
+            while col < right {
+                let width = grid.cell(row, col).width
+                input.sourceCells.append(CompositionSourceCell(column: col, width: width))
+                col += width
+            }
+        }
+
+        let layout = layoutComposition(input)
+
+        var attributes = CellAttributes()
+        let underCursor = grid.cell(row, layout.cursorColumn)
+        attributes.foreground = underCursor.foreground
+        attributes.background = underCursor.background
+        attributes.special = underCursor.foreground
+        attributes.flags = [.underline]
+        attributes.blend = CellAttributes.noBlend
+
+        compositionRender.cells.removeAll(keepingCapacity: true)
+        compositionRender.row = layout.row
+        compositionRender.clearStart = layout.clearStart
+        compositionRender.clearEnd = layout.clearEnd
+        compositionRender.background = attributes.background
+        for placement in layout.placements {
+            let position = SIMD2<Int16>(Int16(placement.column), Int16(layout.row))
+            switch placement.kind {
+            case .marked:
+                let grapheme = graphemes[placement.sourceIndex]
+                var cellAttributes = attributes
+                if grapheme.width == 2 { cellAttributes.flags.insert(.doublewidth) }
+                let cell = Cell(text: grapheme.text, attrs: cellAttributes)
+                compositionRender.cells.append(CompositionRenderCell(
+                    cell: cell, position: position, utf16Range: grapheme.range,
+                    marked: true))
+            case .displaced:
+                let source = input.sourceCells[placement.sourceIndex]
+                compositionRender.cells.append(CompositionRenderCell(
+                    cell: grid.cell(layout.row, source.column), position: position,
+                    utf16Range: NSRange(location: NSNotFound, length: 0),
+                    marked: false))
+            }
+        }
+        compositionRender.valid = true
+        inputContext?.invalidateCharacterCoordinates()
+        needsDisplay = true
     }
 }

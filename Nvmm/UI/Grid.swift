@@ -214,6 +214,10 @@ nonisolated struct Grid: Sendable {
     /// Neovim's default background color, carried on the snapshot so the window
     /// can tint its margins and pick a matching title-bar appearance.
     var defaultBackground = RGBColor()
+    /// The `ambiwidth`/`emoji` option state, carried on the snapshot so the
+    /// view's composition width policy matches Neovim without a live query.
+    var ambiguousWidthDouble = false
+    var emojiWidthDouble = true
 
     init() {
         // Start in normal mode so the first `mode_info_set` can match by short

@@ -526,6 +526,8 @@ nonisolated final class UIController {
         writing.drawTick += 1
         writing.title = title
         writing.defaultBackground = defaultBackgroundColor
+        writing.ambiguousWidthDouble = ambiguousWidthDouble
+        writing.emojiWidthDouble = emojiWidthDouble
         globalGrid = writing
         return globalGrid
     }
