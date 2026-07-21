@@ -29,6 +29,10 @@ nonisolated enum NvimCommand: Sendable {
     case paste(String)
     /// An error message written to Neovim via `nvim_echo` (`err: true`).
     case errorWriteln(String)
+    /// Quit all buffers (`quitall`), forcing (`quitall!`) when `force` is set.
+    /// A non-forced quit with unsaved buffers is refused by Neovim, so the
+    /// process stays alive and the window is left open.
+    case quit(force: Bool)
 }
 
 /// A completed RPC response. `error` is `.null` on success; otherwise it carries

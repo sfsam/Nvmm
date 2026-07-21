@@ -361,7 +361,24 @@ actor NeovimProcess {
             notify("nvim_echo",
                    [.array([.array([.string(text)])]), true,
                     .map([(.string("err"), true)])])
+        case .quit(let force):
+            // `silent!` suppresses the "no write since last change" error (and
+            // its press-a-key prompt) that a refused non-forced quit would spill
+            // into the editor; the command still quits when buffers are clean.
+            notify("nvim_command",
+                   [.string(force ? "silent! quitall!" : "silent! quitall")])
         }
+    }
+
+    /// Whether any loaded buffer has unsaved changes. Assumes unsaved on an
+    /// error, timeout, or unexpected result, so a quit is never issued that
+    /// could silently discard work.
+    func hasUnsavedBuffers() async -> Bool {
+        let expr = "len(filter(map(getbufinfo(), 'v:val.changed'), 'v:val'))"
+        guard let response = try? await request("nvim_eval", [.string(expr)]),
+              !response.isError,
+              let count = response.result.integer?.signed else { return true }
+        return count != 0
     }
 
     /// Queries the current window's editable-text geometry for composition

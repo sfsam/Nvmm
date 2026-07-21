@@ -20,10 +20,21 @@
 import Cocoa
 import CoreText
 
-final class WindowController: NSWindowController, NSWindowDelegate {
+final class WindowController: NSWindowController, NSWindowDelegate, QuitSession {
     private let gridView = GridView(frame: .zero)
     private var renderManager: RenderContextManager!
     private var process: NeovimProcess?
+
+    // The app-wide window registry; held weakly to avoid a retain cycle (the
+    // coordinator holds its windows strongly). Used to deregister on close.
+    private weak var coordinator: TerminationCoordinator?
+
+    // Quit state for `QuitSession`. `hasExited` becomes true once Neovim has
+    // disconnected and the window has closed; `quitRefused` becomes true when
+    // the last non-forced quit was declined for unsaved buffers (reset by the
+    // next attempt), so the termination drain need not wait on this window.
+    private(set) var hasExited = false
+    private(set) var quitRefused = false
 
     private var renderTask: Task<Void, Never>?
     private var inputTask: Task<Void, Never>?
@@ -97,7 +108,8 @@ final class WindowController: NSWindowController, NSWindowDelegate {
     private var gridMinHeightConstraint: NSLayoutConstraint!
     private var gridTrailingConstraint: NSLayoutConstraint!
 
-    convenience init(renderManager: RenderContextManager) {
+    convenience init(renderManager: RenderContextManager,
+                     coordinator: TerminationCoordinator) {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 800, height: 500),
             styleMask: [.titled, .closable, .miniaturizable, .resizable,
@@ -108,6 +120,7 @@ final class WindowController: NSWindowController, NSWindowDelegate {
         window.tabbingMode = .disallowed
         self.init(window: window)
         self.renderManager = renderManager
+        self.coordinator = coordinator
         window.delegate = self
     }
 
@@ -316,6 +329,7 @@ final class WindowController: NSWindowController, NSWindowDelegate {
                 try await process.spawn(path: launch.path, argv: launch.argv)
             } catch {
                 NSLog("Nvmm: failed to spawn nvim: \(error)")
+                self?.handleDisconnect()
                 return
             }
 
@@ -326,6 +340,7 @@ final class WindowController: NSWindowController, NSWindowDelegate {
 
             guard result.status == .success else {
                 NSLog("Nvmm: UI attach failed: \(result.message)")
+                self?.handleDisconnect()
                 return
             }
 
@@ -345,7 +360,45 @@ final class WindowController: NSWindowController, NSWindowDelegate {
                 if self.liveResizeDepth == 0 { self.window?.title = self.currentTitle }
                 self.reconcileWindowSize(to: grid.size)
             }
+
+            // The grid stream ends when Neovim disconnects — it quit, or exited
+            // on its own (`:qa`, a crash). Close the window to match.
+            self.handleDisconnect()
         }
+    }
+
+    // MARK: - Quit lifecycle (QuitSession)
+
+    /// Asks Neovim to quit all buffers. A forced quit discards unsaved changes;
+    /// a non-forced quit first checks for them and, when any exist, does nothing
+    /// (the window stays open) rather than issuing a quit Neovim would refuse —
+    /// which, depending on mode, spills an error into the editor. Safe to call
+    /// repeatedly; each request re-checks, since nothing is reported back.
+    func beginQuit(force: Bool) {
+        guard let process, !hasExited else { return }
+        quitRefused = false
+        if force {
+            enqueue(.quit(force: true))
+            return
+        }
+        Task { [weak self] in
+            let unsaved = await process.hasUnsavedBuffers()
+            guard let self, !self.hasExited else { return }
+            if unsaved {
+                self.quitRefused = true
+            } else {
+                self.enqueue(.quit(force: false))
+            }
+        }
+    }
+
+    /// Closes the window in response to Neovim disconnecting. Idempotent; the
+    /// close runs the `windowWillClose` teardown. `window?.close()` does not
+    /// route through `windowShouldClose`, so this does not re-trigger a quit.
+    private func handleDisconnect() {
+        guard !hasExited else { return }
+        hasExited = true
+        window?.close()
     }
 
     /// Drops the `VimEnter` requirement after a short delay, so a session that
@@ -498,12 +551,23 @@ final class WindowController: NSWindowController, NSWindowDelegate {
         saveFrame()
     }
 
+    // The red close button just closes the window (AppKit's default). Closing
+    // it tears down this window's Neovim in `windowWillClose`; quitting with an
+    // unsaved-buffer check is an app-quit concern (Cmd-Q), not a window-close
+    // one. A save prompt on close is a later item.
     func windowWillClose(_ notification: Notification) {
+        // The window is gone, so it counts as exited for any termination drain
+        // holding a reference to it.
+        hasExited = true
         saveFrame()
+        coordinator?.deregister(self)
         commandsContinuation.finish()
         renderTask?.cancel()
         inputTask?.cancel()
         modifiedTask?.cancel()
         startupTimeoutTask?.cancel()
+        // Close the transport so this window's Neovim does not outlive it.
+        let process = self.process
+        Task { await process?.disconnect() }
     }
 }
