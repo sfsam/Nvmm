@@ -27,6 +27,10 @@ nonisolated enum NvimCommand: Sendable {
     case focus(Bool)
     /// Text pasted at the cursor via `nvim_paste`.
     case paste(String)
+    /// A key sequence fed to Neovim via `nvim_feedkeys`, used for the mode-aware
+    /// copy/paste/cut menu actions. The string holds raw control bytes (e.g.
+    /// `\u{03}` for CTRL-C), not `<C-c>`-style notation.
+    case feedkeys(String)
     /// An error message written to Neovim via `nvim_echo` (`err: true`).
     case errorWriteln(String)
     /// Quit all buffers (`quitall`), forcing (`quitall!`) when `force` is set.
@@ -79,6 +83,19 @@ nonisolated struct RPCNotification: Sendable, Equatable {
     var method: String
     var arguments: [MPValue]
 }
+
+/// The outcome of an inbound RPC request handler: a result value returned to
+/// the caller, or a message Neovim raises as an error at the `rpcrequest` call.
+nonisolated enum RequestOutcome: Sendable {
+    case result(MPValue)
+    case error(String)
+}
+
+/// Answers one inbound RPC request. Runs on the main actor, since handlers
+/// touch UI state (e.g. the pasteboard); the process actor sends the outcome
+/// back to Neovim in response.
+typealias RequestHandler =
+    @MainActor @Sendable (_ arguments: [MPValue]) async -> RequestOutcome
 
 /// A failure to spawn a child process or connect a socket. `code` is an errno.
 nonisolated struct NeovimSpawnError: Error, Sendable {

@@ -166,6 +166,10 @@ actor NeovimProcess {
     private let inbound: AsyncStream<Inbound>
     private let inboundContinuation: AsyncStream<Inbound>.Continuation
 
+    // Handlers for inbound RPC requests, keyed by method name. Populated after
+    // attach (e.g. the clipboard provider); an unknown method is rejected.
+    private var requestHandlers: [String: RequestHandler] = [:]
+
     /// Notifications Neovim sends the client, in wire order. Once a UI is
     /// attached, the controller consumes `redraw`, `vimenter`, `progress`, and
     /// `modified`, so those no longer appear here. The stream finishes when the
@@ -357,6 +361,10 @@ actor NeovimProcess {
             notify("nvim_ui_set_focus", [.bool(focused)])
         case .paste(let data):
             notify("nvim_paste", [.string(data), false, -1])
+        case .feedkeys(let keys):
+            // Mode "n" (no remapping) with K_SPECIAL escaping, so the raw
+            // control bytes in `keys` are fed literally.
+            notify("nvim_feedkeys", [.string(keys), .string("n"), .bool(true)])
         case .errorWriteln(let text):
             notify("nvim_echo",
                    [.array([.array([.string(text)])]), true,
@@ -514,12 +522,45 @@ actor NeovimProcess {
     }
 
     private func handleRequest(_ message: [MPValue]) {
+        // `isRequest` guarantees the envelope shape, so these hold.
         guard let id = message[1].integer?.unsigned,
-              let method = message[2].stringValue else { return }
-        // The client exposes no methods yet, so every request is rejected.
-        let error: MPValue = .array([.int(1), .string("Unknown method: \(method)")])
+              let method = message[2].stringValue,
+              let arguments = message[3].arrayValue else { return }
+
+        guard let handler = requestHandlers[method] else {
+            respond(id: id, outcome: .error("Unknown method: \(method)"))
+            return
+        }
+
+        // Neovim blocks on `rpcrequest` until answered, so at most one request
+        // per method is in flight; run the (main-actor) handler and respond on
+        // the actor once it returns.
+        Task { [weak self] in
+            let outcome = await handler(arguments)
+            await self?.respond(id: id, outcome: outcome)
+        }
+    }
+
+    /// Registers a handler for an inbound RPC request method, replacing any
+    /// prior handler for the same name. Call after attach.
+    func registerRequestHandler(_ method: String,
+                                _ handler: @escaping RequestHandler) {
+        requestHandlers[method] = handler
+    }
+
+    /// Sends a request handler's outcome back to Neovim. Dropped if the
+    /// connection closed while the handler ran.
+    private func respond(id: UInt64, outcome: RequestOutcome) {
         guard state == .connected else { return }
-        send { $0.encodeResponse(id: id, error: error, result: .null) }
+        switch outcome {
+        case .result(let value):
+            send { $0.encodeResponse(id: id, error: .null, result: value) }
+        case .error(let message):
+            // A two-element `[type, message]` error, as Neovim expects; it is
+            // raised at the caller's `rpcrequest`.
+            let error: MPValue = .array([.int(1), .string(message)])
+            send { $0.encodeResponse(id: id, error: error, result: .null) }
+        }
     }
 
     private func finishDisconnect(_ error: RPCTransportError) {
@@ -653,6 +694,53 @@ extension NeovimProcess {
         notify("nvim_exec_lua", [.string(lua), .array([])])
     }
 
+    /// Points Neovim's `g:clipboard` provider at this UI, so the `+`/`*`
+    /// registers route through the `clipboard_get`/`clipboard_set` request
+    /// handlers. Resolves this UI's channel by its client name (set in
+    /// `clientInfoArguments`) rather than hard-coding it, so it survives a
+    /// future reconnect. Register the handlers before calling this.
+    func installClipboardProvider() async {
+        let lua = """
+            local function channel()
+              for _, ui in ipairs(vim.api.nvim_list_uis()) do
+                local client = vim.api.nvim_get_chan_info(ui.chan).client
+                if type(client) == 'table' and client.name == 'Nvmm' then
+                  return ui.chan
+                end
+              end
+              error('Nvmm clipboard provider: no attached Nvmm UI')
+            end
+            local function set(lines, regtype)
+              return vim.rpcrequest(channel(), 'clipboard_set', lines, regtype)
+            end
+            local function get()
+              return vim.rpcrequest(channel(), 'clipboard_get')
+            end
+            vim.g.clipboard = {
+              name = 'Nvmm',
+              copy = { ['+'] = set, ['*'] = set },
+              paste = { ['+'] = get, ['*'] = get },
+            }
+            -- Neovim caches the clipboard provider on first access, which
+            -- happens eagerly at startup when 'clipboard' is unnamed/
+            -- unnamedplus -- before this UI sets g:clipboard. Re-run the
+            -- provider detection so the register operations pick up this
+            -- provider instead of the built-in pbcopy/pbpaste.
+            pcall(vim.fn['provider#clipboard#Executable'])
+            """
+        // Awaited (not fire-and-forget) so `g:clipboard` is in place before the
+        // window becomes interactive, and so a setup failure surfaces here
+        // rather than silently leaving Neovim on its default provider.
+        do {
+            let response = try await request("nvim_exec_lua", [.string(lua), .array([])])
+            if response.isError {
+                NSLog("Nvmm: clipboard provider setup failed: \(response.error)")
+            }
+        } catch {
+            NSLog("Nvmm: clipboard provider setup failed: \(error)")
+        }
+    }
+
     /// Issues a request and awaits its response or the shared deadline,
     /// whichever comes first. A timeout cancels the in-flight request.
     private func requestWaiting(_ method: String, _ arguments: [MPValue],
@@ -708,7 +796,12 @@ extension NeovimProcess {
     /// The `nvim_set_client_info` arguments identifying this UI client.
     private func clientInfoArguments() -> [MPValue] {
         let version: MPValue = .map([(.string("major"), .int(0)), (.string("minor"), .int(1))])
-        let methods: MPValue = .map([])
+        // Declares the reverse-RPC methods dispatched by `handleRequest`, so
+        // channel inspection describes them; the `nargs` count matches.
+        let methods: MPValue = .map([
+            (.string("clipboard_get"), .map([(.string("nargs"), .int(0))])),
+            (.string("clipboard_set"), .map([(.string("nargs"), .int(2))])),
+        ])
         let attributes: MPValue = .map([(.string("license"), .string("MIT"))])
         return [.string("Nvmm"), version, .string("ui"), methods, attributes]
     }

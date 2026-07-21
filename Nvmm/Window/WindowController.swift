@@ -175,6 +175,9 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         gridView.sendPaste = { [weak self] text in
             self?.enqueue(.paste(text))
         }
+        gridView.sendFeedkeys = { [weak self] keys in
+            self?.enqueue(.feedkeys(keys))
+        }
         gridView.fetchCompositionGeometry = { [weak self] in
             await self?.process?.getCompositionGeometry() ?? nil
         }
@@ -340,6 +343,13 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
                 self?.handleDisconnect()
                 return
             }
+
+            // Answer Neovim's clipboard requests from the system pasteboard,
+            // then point its provider at this UI. Registered before the
+            // provider is installed so no request can arrive unhandled.
+            await process.registerRequestHandler("clipboard_get", Clipboard.get)
+            await process.registerRequestHandler("clipboard_set", Clipboard.set)
+            await process.installClipboardProvider()
 
             guard let self else { return }
             self.isReady = true

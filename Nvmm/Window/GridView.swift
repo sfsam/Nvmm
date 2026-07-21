@@ -57,7 +57,7 @@ private enum CellGraphicKind: UInt32 {
 }
 
 final class GridView: NSView, CALayerDelegate, NSTextInputClient,
-                      TextInputCoordinatorDelegate {
+                      TextInputCoordinatorDelegate, NSUserInterfaceValidations {
     private var metalLayer: CAMetalLayer!
 
     private var renderContext: RenderContext?
@@ -103,6 +103,10 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
 
     /// Sends committed text too large or multiline for `nvim_input` as a paste.
     var sendPaste: ((String) -> Void)?
+
+    /// Feeds a raw key sequence to Neovim (`nvim_feedkeys`), for the mode-aware
+    /// copy/paste/cut menu actions.
+    var sendFeedkeys: ((String) -> Void)?
 
     /// Fetches the current window's editable-text geometry for preedit layout.
     /// Async so it never blocks the main thread; the reply is generation-checked
@@ -891,6 +895,78 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     // MARK: - First responder
 
     override var acceptsFirstResponder: Bool { true }
+
+    // MARK: - Copy / paste menu actions
+
+    // Neovim's current mode, from the latest grid snapshot. The mode drives the
+    // clipboard actions and their menu-item enablement; it is already carried on
+    // every flush for the cursor shape, so no separate query is needed.
+    private var currentMode: UIMode { grid?.modeState.semantic ?? .normal }
+
+    // These route through the `+` register (via the clipboard provider) so the
+    // Vim register type survives a copy-then-paste. Raw control bytes: CTRL-C
+    // `\u{03}`, CTRL-G `\u{07}`, CTRL-O `\u{0f}`, CTRL-R `\u{12}`, CTRL-W
+    // `\u{17}`.
+
+    @objc func copy(_ sender: Any?) {
+        switch currentMode {
+        case .visual: sendFeedkeys?("\"+y")
+        case .select: sendFeedkeys?("\u{0f}\"+ygv\u{07}")
+        default: NSSound.beep()
+        }
+    }
+
+    @objc func cut(_ sender: Any?) {
+        switch currentMode {
+        case .visual: sendFeedkeys?("\"+x")
+        case .select: sendFeedkeys?("\u{0f}\"+x")
+        default: NSSound.beep()
+        }
+    }
+
+    @objc func paste(_ sender: Any?) {
+        switch Clipboard.contentForPaste() {
+        case .none:
+            NSSound.beep()
+        case .plainText(let text):
+            // Text from another app has no register type; paste it directly.
+            sendPaste?(text)
+        case .vimRegister:
+            // Read the `+` register so its register type is preserved.
+            switch currentMode {
+            case .normal: sendFeedkeys?("\"+gP")
+            case .visual: sendFeedkeys?("\"+P")
+            case .select: sendFeedkeys?("\u{0f}\"+P")
+            case .insert, .replace, .virtualReplace: sendFeedkeys?("\u{12}\u{0f}+")
+            case .commandLine: sendFeedkeys?("\u{12}+")
+            case .terminal: sendFeedkeys?("\u{17}\"+")
+            default: sendFeedkeys?("\u{03}\"+gP")  // operator-pending, etc.
+            }
+        }
+    }
+
+    override func selectAll(_ sender: Any?) {
+        switch currentMode {
+        case .normal: sendFeedkeys?("ggVG")
+        case .visual, .commandLine: sendFeedkeys?("\u{03}ggVG")
+        case .insert, .replace, .virtualReplace:
+            sendFeedkeys?("\u{0f}gg\u{0f}VG")
+        case .select: sendFeedkeys?("\u{03}gggH\u{0f}G")
+        default: NSSound.beep()
+        }
+    }
+
+    func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        switch item.action {
+        case #selector(copy(_:)), #selector(cut(_:)):
+            // Copy and cut only act on a selection.
+            return currentMode == .visual || currentMode == .select
+        case #selector(paste(_:)):
+            return Clipboard.contentForPaste() != .none
+        default:
+            return true
+        }
+    }
 
     // MARK: - Key input
 
