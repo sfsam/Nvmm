@@ -2,10 +2,11 @@
 //  NvmmTests
 //  TerminationCoordinatorTests.swift
 //
-//  Coverage for the app-shutdown drain: quitting all sessions, reporting
-//  success only when they all exit, the unsaved-refusal (non-forced) case, the
-//  forced upgrade, and the empty registry. Uses a fake `QuitSession` so no
-//  Neovim or window is involved.
+//  Coverage for the app-shutdown drain: detecting unsaved buffers across
+//  windows, quitting all sessions, reporting success only when they all exit,
+//  the non-forced quit blocked by unsaved buffers, the forced quit, and the
+//  empty registry. Uses a fake `QuitSession` so no Neovim or window is
+//  involved.
 //
 
 import XCTest
@@ -14,31 +15,31 @@ import XCTest
 @MainActor
 final class TerminationCoordinatorTests: XCTestCase {
 
-    /// A stand-in window: records the quit request and exits when told to, so a
-    /// test can drive the coordinator's poll deterministically.
+    /// A stand-in window: reports its unsaved state, records the quit request,
+    /// and exits when told to, so a test can drive the coordinator's poll
+    /// deterministically.
     private final class FakeSession: QuitSession {
         var hasExited = false
-        var quitRefused = false
         var quitCount = 0
         var lastForce = false
-        /// When set, `beginQuit` exits immediately (a clean buffer that quits);
-        /// when false, it refuses unless forced (an unsaved buffer).
-        var exitsOnQuit: Bool
-        var exitsOnForce: Bool
+        let unsaved: Bool
+        /// Whether a forced quit makes it exit.
+        let exitsOnForce: Bool
 
-        init(exitsOnQuit: Bool, exitsOnForce: Bool = true) {
-            self.exitsOnQuit = exitsOnQuit
+        /// A clean session (`unsaved: false`) exits on any quit; an unsaved one
+        /// exits only when forced (unless `exitsOnForce` is overridden).
+        init(unsaved: Bool, exitsOnForce: Bool = true) {
+            self.unsaved = unsaved
             self.exitsOnForce = exitsOnForce
         }
+
+        func hasUnsavedBuffers() async -> Bool { unsaved }
 
         func beginQuit(force: Bool) {
             quitCount += 1
             lastForce = force
-            quitRefused = false
-            if force ? exitsOnForce : exitsOnQuit {
+            if force ? exitsOnForce : !unsaved {
                 hasExited = true
-            } else if !force {
-                quitRefused = true
             }
         }
     }
@@ -52,8 +53,8 @@ final class TerminationCoordinatorTests: XCTestCase {
 
     func testAllCleanSessionsExit() async {
         let coordinator = TerminationCoordinator()
-        let a = FakeSession(exitsOnQuit: true)
-        let b = FakeSession(exitsOnQuit: true)
+        let a = FakeSession(unsaved: false)
+        let b = FakeSession(unsaved: false)
         coordinator.register(a)
         coordinator.register(b)
 
@@ -64,29 +65,41 @@ final class TerminationCoordinatorTests: XCTestCase {
         XCTAssertFalse(a.lastForce)
     }
 
-    func testUnsavedSessionRefusesNonForcedQuit() async {
+    func testAnyUnsavedBuffersReflectsSessions() async {
         let coordinator = TerminationCoordinator()
-        let clean = FakeSession(exitsOnQuit: true)
-        let dirty = FakeSession(exitsOnQuit: false)
+        var unsaved = await coordinator.anyUnsavedBuffers()
+        XCTAssertFalse(unsaved)
+
+        let clean = FakeSession(unsaved: false)
+        let dirty = FakeSession(unsaved: true)
+        coordinator.register(clean)
+        unsaved = await coordinator.anyUnsavedBuffers()
+        XCTAssertFalse(unsaved)
+        coordinator.register(dirty)
+        unsaved = await coordinator.anyUnsavedBuffers()
+        XCTAssertTrue(unsaved)
+    }
+
+    func testNonForcedQuitDoesNotExitUnsavedSession() async {
+        let coordinator = TerminationCoordinator()
+        let clean = FakeSession(unsaved: false)
+        let dirty = FakeSession(unsaved: true)
         coordinator.register(clean)
         coordinator.register(dirty)
 
-        // A refusal settles immediately, so the drain returns well before the
-        // (generous) timeout rather than stalling on it.
-        let start = ContinuousClock.now
+        // Without force, an unsaved window does not exit, so the drain waits
+        // out the (short, for the test) timeout and reports failure. The caller
+        // is expected to check `anyUnsavedBuffers` and force first.
         let exited = await coordinator.requestQuitAll(force: false,
-                                                      timeout: .seconds(10))
-        let elapsed = ContinuousClock.now - start
-
+                                                      timeout: .milliseconds(100))
         XCTAssertFalse(exited)
         XCTAssertTrue(clean.hasExited)
         XCTAssertFalse(dirty.hasExited)
-        XCTAssertLessThan(elapsed, .seconds(1))
     }
 
     func testForcedQuitExitsUnsavedSession() async {
         let coordinator = TerminationCoordinator()
-        let dirty = FakeSession(exitsOnQuit: false, exitsOnForce: true)
+        let dirty = FakeSession(unsaved: true, exitsOnForce: true)
         coordinator.register(dirty)
 
         let exited = await coordinator.requestQuitAll(force: true)
@@ -96,7 +109,7 @@ final class TerminationCoordinatorTests: XCTestCase {
 
     func testDeregisterRemovesSession() async {
         let coordinator = TerminationCoordinator()
-        let a = FakeSession(exitsOnQuit: true)
+        let a = FakeSession(unsaved: false)
         coordinator.register(a)
         XCTAssertFalse(coordinator.isEmpty)
         coordinator.deregister(a)

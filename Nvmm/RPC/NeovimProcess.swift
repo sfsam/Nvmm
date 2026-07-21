@@ -362,9 +362,11 @@ actor NeovimProcess {
                    [.array([.array([.string(text)])]), true,
                     .map([(.string("err"), true)])])
         case .quit(let force):
-            // `silent!` suppresses the "no write since last change" error (and
-            // its press-a-key prompt) that a refused non-forced quit would spill
-            // into the editor; the command still quits when buffers are clean.
+            // `quitall`/`quitall!` end every window. The app checks for unsaved
+            // buffers and confirms with the user before a non-forced quit, so
+            // this is only issued when it will succeed; `silent!` still guards
+            // against another error (e.g. a running terminal) spilling a
+            // press-a-key prompt into the editor.
             notify("nvim_command",
                    [.string(force ? "silent! quitall!" : "silent! quitall")])
         }

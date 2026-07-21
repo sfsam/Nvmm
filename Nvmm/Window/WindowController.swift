@@ -30,11 +30,8 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     private weak var coordinator: TerminationCoordinator?
 
     // Quit state for `QuitSession`. `hasExited` becomes true once Neovim has
-    // disconnected and the window has closed; `quitRefused` becomes true when
-    // the last non-forced quit was declined for unsaved buffers (reset by the
-    // next attempt), so the termination drain need not wait on this window.
+    // disconnected and the window has closed.
     private(set) var hasExited = false
-    private(set) var quitRefused = false
 
     private var renderTask: Task<Void, Never>?
     private var inputTask: Task<Void, Never>?
@@ -369,27 +366,21 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
 
     // MARK: - Quit lifecycle (QuitSession)
 
-    /// Asks Neovim to quit all buffers. A forced quit discards unsaved changes;
-    /// a non-forced quit first checks for them and, when any exist, does nothing
-    /// (the window stays open) rather than issuing a quit Neovim would refuse —
-    /// which, depending on mode, spills an error into the editor. Safe to call
-    /// repeatedly; each request re-checks, since nothing is reported back.
+    /// Whether this window's Neovim has any unsaved buffers. False once the
+    /// window has no process (never started, or already exited).
+    func hasUnsavedBuffers() async -> Bool {
+        guard let process else { return false }
+        return await process.hasUnsavedBuffers()
+    }
+
+    /// Asks Neovim to quit all buffers. A forced quit discards unsaved changes.
+    /// The unsaved check and the user's confirmation are done centrally before
+    /// this is called (see `TerminationCoordinator`), so a non-forced quit is
+    /// issued only when the window is already clean; the outcome is observed
+    /// when the grid stream ends and the window closes.
     func beginQuit(force: Bool) {
-        guard let process, !hasExited else { return }
-        quitRefused = false
-        if force {
-            enqueue(.quit(force: true))
-            return
-        }
-        Task { [weak self] in
-            let unsaved = await process.hasUnsavedBuffers()
-            guard let self, !self.hasExited else { return }
-            if unsaved {
-                self.quitRefused = true
-            } else {
-                self.enqueue(.quit(force: false))
-            }
-        }
+        guard !hasExited else { return }
+        enqueue(.quit(force: force))
     }
 
     /// Closes the window in response to Neovim disconnecting. Idempotent; the
