@@ -531,8 +531,12 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         lastBackground = color
 
         let r = CGFloat(color.red), g = CGFloat(color.green), b = CGFloat(color.blue)
-        window?.contentView?.layer?.backgroundColor = CGColor(
-            red: r / 255, green: g / 255, blue: b / 255, alpha: 1)
+        // sRGB, which is how the grid's own drawing interprets these same
+        // components. `CGColor(red:green:blue:alpha:)` would build the color in
+        // Generic RGB instead, so the margins and the title bar would render a
+        // visibly different color from the grid they surround.
+        window?.contentView?.layer?.backgroundColor = NSColor(
+            srgbRed: r / 255, green: g / 255, blue: b / 255, alpha: 1).cgColor
 
         // Perceived lightness (HSP model, http://alienryderflex.com/hsp.html).
         let lightness = (0.299 * r * r + 0.587 * g * g + 0.114 * b * b).squareRoot()
