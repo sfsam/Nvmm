@@ -143,6 +143,71 @@ nonisolated func parseCompositionGeometry(_ result: MPValue) -> CompositionGeome
     return geometry
 }
 
+// MARK: - Visual selection
+
+/// A Visual-mode selection: its extent on the screen grid and the
+/// selected text.
+///
+/// `start` and `end` are inclusive zero-based grid points, ordered so that
+/// `start` comes first on screen regardless of which end the cursor is at.
+nonisolated struct VisualSelection: Sendable, Equatable {
+    var start = GridPoint(row: 0, column: 0)
+    var end = GridPoint(row: 0, column: 0)
+    var text = ""
+
+    /// True if the point lies within the selection, treating it as a run of
+    /// screen cells from `start` to `end`.
+    func contains(_ point: GridPoint) -> Bool {
+        if start.row == end.row {
+            return point.row == start.row &&
+                point.column >= start.column && point.column <= end.column
+        }
+        if point.row == start.row { return point.column >= start.column }
+        if point.row == end.row { return point.column <= end.column }
+        return point.row > start.row && point.row < end.row
+    }
+}
+
+/// True for the mode short names that mean a Visual (not Select) selection.
+private nonisolated func isVisualModeName(_ name: String) -> Bool {
+    switch name {
+    case "v", "V", "\u{16}", "vs", "Vs", "\u{16}s": return true
+    default: return false
+    }
+}
+
+/// Parses the `getVisualSelection` reply, returning nil for a malformed shape,
+/// a non-Visual mode, an off-screen end, or an empty selection.
+///
+/// Expected result array: `[mode, startScreenpos, cursorScreenpos, lines]`,
+/// where the screen positions are `screenpos()` dictionaries with 1-based
+/// `row`/`col`, and `lines` is the selected text one line per entry.
+nonisolated func parseVisualSelection(_ result: MPValue) -> VisualSelection? {
+    guard let values = result.arrayValue, values.count >= 4,
+          let mode = values[0].stringValue, isVisualModeName(mode),
+          let startRow = values[1].mapValue(for: .string("row"))?.integer?.signed,
+          let startCol = values[1].mapValue(for: .string("col"))?.integer?.signed,
+          let cursorRow = values[2].mapValue(for: .string("row"))?.integer?.signed,
+          let cursorCol = values[2].mapValue(for: .string("col"))?.integer?.signed,
+          let lines = values[3].arrayValue,
+          startRow > 0, cursorRow > 0
+    else { return nil }
+
+    // `screenpos()` reports the anchor and the cursor in buffer order, which is
+    // not screen order when the selection was made backwards.
+    let startIsFirst = startRow < cursorRow ||
+        (startRow == cursorRow && startCol <= cursorCol)
+    let first = GridPoint(row: Int(startRow) - 1, column: Int(startCol) - 1)
+    let second = GridPoint(row: Int(cursorRow) - 1, column: Int(cursorCol) - 1)
+
+    var selection = VisualSelection()
+    selection.start = startIsFirst ? first : second
+    selection.end = startIsFirst ? second : first
+    selection.text = lines.compactMap(\.stringValue).joined(separator: "\n")
+
+    return selection.text.isEmpty ? nil : selection
+}
+
 // MARK: - Process actor
 
 /// An RPC connection to one Neovim process.
@@ -408,6 +473,24 @@ actor NeovimProcess {
                                                 [.string(lua), .array([])]),
               !response.isError else { return nil }
         return parseCompositionGeometry(response.result)
+    }
+
+    /// Queries the current Visual-mode selection — its screen extent and its
+    /// text — so a Look Up gesture inside a selection looks up the whole
+    /// selection rather than the single word under the pointer. Bounded by a
+    /// short deadline: the gesture is transient, and a late answer would open a
+    /// popover the user has stopped asking for.
+    func getVisualSelection(
+        timeout: Duration = .milliseconds(100)) async -> VisualSelection? {
+        let expr = """
+            [mode(), screenpos(0, line('v'), col('v')), \
+            screenpos(0, line('.'), col('.')), \
+            getregion(getpos('v'), getpos('.'), {'type': mode()})]
+            """
+        guard case .response(let response) = await requestBounded(
+                "nvim_eval", [.string(expr)], timeout: timeout),
+              !response.isError else { return nil }
+        return parseVisualSelection(response.result)
     }
 
     private func startSync(method: String, arguments: [MPValue],

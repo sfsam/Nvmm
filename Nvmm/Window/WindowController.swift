@@ -204,6 +204,9 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         gridView.fetchCompositionGeometry = { [weak self] in
             await self?.process?.getCompositionGeometry() ?? nil
         }
+        gridView.fetchVisualSelection = { [weak self] in
+            await self?.process?.getVisualSelection() ?? nil
+        }
 
         startNeovim()
     }

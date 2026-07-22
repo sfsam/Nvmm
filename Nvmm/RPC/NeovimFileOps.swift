@@ -69,8 +69,8 @@ extension NeovimProcess {
 
     /// Issues a request bounded by a deadline, cancelling it if the deadline
     /// passes first.
-    private func requestBounded(_ method: String, _ arguments: [MPValue],
-                                timeout: Duration) async -> RPCSyncResult {
+    func requestBounded(_ method: String, _ arguments: [MPValue],
+                        timeout: Duration) async -> RPCSyncResult {
         await withTaskGroup(of: RPCSyncResult.self) { group in
             group.addTask {
                 do {

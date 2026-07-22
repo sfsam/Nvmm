@@ -113,6 +113,11 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     /// and cached (see `refreshCompositionGeometry`).
     var fetchCompositionGeometry: (() async -> CompositionGeometry?)?
 
+    /// Fetches the current Visual-mode selection, for a Look Up gesture made
+    /// inside one. Async, and its reply is checked against the token and grid
+    /// tick that were current when the gesture happened.
+    var fetchVisualSelection: (() async -> VisualSelection?)?
+
     /// Per-button drag state. A `nil` origin means the press began outside the
     /// grid, so its drag and release are ignored. `location` and `modifiers`
     /// hold the most recent drag so the drag timer can resend it.
@@ -185,6 +190,9 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     private var compositionRender = CompositionRenderState()
     private var compositionGeometry: CompositionGeometry?
     private var compositionWidthPolicy = CompositionWidthPolicy()
+
+    /// Builds the text and anchor point for a Look Up gesture.
+    private let lookupController = LookupController()
 
     // MARK: - Setup
 
@@ -294,6 +302,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
 
         cursorLineThickness = UInt32(2 * scaleFactor)
         metalLayer.contentsScale = scaleFactor
+        lookupController.setFontFamily(font)
         updateCompositionLayout()
         needsDisplay = true
     }
@@ -1688,5 +1697,70 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         compositionRender.valid = true
         inputContext?.invalidateCharacterCoordinates()
         needsDisplay = true
+    }
+
+    // MARK: - Look Up
+
+    /// Identifies the most recent gesture, so an earlier selection query that
+    /// answers late is discarded instead of opening a stale popover.
+    private var lookupRequestToken: UInt64 = 0
+
+    /// The text baseline within a row, in the view's coordinate space. The
+    /// popover's leader line points here, so it must match where the renderer
+    /// puts the glyphs.
+    private var lookupBaseline: CGFloat {
+        convertFromBacking(NSSize(width: 0,
+                                  height: CGFloat(baselineTranslate.y))).height
+    }
+
+    override func quickLook(with event: NSEvent) {
+        lookupRequestToken &+= 1
+        let token = lookupRequestToken
+        let point = cellLocation(event.locationInWindow)
+        guard let grid, LookupController.grid(grid, contains: point) else { return }
+
+        // In Visual mode the selection is what the user is pointing at,
+        // and only Neovim knows its text — a linewise or multi-line
+        // selection covers more than the row under the pointer.
+        if grid.isVisualMode {
+            requestVisualLookup(at: point, token: token, gridTick: grid.tick)
+            return
+        }
+        showRenderedLookup(at: point)
+    }
+
+    /// Looks up the word under the point, read straight from the drawn grid.
+    private func showRenderedLookup(at point: GridPoint) {
+        guard let result = lookupController.renderedLookup(
+                at: point, in: grid, cellSize: backingCellSize,
+                baseline: lookupBaseline) else { return }
+        showDefinition(for: result.attributedString, at: result.anchorPoint)
+    }
+
+    /// Asks Neovim for the Visual selection and looks it up, anchored at its
+    /// first cell. Nothing is shown if the gesture was superseded, the grid
+    /// changed underneath, or the point turns out to be outside the selection.
+    private func requestVisualLookup(at point: GridPoint, token: UInt64,
+                                     gridTick: UInt64) {
+        guard let fetch = fetchVisualSelection else { return }
+
+        Task { [weak self] in
+            let selection = await fetch()
+            guard let self, let selection, self.lookupRequestToken == token,
+                  let grid = self.grid, grid.tick == gridTick,
+                  selection.contains(point) else { return }
+
+            let cell = self.backingCellSize
+            let baseline = self.lookupBaseline
+            let anchor = self.lookupController.renderedLookup(
+                at: selection.start, in: grid, cellSize: cell,
+                baseline: baseline)?.anchorPoint
+                ?? NSPoint(x: CGFloat(selection.start.column) * cell.width,
+                           y: CGFloat(selection.start.row) * cell.height + baseline)
+
+            self.showDefinition(
+                for: self.lookupController.attributedString(selection.text),
+                at: anchor)
+        }
     }
 }
