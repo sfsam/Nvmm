@@ -1331,6 +1331,10 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     /// where the editor accepts text input.
     private func updateMouseCursor(_ windowPoint: NSPoint) {
         guard let grid else { return }
+        guard Settings.contextSensitiveCursor else {
+            NSCursor.arrow.set()
+            return
+        }
         let size = grid.size
         let cell = cellLocation(windowPoint)
         guard pointInGrid(cell, size) else {

@@ -20,6 +20,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // invocation does not start an overlapping close.
     private var closeAllInFlight = false
 
+    // The settings window, created the first time it is asked for and kept so
+    // it reopens where it was.
+    private var settingsWindow: SettingsWindowController?
+
+    // Defaults are registered before launching, so the first window to read a
+    // setting sees the registered value rather than a bare `false`.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        Settings.registerDefaults()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Startup wiring checks: confirm the two integration points the rest of
         // the app depends on — the utf8proc bridge and the bundled nvim binary.
@@ -158,6 +168,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateLater
     }
 
+    /// Whether closing the last window quits the app. Read on each close, so
+    /// changing the setting takes effect from the next one.
+    func applicationShouldTerminateAfterLastWindowClosed(
+        _ sender: NSApplication) -> Bool {
+        Settings.terminateAfterLastWindow
+    }
+
     /// Quits every window, prompting first (app-modal) if any have unsaved
     /// buffers. Returns whether they all exited: a clean quit drains
     /// non-forced; unsaved buffers ask the user, and a confirmation drains
@@ -172,6 +189,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return await terminationCoordinator.requestQuitAll(force: true)
         }
         return await terminationCoordinator.requestQuitAll(force: false)
+    }
+
+    // MARK: - Settings
+
+    /// Shows the settings window, which edits the defaults in place.
+    @IBAction func showSettings(_ sender: Any?) {
+        if settingsWindow == nil { settingsWindow = SettingsWindowController() }
+        settingsWindow?.showWindow(sender)
     }
 
     /// Closes every window, prompting first (app-modal) if any have unsaved

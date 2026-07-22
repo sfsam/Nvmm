@@ -38,6 +38,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     private var renderTask: Task<Void, Never>?
     private var inputTask: Task<Void, Never>?
     private var modifiedTask: Task<Void, Never>?
+    private var settingsTask: Task<Void, Never>?
 
     // The ordered channel from main-actor input handlers to the process actor.
     private let commands: AsyncStream<NvimCommand>
@@ -128,12 +129,14 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
             defer: false)
         window.title = "Nvmm"
         window.tabbingMode = .disallowed
+        window.titlebarAppearsTransparent = Settings.titlebarAppearsTransparent
         self.init(window: window)
         self.renderManager = renderManager
         self.coordinator = coordinator
         self.cascadeSource = source
         window.delegate = self
         window.registerForDraggedTypes([.fileURL])
+        observeSettings()
     }
 
     override init(window: NSWindow?) {
@@ -484,12 +487,47 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         saveFrame()
     }
 
+    // MARK: - Applying window state
+
+    /// Reapplies the settings that are part of this window's state whenever the
+    /// defaults change, so the settings window takes effect as it is clicked.
+    ///
+    /// Settings read at the point of use — where to open a file, whether to
+    /// quit after the last window — need nothing here. This is only for state
+    /// the window is already holding.
+    ///
+    /// One notification covers every key rather than an observation per key:
+    /// applying is idempotent and costs a comparison, and the notification
+    /// coalesces a run of writes that separate observations would not.
+    private func observeSettings() {
+        let changes = NotificationCenter.default.notifications(
+            named: UserDefaults.didChangeNotification)
+        settingsTask = Task { [weak self] in
+            for await _ in changes {
+                self?.applyTitlebarTransparency()
+            }
+        }
+    }
+
+    /// Applies the transparent-title-bar setting. The background is reapplied
+    /// with it: a transparent title bar shows the editor's background color
+    /// behind it, so the window has to be retinted for the new extent.
+    private func applyTitlebarTransparency() {
+        let transparent = Settings.titlebarAppearsTransparent
+        guard let window, window.titlebarAppearsTransparent != transparent else {
+            return
+        }
+        window.titlebarAppearsTransparent = transparent
+        applyBackground(lastBackground, force: true)
+    }
+
     /// Tints the content background with Neovim's default background color so
     /// the grid margins match the editor, and sets the window appearance from
     /// the color's lightness so the title-bar text stays legible. Only acts on
-    /// a change.
-    private func applyBackground(_ color: RGBColor) {
-        guard color != lastBackground else { return }
+    /// a change, unless `force` is set for a reason unrelated to the color —
+    /// the title bar becoming transparent changes what the tint has to cover.
+    private func applyBackground(_ color: RGBColor, force: Bool = false) {
+        guard color != lastBackground || force else { return }
         lastBackground = color
 
         let r = CGFloat(color.red), g = CGFloat(color.green), b = CGFloat(color.blue)
@@ -635,6 +673,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         renderTask?.cancel()
         inputTask?.cancel()
         modifiedTask?.cancel()
+        settingsTask?.cancel()
         startupTimeoutTask?.cancel()
         // Close the transport so this window's Neovim does not outlive it.
         let process = self.process
