@@ -23,7 +23,9 @@ import CoreText
 final class WindowController: NSWindowController, NSWindowDelegate, QuitSession {
     private let gridView = GridView(frame: .zero)
     private var renderManager: RenderContextManager!
-    private var process: NeovimProcess?
+    // The Neovim this window drives. Readable by the File menu actions, which
+    // live in an extension; nil before `start()` and after the window closes.
+    private(set) var process: NeovimProcess?
 
     // The app-wide window registry; held weakly to avoid a retain cycle (the
     // coordinator holds its windows strongly). Used to deregister on close.
@@ -105,8 +107,19 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     private var gridMinHeightConstraint: NSLayoutConstraint!
     private var gridTrailingConstraint: NSLayoutConstraint!
 
+    // The window this one was opened from, if any. A window opened while
+    // another is on screen adopts that window's grid size and cascades from it,
+    // rather than restoring the saved frame on top of it.
+    private weak var cascadeSource: WindowController?
+
+    // The files this window's Neovim opens at startup, and the directory it
+    // starts in. Set before `start()`.
+    private var startupFiles: [String] = []
+    private var startupDirectory: String?
+
     convenience init(renderManager: RenderContextManager,
-                     coordinator: TerminationCoordinator) {
+                     coordinator: TerminationCoordinator,
+                     cascadingFrom source: WindowController? = nil) {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 800, height: 500),
             styleMask: [.titled, .closable, .miniaturizable, .resizable,
@@ -118,7 +131,9 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         self.init(window: window)
         self.renderManager = renderManager
         self.coordinator = coordinator
+        self.cascadeSource = source
         window.delegate = self
+        window.registerForDraggedTypes([.fileURL])
     }
 
     override init(window: NSWindow?) {
@@ -137,9 +152,14 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         commandsContinuation.yield(command)
     }
 
-    /// Configures rendering and launches Neovim. Call after the window is on
-    /// screen so its screen and backing scale factor are known.
-    func start() {
+    /// Configures rendering and launches Neovim, opening `files` at startup.
+    ///
+    /// `directory` is the working directory Neovim starts in; when nil it is
+    /// derived from the first file, falling back to the invoking shell's
+    /// working directory and then the home directory.
+    func start(files: [String] = [], directory: String? = nil) {
+        startupFiles = files
+        startupDirectory = directory
         guard let window, let screen = window.screen ?? NSScreen.main else { return }
 
         let context: RenderContext
@@ -161,7 +181,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         window.animationBehavior = .none
         window.resizeIncrements = gridView.cellSize
         window.initialFirstResponder = gridView
-        loadSavedFrame(in: window)
+        placeWindow(window)
         resizeWindow(in: screen)
         if shouldCenter { window.center() }
 
@@ -255,6 +275,21 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         window.setFrame(frame, display: true)
     }
 
+    /// Positions the window and picks the grid size it opens at: cascaded from
+    /// the window it was opened from, if there is one, otherwise restored from
+    /// the saved frame. Cascading keeps a second window from landing exactly on
+    /// top of the first, which restoring the one saved frame would do.
+    private func placeWindow(_ window: NSWindow) {
+        guard let source = cascadeSource, let sourceWindow = source.window else {
+            loadSavedFrame(in: window)
+            return
+        }
+        lastGridSize = source.lastGridSize
+        let frame = sourceWindow.frame
+        let topLeft = NSPoint(x: frame.minX, y: frame.maxY)
+        window.setFrameTopLeftPoint(sourceWindow.cascadeTopLeft(from: topLeft))
+    }
+
     /// Restores the saved grid size and window position, or falls back to the
     /// starting grid centered on screen when there is nothing saved. The saved
     /// pixel size is deliberately not restored; `resizeWindow` recomputes it
@@ -295,6 +330,29 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         }
     }
 
+    /// The argv Neovim is launched with. Startup files follow `--embed`, opened
+    /// one per tab page unless the buffers preference is set, matching how the
+    /// same files would be opened into a window that is already running.
+    private func neovimArguments() -> [String] {
+        var arguments = ["--embed"]
+        if startupFiles.isEmpty { return arguments }
+        if !Settings.openFilesInBuffers { arguments.append("-p") }
+        return arguments + startupFiles
+    }
+
+    /// The directory Neovim starts in: the caller's, else the first startup
+    /// file's, else the working directory Nvmm was invoked from. Launched from
+    /// the Finder there is no such directory, so the home directory is used —
+    /// never the app's own, which is the filesystem root.
+    private func workingDirectory() -> String {
+        if let startupDirectory, !startupDirectory.isEmpty { return startupDirectory }
+        if let file = startupFiles.first {
+            return (file as NSString).deletingLastPathComponent
+        }
+        let shellDirectory = ProcessInfo.processInfo.environment["PWD"]
+        return shellDirectory ?? NSHomeDirectory()
+    }
+
     private func startNeovim() {
         guard let nvimPath = NeovimBundle.executableURL?.path else {
             NSLog("Nvmm: bundled nvim not found")
@@ -302,7 +360,8 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         }
 
         let launch = NeovimBundle.launchCommand(nvimPath: nvimPath,
-                                                arguments: ["--embed"])
+                                                arguments: neovimArguments())
+        let directory = workingDirectory()
 
         let process = NeovimProcess()
         self.process = process
@@ -326,7 +385,8 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
 
         renderTask = Task { [weak self] in
             do {
-                try await process.spawn(path: launch.path, argv: launch.argv)
+                try await process.spawn(path: launch.path, argv: launch.argv,
+                                        workingDirectory: directory)
             } catch {
                 NSLog("Nvmm: failed to spawn nvim: \(error)")
                 self?.handleDisconnect()
@@ -552,10 +612,19 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         saveFrame()
     }
 
-    // The red close button just closes the window (AppKit's default). Closing
-    // it tears down this window's Neovim in `windowWillClose`; quitting with an
-    // unsaved-buffer check is an app-quit concern (Cmd-Q), not a window-close
-    // one. A save prompt on close is a later item.
+    // The red close button means the same thing as Close Window, so it is
+    // answered the same way: refuse the immediate close, ask about each
+    // modified buffer, then quit Neovim. The window closes when its Neovim
+    // exits and the grid stream ends (see `handleDisconnect`), which does not
+    // route back through here.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        // With no Neovim to ask — it never started — there is nothing to
+        // prompt about and nothing to quit, so the close proceeds.
+        guard process != nil else { return true }
+        closeWindow(sender)
+        return false
+    }
+
     func windowWillClose(_ notification: Notification) {
         // The window is gone, so it counts as exited for any termination drain
         // holding a reference to it.

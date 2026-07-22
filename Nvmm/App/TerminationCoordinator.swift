@@ -48,6 +48,11 @@ import Foundation
     /// True when no windows remain; AppKit may terminate immediately.
     var isEmpty: Bool { sessions.isEmpty }
 
+    /// The windows that can still accept commands, in creation order. Used to
+    /// pick a window to open files in, and to decide whether an open needs a
+    /// new window at all.
+    var liveSessions: [QuitSession] { sessions.filter { !$0.hasExited } }
+
     /// Whether any live window has unsaved buffers. The windows are asked in
     /// turn, stopping at the first with unsaved changes. Callers use this to
     /// decide whether an app-modal quit or close-all prompt is needed.

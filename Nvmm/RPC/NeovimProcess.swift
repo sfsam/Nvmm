@@ -666,6 +666,7 @@ extension NeovimProcess {
         }
 
         installModifiedAutocmd()
+        installFileHelpers()
 
         var result = validation
         result.status = .success
