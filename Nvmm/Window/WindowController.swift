@@ -5,16 +5,16 @@
 //  Owns a grid view and the Neovim process that drives it.
 //
 //  The window uses a full-size content view; the grid view is a subview inset
-//  by a margin on the leading and trailing edges (the trailing inset is where a
-//  vertical scroller will sit) and pinned to the content view's safe area at the
-//  top and its bottom edge, via Auto Layout. On start the controller sizes the
-//  window to a starting grid, spawns an embedded Neovim, and attaches a UI. It
-//  then streams flushed grid snapshots into the view and forwards user input —
-//  keys, mouse, and window resize — to Neovim through one ordered command
-//  channel. The window is authoritative for size: a resize resizes the Neovim
-//  grid to fill it, and when a live resize ends the window snaps to the exact
-//  grid size so no partial cell is left over. Focus mirrors into
-//  `nvim_ui_set_focus` and the view's active state.
+//  by a margin on the leading and trailing edges (the trailing inset grows to
+//  hold the vertical scrollbar when it is shown) and pinned to the content
+//  view's safe area at the top and its bottom edge, via Auto Layout. On start
+//  the controller sizes the window to a starting grid, spawns an embedded
+//  Neovim, and attaches a UI. It then streams flushed grid snapshots into the
+//  view and forwards user input — keys, mouse, and window resize — to Neovim
+//  through one ordered command channel. The window is authoritative for size:
+//  a resize resizes the Neovim grid to fill it, and when a live resize ends
+//  the window snaps to the exact grid size so no partial cell is left over.
+//  Focus mirrors into `nvim_ui_set_focus` and the view's active state.
 //
 
 import Cocoa
@@ -22,6 +22,7 @@ import CoreText
 
 final class WindowController: NSWindowController, NSWindowDelegate, QuitSession {
     private let gridView = GridView(frame: .zero)
+    private let scroller = Scroller(frame: .zero)
     private var renderManager: RenderContextManager!
     // The Neovim this window drives. Readable by the File menu actions, which
     // live in an extension; nil before `start()` and after the window closes.
@@ -83,8 +84,9 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     private var liveResizeDepth = 0
 
     // Layout metrics. The grid view is inset by `gridMargin` on the leading and
-    // trailing edges; the trailing inset grows by a scroller's width once one is
-    // added. The window cannot shrink below `minGridColumns` × `minGridRows`.
+    // trailing edges; the trailing inset grows by the scroller's width while
+    // the scrollbar is shown. The window cannot shrink below `minGridColumns` ×
+    // `minGridRows`.
     private let gridMargin: CGFloat = 4
     private let minGridColumns = 12
     private let minGridRows = 3
@@ -101,12 +103,31 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     // change (an empty string is the default: the monospaced system font).
     private var currentGuifont = ""
 
-    // Constraints kept so later work can adjust them without rebuilding the
-    // layout: the min-size pair on a font change, the trailing inset when a
-    // scroller appears.
+    // Constraints kept so they can be adjusted without rebuilding the layout:
+    // the min-size pair on a font change, the trailing inset as the scrollbar
+    // comes and goes.
     private var gridMinWidthConstraint: NSLayoutConstraint!
     private var gridMinHeightConstraint: NSLayoutConstraint!
     private var gridTrailingConstraint: NSLayoutConstraint!
+
+    // Pins the grid view's width for the duration of the scrollbar animation,
+    // so the window resizes around the grid rather than the grid reflowing.
+    // Held here rather than captured by the animation's completion handler,
+    // which is a Sendable closure and cannot carry a constraint across. The
+    // counter identifies the animation in flight, so a completion belonging to
+    // one that has since been superseded can be told apart and ignored.
+    private var scrollbarWidthHold: NSLayoutConstraint?
+    private var scrollbarAnimation: UInt64 = 0
+
+    // Whether the scrollbar is showing. Tracked rather than read back from the
+    // scroller because it is the target state during the show/hide animation,
+    // which outlives the moment the setting changed.
+    private var isScrollbarVisible = false
+
+    // Set while the scrollbar animation is resizing the window, so the resize
+    // is not mistaken for the user's and forwarded to Neovim: the grid keeps
+    // its size in cells throughout, only the window around it changes.
+    private var isTogglingScrollbar = false
 
     // The window this one was opened from, if any. A window opened while
     // another is on screen adopts that window's grid size and cascades from it,
@@ -262,6 +283,9 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         gridView.fetchVisualSelection = { [weak self] in
             await self?.process?.getVisualSelection() ?? nil
         }
+        scroller.onScroll = { [weak self] line in
+            self?.scrollToLine(line)
+        }
 
         startNeovim()
     }
@@ -271,7 +295,12 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         guard let contentView = window.contentView else { return }
         contentView.wantsLayer = true
         gridView.translatesAutoresizingMaskIntoConstraints = false
+        scroller.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(scroller)
         contentView.addSubview(gridView)
+
+        isScrollbarVisible = Settings.verticalScrollbar
+        scroller.isHidden = !isScrollbarVisible
 
         let cell = gridView.cellSize
         let safeArea = contentView.safeAreaLayoutGuide
@@ -280,7 +309,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         gridMinHeightConstraint = gridView.heightAnchor.constraint(
             greaterThanOrEqualToConstant: cell.height * CGFloat(minGridRows))
         gridTrailingConstraint = contentView.trailingAnchor.constraint(
-            equalTo: gridView.trailingAnchor, constant: gridMargin)
+            equalTo: gridView.trailingAnchor, constant: trailingInset)
 
         NSLayoutConstraint.activate([
             gridView.topAnchor.constraint(equalTo: safeArea.topAnchor),
@@ -290,14 +319,30 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
             gridTrailingConstraint,
             gridMinWidthConstraint,
             gridMinHeightConstraint,
+
+            // The scrollbar runs the full height of the grid, flush with the
+            // trailing edge: it takes the margin's place rather than sitting
+            // inside it.
+            scroller.topAnchor.constraint(equalTo: safeArea.topAnchor),
+            scroller.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            scroller.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            scroller.widthAnchor.constraint(equalToConstant: Scroller.width),
         ])
         contentView.layoutSubtreeIfNeeded()
+    }
+
+    /// The inset between the grid view's trailing edge and the window's: the
+    /// margin, plus the scrollbar's width while it is shown.
+    private var trailingInset: CGFloat {
+        gridMargin + (isScrollbarVisible ? Scroller.width : 0)
     }
 
     /// The insets between the window frame and the grid view: the leading and
     /// trailing margins horizontally, the safe area (title bar) vertically.
     private var gridInsets: (horizontal: CGFloat, top: CGFloat) {
-        (gridMargin + (gridTrailingConstraint?.constant ?? gridMargin),
+        // The trailing inset is read from the setting, not from the constraint,
+        // which holds an intermediate value while the scrollbar animates.
+        (gridMargin + trailingInset,
          window?.contentView?.safeAreaInsets.top ?? 0)
     }
 
@@ -551,6 +596,9 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
                 self.applyGuifont(grid.guifont)
                 self.applyBackground(grid.defaultBackground)
                 self.gridView.setGrid(grid)
+                self.scroller.update(topline: grid.viewport.topline,
+                                     botline: grid.viewport.botline,
+                                     lineCount: grid.viewport.lineCount)
                 self.hasReceivedGrid = true
                 if !self.hasShownWindow, grid.startupComplete || self.startupRelaxed {
                     self.showInitialWindow()
@@ -709,6 +757,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         settingsTask = Task { [weak self] in
             for await _ in changes {
                 self?.applyTitlebarTransparency()
+                self?.applyScrollbarVisibility()
             }
         }
     }
@@ -723,6 +772,90 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         }
         window.titlebarAppearsTransparent = transparent
         applyBackground(lastBackground, force: true)
+    }
+
+    /// Shows or hides the scrollbar, animating it and the window together.
+    ///
+    /// The grid keeps its size in cells: rather than reflowing the text to make
+    /// room, the window grows or shrinks by the bar's width around it. Holding
+    /// the grid view's width at its current value for the duration is what does
+    /// that — it is a required constraint, so the window has to give — and it
+    /// is dropped again once the animation lands, leaving the window resizable
+    /// as before. Full screen is the exception: the window cannot change size
+    /// there, so the grid is resized instead.
+    private func applyScrollbarVisibility() {
+        let show = Settings.verticalScrollbar
+        guard let window, gridTrailingConstraint != nil,
+              show != isScrollbarVisible else { return }
+        isScrollbarVisible = show
+        let inset = trailingInset
+
+        if window.styleMask.contains(.fullScreen) {
+            gridTrailingConstraint.constant = inset
+            scroller.isHidden = !show
+            scroller.alphaValue = show ? 1 : 0
+            window.contentView?.layoutSubtreeIfNeeded()
+            resizeGridToFitWindow()
+            return
+        }
+
+        // A toggle arriving mid-animation supersedes the one in flight: drop
+        // its hold, and stamp a generation so its completion — which carries a
+        // now-stale `show` — leaves the state this pass is establishing alone.
+        scrollbarWidthHold?.isActive = false
+        scrollbarAnimation &+= 1
+        let animation = scrollbarAnimation
+
+        let holdGridWidth = gridView.widthAnchor.constraint(
+            equalToConstant: gridView.frame.width)
+        holdGridWidth.priority = .required
+        holdGridWidth.isActive = true
+        scrollbarWidthHold = holdGridWidth
+        isTogglingScrollbar = true
+
+        // Fade in from nothing; a fade out keeps drawing until it is done, so
+        // the bar is only hidden in the completion handler.
+        if show {
+            scroller.alphaValue = 0
+            scroller.isHidden = false
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            gridTrailingConstraint.animator().constant = inset
+            scroller.animator().alphaValue = show ? 1 : 0
+        } completionHandler: { [weak self] in
+            // AppKit runs the completion handler on the main thread, but does
+            // not type it as main-actor isolated.
+            MainActor.assumeIsolated {
+                guard let self, animation == self.scrollbarAnimation else {
+                    return
+                }
+                self.scrollbarWidthHold?.isActive = false
+                self.scrollbarWidthHold = nil
+                self.scroller.isHidden = !show
+                self.isTogglingScrollbar = false
+                self.saveFrame()
+            }
+        }
+    }
+
+    /// Resizes the Neovim grid to the largest one the window now fits. Used
+    /// where the layout changed under a window that cannot itself resize — in
+    /// full screen — rather than the usual way round.
+    private func resizeGridToFitWindow() {
+        guard isReady else { return }
+        let size = gridView.desiredGridSize
+        guard size.width >= 1, size.height >= 1, size != lastGridSize else { return }
+        lastGridSize = size
+        enqueue(.resize(width: size.width, height: size.height))
+    }
+
+    /// Scrolls the window so `line` (one-based) is its top line, in response to
+    /// the scrollbar being dragged or clicked.
+    private func scrollToLine(_ line: Int) {
+        enqueue(.scrollToLine(line))
     }
 
     /// Tints the content background with Neovim's default background color so
@@ -799,7 +932,9 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     // grid to the largest whole-cell grid that fits. `resizeIncrements` keeps the
     // drag advancing in whole cells so the grid stays in step with the drawable.
     func windowDidResize(_ notification: Notification) {
-        guard isReady else { return }
+        // A scrollbar animation resizes the window around a grid that is being
+        // held at its current size, so there is nothing to forward.
+        guard isReady, !isTogglingScrollbar else { return }
         let size = gridView.desiredGridSize
         // Show the grid size in the title bar while a live resize is in progress;
         // the real title is restored when the resize ends.

@@ -434,6 +434,12 @@ actor NeovimProcess {
             notify("nvim_echo",
                    [.array([.array([.string(text)])]), true,
                     .map([(.string("err"), true)])])
+        case .scrollToLine(let line):
+            // `zt` rather than `winrestview`: it redraws through Neovim's own
+            // scrolling, so wrapped lines, folds, and `smoothscroll` are
+            // accounted for, and it takes the cursor along, which is what
+            // dragging a scrollbar is expected to do.
+            notify("nvim_command", [.string("normal! \(line)Gzt")])
         case .quit(let force):
             // `quitall`/`quitall!` end every window. The app checks for unsaved
             // buffers and confirms with the user before a non-forced quit, so

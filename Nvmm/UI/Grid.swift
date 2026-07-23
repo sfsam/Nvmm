@@ -221,6 +221,10 @@ nonisolated struct Grid: Sendable {
     /// The `guifont` option string (`option_set`), carried on the snapshot so
     /// the window can rebuild its font without a live query.
     var guifont = ""
+    /// The visible line range and buffer length Neovim last reported
+    /// (`win_viewport`), carried on the snapshot so the window's scrollbar
+    /// tracks the viewport in flush order.
+    var viewport = ViewportState()
     /// True once Neovim has fired `VimEnter`, so startup config (including the
     /// final `guifont`) has been applied. The window holds its first paint
     /// until a snapshot with this set, so it never shows an interim font.

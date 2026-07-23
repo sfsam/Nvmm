@@ -33,6 +33,10 @@ nonisolated enum NvimCommand: Sendable {
     case feedkeys(String)
     /// An error message written to Neovim via `nvim_echo` (`err: true`).
     case errorWriteln(String)
+    /// Put the given one-based line at the top of the window, for the
+    /// scrollbar. Carries a line rather than a screen offset because that is
+    /// what the scrollbar knows: Neovim reports its viewport in buffer lines.
+    case scrollToLine(Int)
     /// Quit all buffers (`quitall`), forcing (`quitall!`) when `force` is set.
     /// A non-forced quit with unsaved buffers is refused by Neovim, so the
     /// process stays alive and the window is left open.

@@ -531,6 +531,7 @@ nonisolated final class UIController {
         writing.ambiguousWidthDouble = ambiguousWidthDouble
         writing.emojiWidthDouble = emojiWidthDouble
         writing.guifont = guifont
+        writing.viewport = viewport
         writing.startupComplete = vimentered
         globalGrid = writing
         return globalGrid

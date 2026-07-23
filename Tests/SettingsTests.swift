@@ -21,7 +21,8 @@ final class SettingsTests: XCTestCase {
         let keys = [Settings.contextSensitiveCursorKey,
                     Settings.openFilesInBuffersKey,
                     Settings.terminateAfterLastWindowKey,
-                    Settings.titlebarAppearsTransparentKey]
+                    Settings.titlebarAppearsTransparentKey,
+                    Settings.verticalScrollbarKey]
 
         // The user's own values must not decide the outcome, and must survive
         // the test: only the registration domain is under test here.
@@ -37,5 +38,6 @@ final class SettingsTests: XCTestCase {
         XCTAssertFalse(Settings.openFilesInBuffers)
         XCTAssertFalse(Settings.terminateAfterLastWindow)
         XCTAssertFalse(Settings.titlebarAppearsTransparent)
+        XCTAssertFalse(Settings.verticalScrollbar)
     }
 }

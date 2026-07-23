@@ -29,6 +29,9 @@ enum Settings {
     /// runs behind it.
     static let titlebarAppearsTransparentKey = "NVTitlebarAppearsTransparent"
 
+    /// Whether the window shows a vertical scrollbar down its trailing edge.
+    static let verticalScrollbarKey = "NVEnableVerticalScrollbar"
+
     /// Whether the mouse cursor reflects what it is over — an I-beam over text,
     /// a resize cursor over a separator. Has no settings-window checkbox; it is
     /// on unless the key is set by hand.
@@ -44,6 +47,10 @@ enum Settings {
 
     static var titlebarAppearsTransparent: Bool {
         UserDefaults.standard.bool(forKey: titlebarAppearsTransparentKey)
+    }
+
+    static var verticalScrollbar: Bool {
+        UserDefaults.standard.bool(forKey: verticalScrollbarKey)
     }
 
     static var contextSensitiveCursor: Bool {
@@ -87,24 +94,40 @@ final class SettingsWindowController: NSWindowController {
         let titlebar = Self.checkbox(
             NSLocalizedString("Transparent title bar", comment: "Settings checkbox"),
             key: Settings.titlebarAppearsTransparentKey)
+        let scrollbar = Self.checkbox(
+            NSLocalizedString("Vertical scrollbar", comment: "Settings checkbox"),
+            key: Settings.verticalScrollbarKey)
+        let scrollbarNote = Self.note(NSLocalizedString(
+            "The scrollbar scrolls by buffer lines, not visual lines, so it "
+                + "may not behave as expected if your text has wrapped lines "
+                + "or lines hidden by folds.",
+            comment: "Settings note under the scrollbar checkbox"))
 
         let empty = NSGridCell.emptyContentView
         let grid = NSGridView(views: [[behavior, buffers],
                                       [empty, buffersNote],
                                       [empty, terminate],
-                                      [appearance, titlebar]])
+                                      [appearance, titlebar],
+                                      [empty, scrollbar],
+                                      [empty, scrollbarNote]])
         grid.translatesAutoresizingMaskIntoConstraints = false
         grid.rowAlignment = .firstBaseline
         grid.column(at: 0).xPlacement = .trailing
         grid.row(at: 2).bottomPadding = 12
 
-        // The note belongs to the checkbox above it, so it lines up with that
+        // Each note belongs to the checkbox above it, so it lines up with that
         // checkbox's title rather than with the column.
         let noteCell = grid.cell(for: buffersNote)
         noteCell?.xPlacement = .none
         noteCell?.customPlacementConstraints = [
             buffersNote.leadingAnchor.constraint(
                 equalTo: buffers.leadingAnchor, constant: 21)
+        ]
+        let scrollbarNoteCell = grid.cell(for: scrollbarNote)
+        scrollbarNoteCell?.xPlacement = .none
+        scrollbarNoteCell?.customPlacementConstraints = [
+            scrollbarNote.leadingAnchor.constraint(
+                equalTo: buffersNote.leadingAnchor)
         ]
 
         let contentView = NSView()
