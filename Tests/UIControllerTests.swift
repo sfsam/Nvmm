@@ -394,6 +394,51 @@ final class UIControllerTests: XCTestCase {
         XCTAssertEqual(handoff?.address, "/tmp/nvim-connect.sock")
     }
 
+    func testRealRestartEmitsHandoffFromNeovim() async throws {
+        guard let nvim = await MainActor.run(body: { NeovimBundle.executableURL }) else {
+            throw XCTSkip("bundled nvim executable not available")
+        }
+        let process = NeovimProcess()
+        try await process.spawn(path: nvim.path,
+                                argv: [nvim.path, "--clean", "--embed"])
+        var options = UIOptions()
+        options.extLinegrid = true
+        let result = await process.uiAttach(width: 80, height: 24, options: options)
+        guard result.status == .success else {
+            await process.disconnect()
+            return XCTFail("attach failed: \(result.status) \(result.message)")
+        }
+
+        // `:restart` starts a new server, sends the UI a "restart" handoff
+        // naming its address, then the old server exits. The reconnection
+        // consumer lives in WindowController; here we confirm Neovim emits the
+        // handoff and we capture it through the real transport. The old server
+        // may exit before replying, so the request result is ignored.
+        _ = try? await process.request("nvim_command", [.string("restart")])
+
+        var handoff: UIHandoff?
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while ContinuousClock.now < deadline {
+            if let captured = await process.pendingHandoff() {
+                handoff = captured
+                break
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        await process.disconnect()
+
+        XCTAssertEqual(handoff?.kind, .restart)
+        XCTAssertFalse(handoff?.address.isEmpty ?? true)
+
+        // Nothing reconnected to the successor, so quit it rather than leak it.
+        if let address = handoff?.address, !address.isEmpty {
+            let successor = NeovimProcess()
+            try? await successor.connect(address)
+            _ = try? await successor.request("nvim_command", [.string("qall!")])
+            await successor.disconnect()
+        }
+    }
+
     func testMissingRestartSocketIsAnAbandonedHandoff() {
         XCTAssertTrue(handoffConnectionErrorIsStale(.restart, ENOENT))
         XCTAssertFalse(handoffConnectionErrorIsStale(.connect, ENOENT))

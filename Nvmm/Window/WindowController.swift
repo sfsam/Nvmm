@@ -119,21 +119,38 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     private var startupDirectory: String?
 
     /// How this window reaches Neovim: spawn an embedded process, or connect to
-    /// one already running (`:connect`-style). Set before `start()`.
+    /// one already running (a `:connect`/`:restart` handoff, or the "Connect to
+    /// Running Neovim…" menu). Set before `start()` and on a handoff.
     private enum Source: Sendable {
         case spawn
         case remote(address: String)
     }
     private var source: Source = .spawn
 
-    /// True when this window is a view onto a Neovim it did not spawn. Closing
-    /// such a window detaches this UI and leaves that Neovim running, rather
-    /// than quitting it; its buffers belong to another session, so they are
-    /// never prompted about here.
-    var isRemote: Bool {
-        if case .remote = source { return true }
-        return false
-    }
+    /// Whether this window owns its Neovim. True when it spawned it or
+    /// restarted it (`:restart` continues our own session), false when it
+    /// merely connected to a server someone else runs. An owned Neovim is quit
+    /// when the window closes; a borrowed one is only detached from, and its
+    /// buffers are never prompted about here. Independent of `source`: after
+    /// `:restart` the server is reached over a socket yet is still owned.
+    var ownsServer = true
+
+    /// The kind of the handoff that produced the current connection, if any, so
+    /// a `:restart` whose successor was abandoned (`ENOENT`) is closed quietly
+    /// rather than reported as a connection error. Cleared once a reconnection
+    /// succeeds.
+    private var lastHandoffKind: UIHandoff.Kind?
+
+    /// The address (`v:servername`) of the currently-attached Neovim, captured
+    /// after each attach so a failed `:connect` can fall back to it.
+    private var currentServerAddress: String?
+
+    /// The server to return to if a `:connect` to a new address fails: the one
+    /// we detached from, which stays alive for a plain `:connect`. `:connect`
+    /// detaches the current UI before the new address is known good, so a bad
+    /// address would otherwise orphan the old Neovim; instead we reconnect to
+    /// it. Set on a connect handoff, cleared once consumed.
+    private var connectFallback: (address: String, owned: Bool)?
 
     /// The server address this window connects to, or nil when it spawns
     /// its own Neovim. Used to name the address in a connection-failure alert.
@@ -196,6 +213,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     /// window is a detached view: closing it leaves that Neovim running.
     func start(connectingTo address: String) {
         source = .remote(address: address)
+        ownsServer = false
         launch()
     }
 
@@ -401,8 +419,8 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     /// exists.
     ///
     /// Deliberately distinct from `Source`, which it is derived from: `Source`
-    /// is persistent window state (it drives `isRemote` for the whole window
-    /// lifetime), while `LaunchPlan` is the transient, `Sendable` payload
+    /// is persistent window state (it survives a reconnect and names the
+    /// transport), while `LaunchPlan` is the transient, `Sendable` payload
     /// handed to the render task — carrying the spawn arguments resolved here
     /// so the task need not touch the main actor to build them.
     private enum LaunchPlan: Sendable {
@@ -431,10 +449,18 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         let columns = lastGridSize.width
         let rows = lastGridSize.height
 
-        // A single consumer applies queued commands in order on the process actor.
-        inputTask = Task {
-            for await command in commands {
-                await process.perform(command)
+        // One consumer for the window's life applies queued commands in
+        // order, forwarding to whichever process is current. It is created
+        // once and survives a reconnect (which swaps the process): the command
+        // stream has a single iterator, so re-iterating it from a new task
+        // would deliver nothing. A reconnect updates `self.process`, which this
+        // loop then picks up.
+        if inputTask == nil {
+            let commands = self.commands
+            inputTask = Task { [weak self] in
+                for await command in commands {
+                    await self?.process?.perform(command)
+                }
             }
         }
 
@@ -457,9 +483,25 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
                 }
             } catch {
                 NSLog("Nvmm: failed to start nvim: \(error)")
+                let code = (error as? NeovimSpawnError)?.code
+                if let kind = self?.lastHandoffKind, let code,
+                   handoffConnectionErrorIsStale(kind, code) {
+                    // A `:restart` whose successor Neovim abandoned: it removed
+                    // the socket, so the connect fails with `ENOENT`. Not a
+                    // user-visible error — just close the window.
+                    self?.handleDisconnect()
+                    return
+                }
+                let reason = (error as? NeovimSpawnError)?.message
+                    ?? error.localizedDescription
+                // A failed `:connect`: return to the server we detached from
+                // (still alive for a plain `:connect`) rather than orphaning
+                // it, noting that the new address was unreachable.
+                if let self, let fallback = self.connectFallback {
+                    self.recoverToFallback(fallback, reason: reason)
+                    return
+                }
                 if let address = self?.remoteAddress {
-                    let reason = (error as? NeovimSpawnError)?.message
-                        ?? error.localizedDescription
                     self?.presentConnectionError(
                         "Could not connect to a Neovim server at “\(address)”.",
                         detail: reason)
@@ -491,8 +533,18 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
             await process.registerRequestHandler("clipboard_set", Clipboard.set)
             await process.installClipboardProvider()
 
+            // Remember this server's address so a later `:connect` that fails
+            // can fall back to it rather than orphaning it.
+            let servername = try? await process.request(
+                "nvim_eval", [.string("v:servername")])
+            let address = servername?.result.stringValue
+
             guard let self else { return }
             self.isReady = true
+            // The connection is up, so a later drop is a real disconnect, not a
+            // handoff that failed to connect.
+            self.lastHandoffKind = nil
+            if let address, !address.isEmpty { self.currentServerAddress = address }
             self.startStartupTimeout()
 
             for await grid in process.grids {
@@ -508,10 +560,61 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
                 self.reconcileWindowSize(to: grid.size)
             }
 
-            // The grid stream ends when Neovim disconnects — it quit, or exited
-            // on its own (`:qa`, a crash). Close the window to match.
-            self.handleDisconnect()
+            // The grid stream ends when Neovim disconnects. If Neovim asked
+            // for a handoff (`:restart`/`:connect`) before closing, reconnect
+            // to the new server, reusing this window; otherwise it quit or
+            // exited (`:qa`, a crash), so close the window to match.
+            if let handoff = await process.pendingHandoff() {
+                self.reconnect(handoff)
+            } else {
+                self.handleDisconnect()
+            }
         }
+    }
+
+    /// Reconnects the window to a new Neovim after a `:restart` or `:connect`
+    /// handoff, reusing the window and its grid view — the last frame stays on
+    /// screen until the new server's first flush, so there is no blank flash.
+    /// Cancels the tasks bound to the old process and starts fresh ones against
+    /// the new address via `startNeovim`.
+    private func reconnect(_ handoff: UIHandoff) {
+        // Leave `inputTask` running — it is the window's single command
+        // consumer and forwards to the new process once `startNeovim` swaps it
+        // in. Only the per-process `modifiedTask` is rebuilt, by `startNeovim`.
+        modifiedTask?.cancel()
+        // For a `:connect`, the server we are leaving stays alive, so remember
+        // it as a fallback: if the new address fails, we return to it. A
+        // `:restart`'s old server exits, so it has no fallback.
+        if handoff.kind == .connect, let address = currentServerAddress {
+            connectFallback = (address: address, owned: ownsServer)
+        }
+        source = .remote(address: handoff.address)
+        // A `:restart` continues our own session, so we still own the new
+        // server (closing quits it); a `:connect` attaches to a server someone
+        // else runs, so it is borrowed (closing only detaches).
+        ownsServer = handoff.kind == .restart
+        lastHandoffKind = handoff.kind
+        startNeovim()
+    }
+
+    /// Returns to the server this window detached from when a `:connect` to a
+    /// new address failed, so a bad address neither orphans the old Neovim nor
+    /// loses the session. Notes that the new address was unreachable, then
+    /// reconnects. The fallback is cleared first, so if it too fails to
+    /// connect (e.g. `:connect!` stopped the old server) the normal
+    /// error-and-close path runs rather than looping.
+    private func recoverToFallback(_ fallback: (address: String, owned: Bool),
+                                   reason: String) {
+        connectFallback = nil
+        if let failedAddress = remoteAddress {
+            presentConnectionError(
+                "Could not connect to a Neovim server at “\(failedAddress)”.",
+                detail: reason + "\n\nStaying attached to the current session.")
+        }
+        source = .remote(address: fallback.address)
+        ownsServer = fallback.owned
+        lastHandoffKind = nil
+        startNeovim()
     }
 
     // MARK: - Quit lifecycle (QuitSession)
@@ -519,9 +622,9 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     /// Whether this window's Neovim has any unsaved buffers. False once the
     /// window has no process (never started, or already exited).
     func hasUnsavedBuffers() async -> Bool {
-        // A remote Neovim's buffers belong to another session; detaching this
+        // A borrowed Neovim's buffers belong to another session; detaching this
         // view never discards them, so they do not gate a quit.
-        guard !isRemote, let process else { return false }
+        guard ownsServer, let process else { return false }
         return await process.hasUnsavedBuffers()
     }
 
@@ -532,10 +635,11 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     /// when the grid stream ends and the window closes.
     func beginQuit(force: Bool) {
         guard !hasExited else { return }
-        // A remote window detaches rather than quitting: closing our socket
-        // drops this UI and leaves the other session's Neovim running. Ending
-        // the transport ends the grid stream, which closes the window.
-        if isRemote {
+        // A window onto a borrowed Neovim detaches rather than quitting:
+        // closing our socket drops this UI and leaves that session's Neovim
+        // running.
+        // Ending the transport ends the grid stream, which closes the window.
+        if !ownsServer {
             let process = self.process
             Task { await process?.disconnect() }
             return
