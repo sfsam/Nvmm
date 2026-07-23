@@ -191,6 +191,10 @@ extension WindowController {
     /// not match, and is asked about afresh. Only once nothing unexpected is
     /// modified is the forced quit issued.
     private func closeAfterSavingBuffers() async {
+        // A remote window is a detached view: close it (which drops this UI and
+        // leaves the other session's Neovim running) without prompting about or
+        // quitting buffers that belong to that session.
+        if isRemote { window?.close(); return }
         guard let process else { return }
         guard var pending = await process.modifiedBuffers() else { return NSSound.beep() }
         var discarded: [ModifiedBuffer] = []

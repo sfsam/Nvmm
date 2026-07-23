@@ -738,6 +738,14 @@ extension NeovimProcess {
         // Channel 0 broadcasts, reaching this UI without hard-coding a channel.
         notify("nvim_command",
                [.string("autocmd VimEnter * silent! call rpcnotify(0, 'vimenter')")])
+        // A UI connecting to an already-running Neovim has missed VimEnter (it
+        // fired during that Neovim's startup), so fire the signal now if
+        // startup is already complete. On a fresh `--embed` spawn this is a
+        // no-op:
+        // Neovim pauses before loading startup files until `nvim_ui_attach`, so
+        // `v:vim_did_enter` is still 0 here and only the autocmd above fires.
+        notify("nvim_command",
+               [.string("if v:vim_did_enter | call rpcnotify(0, 'vimenter') | endif")])
 
         let attachOptions = supportedOptions(requested: options,
                                              supported: capabilities.uiOptions)

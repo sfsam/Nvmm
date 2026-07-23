@@ -493,4 +493,58 @@ final class UIControllerTests: XCTestCase {
         guard let grid else { return XCTFail("no grid with typed text arrived") }
         XCTAssertEqual(rowText(grid, row: 0, count: 5), "hello")
     }
+
+    func testConnectToRunningNvimAttachesAndTypedTextLandsInGrid() async throws {
+        guard let nvim = await MainActor.run(body: { NeovimBundle.executableURL }) else {
+            throw XCTSkip("bundled nvim executable not available")
+        }
+
+        // A headless server completes startup — firing VimEnter — without a UI,
+        // so a UI connecting afterward has missed VimEnter. This exercises the
+        // connect path that latches `startupComplete` from `v:vim_did_enter`.
+        let socket = NSTemporaryDirectory() + "nvmm-connect-\(UUID().uuidString).sock"
+        let server = Process()
+        server.executableURL = URL(fileURLWithPath: nvim.path)
+        server.arguments = ["--headless", "--clean", "-n", "-i", "NONE",
+                            "--listen", socket]
+        try server.run()
+        defer {
+            server.terminate()
+            try? FileManager.default.removeItem(atPath: socket)
+        }
+
+        // The server creates the socket asynchronously; wait for it to appear.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while !FileManager.default.fileExists(atPath: socket) {
+            if ContinuousClock.now >= deadline {
+                throw XCTSkip("nvim server socket did not appear")
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+
+        let process = NeovimProcess()
+        try await process.connect(socket)
+
+        var options = UIOptions()
+        options.extLinegrid = true
+        let result = await process.uiAttach(width: 80, height: 24, options: options)
+        guard result.status == .success else {
+            await process.disconnect()
+            return XCTFail("attach failed: \(result.status) \(result.message)")
+        }
+
+        _ = try await process.request("nvim_input", [.string("ihello")])
+        let grid = await awaitGrid(process, timeout: .seconds(5)) { grid in
+            grid.startupComplete && grid.width >= 5 && grid.cell(0, 0).text == "h"
+        }
+        await process.disconnect()
+
+        guard let grid else {
+            return XCTFail("no startup-complete grid with typed text arrived")
+        }
+        XCTAssertEqual(rowText(grid, row: 0, count: 5), "hello")
+
+        // Detaching this UI must leave the server running.
+        XCTAssertTrue(server.isRunning, "server should survive UI disconnect")
+    }
 }

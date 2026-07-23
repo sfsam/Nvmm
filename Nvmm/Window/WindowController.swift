@@ -118,6 +118,30 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     private var startupFiles: [String] = []
     private var startupDirectory: String?
 
+    /// How this window reaches Neovim: spawn an embedded process, or connect to
+    /// one already running (`:connect`-style). Set before `start()`.
+    private enum Source: Sendable {
+        case spawn
+        case remote(address: String)
+    }
+    private var source: Source = .spawn
+
+    /// True when this window is a view onto a Neovim it did not spawn. Closing
+    /// such a window detaches this UI and leaves that Neovim running, rather
+    /// than quitting it; its buffers belong to another session, so they are
+    /// never prompted about here.
+    var isRemote: Bool {
+        if case .remote = source { return true }
+        return false
+    }
+
+    /// The server address this window connects to, or nil when it spawns
+    /// its own Neovim. Used to name the address in a connection-failure alert.
+    private var remoteAddress: String? {
+        if case .remote(let address) = source { return address }
+        return nil
+    }
+
     convenience init(renderManager: RenderContextManager,
                      coordinator: TerminationCoordinator,
                      cascadingFrom source: WindowController? = nil) {
@@ -163,6 +187,19 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     func start(files: [String] = [], directory: String? = nil) {
         startupFiles = files
         startupDirectory = directory
+        source = .spawn
+        launch()
+    }
+
+    /// Configures rendering and connects to an already-running Neovim listening
+    /// on `address` (a Unix domain socket path), attaching a UI to it. The
+    /// window is a detached view: closing it leaves that Neovim running.
+    func start(connectingTo address: String) {
+        source = .remote(address: address)
+        launch()
+    }
+
+    private func launch() {
         guard let window, let screen = window.screen ?? NSScreen.main else { return }
 
         let context: RenderContext
@@ -359,15 +396,35 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         return shellDirectory ?? NSHomeDirectory()
     }
 
-    private func startNeovim() {
-        guard let nvimPath = NeovimBundle.executableURL?.path else {
-            NSLog("Nvmm: bundled nvim not found")
-            return
-        }
+    /// How the render task reaches Neovim, resolved on the main actor before
+    /// the process is created so a missing bundle fails before any stream
+    /// exists.
+    ///
+    /// Deliberately distinct from `Source`, which it is derived from: `Source`
+    /// is persistent window state (it drives `isRemote` for the whole window
+    /// lifetime), while `LaunchPlan` is the transient, `Sendable` payload
+    /// handed to the render task — carrying the spawn arguments resolved here
+    /// so the task need not touch the main actor to build them.
+    private enum LaunchPlan: Sendable {
+        case spawn(path: String, argv: [String], directory: String)
+        case connect(address: String)
+    }
 
-        let launch = NeovimBundle.launchCommand(nvimPath: nvimPath,
-                                                arguments: neovimArguments())
-        let directory = workingDirectory()
+    private func startNeovim() {
+        let plan: LaunchPlan
+        switch source {
+        case .spawn:
+            guard let nvimPath = NeovimBundle.executableURL?.path else {
+                NSLog("Nvmm: bundled nvim not found")
+                return
+            }
+            let launch = NeovimBundle.launchCommand(nvimPath: nvimPath,
+                                                    arguments: neovimArguments())
+            plan = .spawn(path: launch.path, argv: launch.argv,
+                          directory: workingDirectory())
+        case .remote(let address):
+            plan = .connect(address: address)
+        }
 
         let process = NeovimProcess()
         self.process = process
@@ -391,10 +448,22 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
 
         renderTask = Task { [weak self] in
             do {
-                try await process.spawn(path: launch.path, argv: launch.argv,
-                                        workingDirectory: directory)
+                switch plan {
+                case .spawn(let path, let argv, let directory):
+                    try await process.spawn(path: path, argv: argv,
+                                            workingDirectory: directory)
+                case .connect(let address):
+                    try await process.connect(address)
+                }
             } catch {
-                NSLog("Nvmm: failed to spawn nvim: \(error)")
+                NSLog("Nvmm: failed to start nvim: \(error)")
+                if let address = self?.remoteAddress {
+                    let reason = (error as? NeovimSpawnError)?.message
+                        ?? error.localizedDescription
+                    self?.presentConnectionError(
+                        "Could not connect to a Neovim server at “\(address)”.",
+                        detail: reason)
+                }
                 self?.handleDisconnect()
                 return
             }
@@ -406,6 +475,11 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
 
             guard result.status == .success else {
                 NSLog("Nvmm: UI attach failed: \(result.message)")
+                if let address = self?.remoteAddress {
+                    self?.presentConnectionError(
+                        "Connected to “\(address)”, but attaching a UI failed.",
+                        detail: result.message)
+                }
                 self?.handleDisconnect()
                 return
             }
@@ -445,7 +519,9 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     /// Whether this window's Neovim has any unsaved buffers. False once the
     /// window has no process (never started, or already exited).
     func hasUnsavedBuffers() async -> Bool {
-        guard let process else { return false }
+        // A remote Neovim's buffers belong to another session; detaching this
+        // view never discards them, so they do not gate a quit.
+        guard !isRemote, let process else { return false }
         return await process.hasUnsavedBuffers()
     }
 
@@ -456,6 +532,14 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     /// when the grid stream ends and the window closes.
     func beginQuit(force: Bool) {
         guard !hasExited else { return }
+        // A remote window detaches rather than quitting: closing our socket
+        // drops this UI and leaves the other session's Neovim running. Ending
+        // the transport ends the grid stream, which closes the window.
+        if isRemote {
+            let process = self.process
+            Task { await process?.disconnect() }
+            return
+        }
         enqueue(.quit(force: force))
     }
 
@@ -466,6 +550,19 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         guard !hasExited else { return }
         hasExited = true
         window?.close()
+    }
+
+    /// Reports a failed connection to a remote Neovim, whose window never
+    /// opened. App-modal rather than a sheet, since there is no visible window
+    /// to attach to. Only the remote path calls this; a spawn failure is an
+    /// internal error (a missing bundle), logged but not surfaced.
+    private func presentConnectionError(_ message: String, detail: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = message
+        alert.informativeText = detail
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     /// Drops the `VimEnter` requirement after a short delay, so a session that

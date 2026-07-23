@@ -59,11 +59,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @discardableResult
     private func openWindow(files: [String] = [],
                             directory: String? = nil) -> WindowController {
+        let controller = makeRegisteredController()
+        controller.start(files: files, directory: directory)
+        return controller
+    }
+
+    /// Creates a window, cascaded from the frontmost one, and registers it
+    /// with the coordinator, but does not start it. The caller chooses how it
+    /// reaches Neovim — `start(files:directory:)` to spawn,
+    /// `start(connectingTo:)` to connect to a running server.
+    private func makeRegisteredController() -> WindowController {
         let controller = WindowController(renderManager: renderManager,
                                           coordinator: terminationCoordinator,
                                           cascadingFrom: frontmostWindow)
         terminationCoordinator.register(controller)
-        controller.start(files: files, directory: directory)
         return controller
     }
 
@@ -77,6 +86,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// New Window. Always a new window, so it is only implemented here.
     @IBAction func newWindow(_ sender: Any?) {
         openWindow()
+    }
+
+    /// Connect to Running Neovim…: prompts for the address of a Neovim server
+    /// and opens a window attached to it, rather than spawning a new Neovim.
+    @IBAction func connectToRunningNvim(_ sender: Any?) {
+        guard let address = promptForServerAddress() else { return }
+        makeRegisteredController().start(connectingTo: address)
+    }
+
+    /// Asks for a Neovim server address, returning it trimmed, or nil if the
+    /// user cancelled or left it empty.
+    private func promptForServerAddress() -> String? {
+        let alert = NSAlert()
+        alert.messageText = "Connect to Running Neovim"
+        alert.informativeText = "Enter the Unix socket path of a running Neovim "
+            + "server.\nStart one with:  nvim --listen /tmp/nvim.sock --headless"
+        alert.addButton(withTitle: "Connect")
+        alert.addButton(withTitle: "Cancel")
+
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.placeholderString = "/tmp/nvim.sock"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let address = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return address.isEmpty ? nil : address
     }
 
     /// Open…, with no window to open into: the files open in a new window,

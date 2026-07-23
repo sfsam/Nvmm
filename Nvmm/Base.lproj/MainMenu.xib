@@ -83,6 +83,11 @@
                                     <action selector="openDocument:" target="-1" id="IAo-SY-act"/>
                                 </connections>
                             </menuItem>
+                            <menuItem title="Connect to Running Neovim…" id="crn-01-crn">
+                                <connections>
+                                    <action selector="connectToRunningNvim:" target="-1" id="crn-02-crn"/>
+                                </connections>
+                            </menuItem>
                             <menuItem isSeparatorItem="YES" id="m54-Is-iLE"/>
                             <menuItem title="Close All Windows" keyEquivalent="W" id="clA-11-clA">
                                 <modifierMask key="keyEquivalentModifierMask" option="YES" command="YES"/>
