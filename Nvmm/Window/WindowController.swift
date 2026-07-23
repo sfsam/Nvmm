@@ -23,6 +23,7 @@ import CoreText
 final class WindowController: NSWindowController, NSWindowDelegate, QuitSession {
     private let gridView = GridView(frame: .zero)
     private let scroller = Scroller(frame: .zero)
+    private let progressIndicator = ProgressIndicator(frame: .zero)
     private var renderManager: RenderContextManager!
     // The Neovim this window drives. Readable by the File menu actions, which
     // live in an extension; nil before `start()` and after the window closes.
@@ -39,6 +40,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     private var renderTask: Task<Void, Never>?
     private var inputTask: Task<Void, Never>?
     private var modifiedTask: Task<Void, Never>?
+    private var progressTask: Task<Void, Never>?
     private var settingsTask: Task<Void, Never>?
 
     // The ordered channel from main-actor input handlers to the process actor.
@@ -123,6 +125,16 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     // scroller because it is the target state during the show/hide animation,
     // which outlives the moment the setting changed.
     private var isScrollbarVisible = false
+
+    // The percentage the progress bar would show, independent of whether the
+    // setting lets it: turning the setting back on mid-task shows the bar
+    // rather than waiting for the next report. Nil means nothing to show.
+    private var progressPercent: Int?
+
+    // Bumped on every progress report, so the delayed fallback after a
+    // completed task is dropped if a newer report has since arrived.
+    private var progressGeneration: UInt64 = 0
+    private var progressHoldTask: Task<Void, Never>?
 
     // Set while the scrollbar animation is resizing the window, so the resize
     // is not mistaken for the user's and forwarded to Neovim: the grid keeps
@@ -296,8 +308,10 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         contentView.wantsLayer = true
         gridView.translatesAutoresizingMaskIntoConstraints = false
         scroller.translatesAutoresizingMaskIntoConstraints = false
+        progressIndicator.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(scroller)
         contentView.addSubview(gridView)
+        contentView.addSubview(progressIndicator)
 
         isScrollbarVisible = Settings.verticalScrollbar
         scroller.isHidden = !isScrollbarVisible
@@ -327,6 +341,17 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
             scroller.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
             scroller.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             scroller.widthAnchor.constraint(equalToConstant: Scroller.width),
+
+            // The progress bar rides the top edge of the grid, spanning it and
+            // its margins, so it reads as part of the window's edge rather than
+            // as something drawn in the text.
+            progressIndicator.topAnchor.constraint(equalTo: safeArea.topAnchor),
+            progressIndicator.leadingAnchor.constraint(
+                equalTo: gridView.leadingAnchor, constant: -gridMargin),
+            progressIndicator.trailingAnchor.constraint(
+                equalTo: gridView.trailingAnchor, constant: gridMargin),
+            progressIndicator.heightAnchor.constraint(
+                equalToConstant: ProgressIndicator.thickness),
         ])
         contentView.layoutSubtreeIfNeeded()
     }
@@ -517,6 +542,13 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
             }
         }
 
+        // Show the progress of Neovim's running tasks as it reports them.
+        progressTask = Task { [weak self] in
+            for await update in process.progressUpdates {
+                self?.applyProgress(update)
+            }
+        }
+
         renderTask = Task { [weak self] in
             do {
                 switch plan {
@@ -630,6 +662,12 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         // consumer and forwards to the new process once `startNeovim` swaps it
         // in. Only the per-process `modifiedTask` is rebuilt, by `startNeovim`.
         modifiedTask?.cancel()
+        // The new session has no tasks of its own yet, so nothing carries over.
+        progressTask?.cancel()
+        progressHoldTask?.cancel()
+        progressGeneration &+= 1
+        progressPercent = nil
+        updateProgressIndicator()
         // For a `:connect`, the server we are leaving stays alive, so remember
         // it as a fallback: if the new address fails, we return to it. A
         // `:restart`'s old server exits, so it has no fallback.
@@ -758,6 +796,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
             for await _ in changes {
                 self?.applyTitlebarTransparency()
                 self?.applyScrollbarVisibility()
+                self?.updateProgressIndicator()
             }
         }
     }
@@ -850,6 +889,45 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         guard size.width >= 1, size.height >= 1, size != lastGridSize else { return }
         lastGridSize = size
         enqueue(.resize(width: size.width, height: size.height))
+    }
+
+    /// Applies one progress report from Neovim.
+    ///
+    /// A completed task's percentage is held for a moment before the bar falls
+    /// back to whatever is still running, so a task that starts and finishes
+    /// between two reports is still seen rather than flashing past. The hold is
+    /// generation-checked: any report arriving during it wins, and the stale
+    /// fallback is dropped.
+    private func applyProgress(_ update: ProgressUpdate) {
+        progressGeneration &+= 1
+        progressPercent = update.percent
+        updateProgressIndicator()
+        guard update.isCompletion else { return }
+
+        // Paint the completed value now: without this a task that completes in
+        // one report would never be drawn, since the fallback lands first.
+        progressIndicator.displayIfNeeded()
+
+        let generation = progressGeneration
+        progressHoldTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard let self, self.progressGeneration == generation else { return }
+            let percent = await self.process?.progressPercent() ?? nil
+            guard self.progressGeneration == generation else { return }
+            self.progressPercent = percent
+            self.updateProgressIndicator()
+        }
+    }
+
+    /// Pushes the current progress into the bar, hiding it when there is
+    /// nothing to show or the setting is off.
+    private func updateProgressIndicator() {
+        guard Settings.progressBar, let percent = progressPercent else {
+            progressIndicator.isHidden = true
+            return
+        }
+        progressIndicator.doubleValue = Double(percent)
+        progressIndicator.isHidden = false
     }
 
     /// Scrolls the window so `line` (one-based) is its top line, in response to
@@ -1016,6 +1094,8 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         renderTask?.cancel()
         inputTask?.cancel()
         modifiedTask?.cancel()
+        progressTask?.cancel()
+        progressHoldTask?.cancel()
         settingsTask?.cancel()
         startupTimeoutTask?.cancel()
         // Close the transport so this window's Neovim does not outlive it.

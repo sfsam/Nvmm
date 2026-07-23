@@ -24,6 +24,19 @@ nonisolated struct UIHandoff: Sendable, Equatable {
     var address: String
 }
 
+/// What one `Progress` event means for the progress bar.
+nonisolated enum ProgressOutcome: Sendable, Equatable {
+    /// Nothing to show: the event named no task, or reported a status the UI
+    /// does not track.
+    case ignored
+    /// The set of running tasks changed; the bar shows the newest known
+    /// percentage among them, or hides when none is known.
+    case changed
+    /// A task finished at a known percentage. The bar shows it briefly, so a
+    /// task that completes in one step is still seen, then falls back.
+    case completed(Int)
+}
+
 /// True when a handoff connection error means Neovim abandoned the successor
 /// socket rather than failing to open a server. A `:restart` that fails can leave
 /// its UI event pending after Neovim removes the temporary socket; the resulting
@@ -539,25 +552,28 @@ nonisolated final class UIController {
 
     // MARK: Progress (a separate rpcnotify channel, not a redraw event)
 
-    /// Applies one `Progress` autocmd event. Returns the completed percentage when
-    /// a task finished with a known percentage, otherwise nil.
+    /// Applies one `Progress` autocmd event. Returns what the window should do
+    /// about it; an event that names no task, or reports a status we do not
+    /// track, changes nothing.
     @discardableResult
-    func progress(_ event: [(MPValue, MPValue)]) -> Int? {
+    func progress(_ event: [(MPValue, MPValue)]) -> ProgressOutcome {
         func field(_ key: String) -> MPValue? {
             for (name, value) in event where name.stringValue == key { return value }
             return nil
         }
 
         guard let id = field("id"), let statusValue = field("status"),
-              let status = statusValue.stringValue else { return nil }
+              let status = statusValue.stringValue else { return .ignored }
 
+        // The id may be a number or a name, and the two namespaces are
+        // separate: task 1 and task "1" are different tasks.
         let key: String
         if let signed = id.integer?.signed {
             key = "i:\(signed)"
         } else if let string = id.stringValue {
             key = "s:\(string)"
         } else {
-            return nil
+            return .ignored
         }
 
         func clampedPercent() -> Int? {
@@ -569,18 +585,23 @@ nonisolated final class UIController {
         case "success", "failed", "cancel":
             let completed = clampedPercent()
             progressEntries.removeValue(forKey: key)
-            return completed
+            // A task that ends without a percentage has nothing to show for
+            // itself, so the bar just falls back to whatever else is running.
+            return completed.map { .completed($0) } ?? .changed
         case "running":
             let percent = clampedPercent()
+            // A task at 100% is finished in all but name; treat it as one, so
+            // the bar does not sit full waiting for a terminal status that
+            // some tasks never send.
             if percent == 100 {
                 progressEntries.removeValue(forKey: key)
-                return 100
+                return .completed(100)
             }
             progressSequence += 1
             progressEntries[key] = ProgressEntry(percent: percent, sequence: progressSequence)
-            return nil
+            return .changed
         default:
-            return nil
+            return .ignored
         }
     }
 

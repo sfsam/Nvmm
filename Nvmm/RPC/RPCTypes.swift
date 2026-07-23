@@ -43,6 +43,18 @@ nonisolated enum NvimCommand: Sendable {
     case quit(force: Bool)
 }
 
+/// What the window's progress bar should show, published as Neovim reports
+/// task progress.
+nonisolated struct ProgressUpdate: Sendable, Equatable {
+    /// The percentage to show, or nil to hide the bar: no task is running, or
+    /// none of the running ones reports a percentage.
+    var percent: Int?
+    /// True when a task just finished. The bar holds this value briefly before
+    /// falling back to whatever is still running, so a task that runs to
+    /// completion between two frames is still seen.
+    var isCompletion: Bool
+}
+
 /// A completed RPC response. `error` is `.null` on success; otherwise it carries
 /// Neovim's error value and `result` is meaningless.
 nonisolated struct RPCResponse: Sendable, Equatable {

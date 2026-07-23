@@ -255,6 +255,11 @@ actor NeovimProcess {
     nonisolated let modifiedStates: AsyncStream<Bool>
     private let modifiedStatesContinuation: AsyncStream<Bool>.Continuation
 
+    /// What the progress bar should show, published as Neovim's `Progress`
+    /// events arrive. Finishes on disconnect.
+    nonisolated let progressUpdates: AsyncStream<ProgressUpdate>
+    private let progressUpdatesContinuation: AsyncStream<ProgressUpdate>.Continuation
+
     init() {
         let inboundPair = AsyncStream.makeStream(of: Inbound.self)
         inbound = inboundPair.stream
@@ -271,6 +276,10 @@ actor NeovimProcess {
         let modifiedPair = AsyncStream.makeStream(of: Bool.self)
         modifiedStates = modifiedPair.stream
         modifiedStatesContinuation = modifiedPair.continuation
+
+        let progressPair = AsyncStream.makeStream(of: ProgressUpdate.self)
+        progressUpdates = progressPair.stream
+        progressUpdatesContinuation = progressPair.continuation
     }
 
     // MARK: Connecting
@@ -594,7 +603,17 @@ actor NeovimProcess {
                 return
             case "progress":
                 if arguments.count == 1, case .map(let event) = arguments[0] {
-                    ui.progress(event)
+                    switch ui.progress(event) {
+                    case .ignored:
+                        break
+                    case .changed:
+                        progressUpdatesContinuation.yield(
+                            ProgressUpdate(percent: ui.progressPercent,
+                                           isCompletion: false))
+                    case .completed(let percent):
+                        progressUpdatesContinuation.yield(
+                            ProgressUpdate(percent: percent, isCompletion: true))
+                    }
                 }
                 return
             case "modified":
@@ -668,6 +687,7 @@ actor NeovimProcess {
         notificationsContinuation.finish()
         gridsContinuation.finish()
         modifiedStatesContinuation.finish()
+        progressUpdatesContinuation.finish()
         inboundContinuation.finish()
         io = nil
     }
@@ -702,6 +722,11 @@ extension NeovimProcess {
 
     /// A pending restart/connect handoff Neovim requested, if any.
     func pendingHandoff() -> UIHandoff? { ui?.handoff }
+
+    /// The percentage the progress bar should show for the tasks running now,
+    /// or nil if there is nothing to show. Asked for after a completed task's
+    /// value has been held, to fall back to whatever is still running.
+    func progressPercent() -> Int? { ui?.progressPercent }
 
     /// The outcome of one negotiation request, awaited under a shared deadline.
     private enum AttachOutcome {
@@ -763,6 +788,7 @@ extension NeovimProcess {
         }
 
         installModifiedAutocmd()
+        installProgressAutocmd()
         installFileHelpers()
 
         var result = validation
@@ -788,6 +814,22 @@ extension NeovimProcess {
             vim.api.nvim_create_autocmd('OptionSet',
               {group=group, pattern='modified', callback=notify})
             notify()
+            """
+        notify("nvim_exec_lua", [.string(lua), .array([])])
+    }
+
+    /// Installs the autocmd that forwards Neovim's `Progress` events over RPC
+    /// (consumed on `progressUpdates`), for the window's progress bar. The
+    /// event carries the task's id, status, and percentage in `ev.data`, which
+    /// is passed through unchanged. Guarded on the event existing, so an older
+    /// Neovim without it simply reports no progress. Fire-and-forget, matching
+    /// the post-attach convention.
+    private func installProgressAutocmd() {
+        let lua = """
+            if vim.fn.exists('##Progress') ~= 1 then return end
+            local group = vim.api.nvim_create_augroup('NvmmProgress', {clear=true})
+            vim.api.nvim_create_autocmd('Progress', {group=group,
+              callback=function(ev) vim.rpcnotify(0, 'progress', ev.data) end})
             """
         notify("nvim_exec_lua", [.string(lua), .array([])])
     }

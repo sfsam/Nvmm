@@ -345,6 +345,54 @@ final class UIControllerTests: XCTestCase {
         }
     }
 
+    /// The outcome tells the window what to do: hold a finished task's value,
+    /// fall back to what is still running, or do nothing at all.
+    func testProgressOutcomes() {
+        let controller = UIController()
+
+        // A running task changes what is shown.
+        XCTAssertEqual(
+            controller.progress([(.string("id"), 1), (.string("status"), "running"),
+                                 (.string("percent"), 40)]), .changed)
+
+        // A task that ends with a percentage is held; one that ends without a
+        // percentage has nothing to hold, so the bar just falls back.
+        XCTAssertEqual(
+            controller.progress([(.string("id"), 1), (.string("status"), "success"),
+                                 (.string("percent"), 100)]), .completed(100))
+        XCTAssertEqual(
+            controller.progress([(.string("id"), 2), (.string("status"), "success")]),
+            .changed)
+
+        // 100% while still "running" is a finished task in all but name.
+        XCTAssertEqual(
+            controller.progress([(.string("id"), 3), (.string("status"), "running"),
+                                 (.string("percent"), 100)]), .completed(100))
+        XCTAssertNil(controller.progressPercent)
+
+        // Nothing to act on: no id, no status, or a status we do not track.
+        XCTAssertEqual(controller.progress([(.string("status"), "running")]), .ignored)
+        XCTAssertEqual(controller.progress([(.string("id"), 1)]), .ignored)
+        XCTAssertEqual(
+            controller.progress([(.string("id"), 1), (.string("status"), "queued")]),
+            .ignored)
+    }
+
+    /// Numeric and string ids are separate namespaces, so task 1 and task "1"
+    /// do not overwrite each other.
+    func testProgressIdNamespacesAreSeparate() {
+        let controller = UIController()
+
+        controller.progress([(.string("id"), 1), (.string("status"), "running"),
+                             (.string("percent"), 10)])
+        controller.progress([(.string("id"), "1"), (.string("status"), "running"),
+                             (.string("percent"), 70)])
+        XCTAssertEqual(controller.progressPercent, 70)
+
+        controller.progress([(.string("id"), "1"), (.string("status"), "success")])
+        XCTAssertEqual(controller.progressPercent, 10)
+    }
+
     // MARK: Modified
 
     func testSetModifiedReportsOnlyTransitions() {
