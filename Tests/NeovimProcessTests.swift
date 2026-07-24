@@ -66,7 +66,68 @@ final class NeovimProcessTests: XCTestCase {
         }
     }
 
+    private func bufferedProgressUpdate(
+        _ updates: [ProgressUpdate]
+    ) async -> ProgressUpdate? {
+        let pair = AsyncStream.makeStream(
+            of: ProgressUpdate.self,
+            bufferingPolicy: .bufferingNewest(1))
+        for update in updates {
+            publishProgressUpdate(update, to: pair.continuation)
+        }
+        pair.continuation.finish()
+        var iterator = pair.stream.makeAsyncIterator()
+        return await iterator.next()
+    }
+
     // MARK: Controlled-peer cases
+
+    func testProgressCompletionSurvivesLaterStateUpdate() async {
+        let completion = ProgressUpdate(percent: 100, isCompletion: true)
+        let state = ProgressUpdate(percent: 25, isCompletion: false)
+
+        let received = await bufferedProgressUpdate([completion, state])
+        XCTAssertEqual(received, completion)
+    }
+
+    func testProgressCompletionDisplacesEarlierStateUpdate() async {
+        let state = ProgressUpdate(percent: 25, isCompletion: false)
+        let completion = ProgressUpdate(percent: 100, isCompletion: true)
+
+        let received = await bufferedProgressUpdate([state, completion])
+        XCTAssertEqual(received, completion)
+    }
+
+    func testProgressStateUpdatesKeepNewestValue() async {
+        let old = ProgressUpdate(percent: 25, isCompletion: false)
+        let newest = ProgressUpdate(percent: 50, isCompletion: false)
+
+        let received = await bufferedProgressUpdate([old, newest])
+        XCTAssertEqual(received, newest)
+    }
+
+    func testProgressCompletionsKeepNewestValue() async {
+        let old = ProgressUpdate(percent: 75, isCompletion: true)
+        let newest = ProgressUpdate(percent: 100, isCompletion: true)
+
+        let received = await bufferedProgressUpdate([old, newest])
+        XCTAssertEqual(received, newest)
+    }
+
+    func testProgressPublisherIgnoresTerminatedStream() async {
+        let pair = AsyncStream.makeStream(
+            of: ProgressUpdate.self,
+            bufferingPolicy: .bufferingNewest(1))
+        pair.continuation.finish()
+
+        publishProgressUpdate(
+            ProgressUpdate(percent: 100, isCompletion: true),
+            to: pair.continuation)
+
+        var iterator = pair.stream.makeAsyncIterator()
+        let received = await iterator.next()
+        XCTAssertNil(received)
+    }
 
     func testRequestSyncTimesOut() async throws {
         let (client, peer) = try makeSocketPair()
@@ -159,6 +220,75 @@ final class NeovimProcessTests: XCTestCase {
         XCTAssertEqual(fields[1].integer?.unsigned, 7) // matching id
         XCTAssertFalse(fields[2].isNull)               // error is present
         XCTAssertTrue(fields[3].isNull)                // no result
+    }
+
+    func testInboundCreditResumesAFragmentedMessage() async throws {
+        let (client, peer) = try makeSocketPair()
+        defer { close(peer) }
+        var limits = RPCResourceLimits.production
+        limits.maximumInboundQueuedBytes = 32
+        limits.inboundResumeBytes = 16
+        let process = NeovimProcess(limits: limits)
+        await process.attach(readFD: client, writeFD: client)
+
+        var writer = MessagePackWriter()
+        writer.encodeRequest(
+            id: 9, method: String(repeating: "x", count: 100), arguments: [])
+        try writeAll(peer, writer.bytes)
+
+        let response = try readMessage(peer)
+        await process.disconnect()
+        XCTAssertEqual(response.arrayValue?[1].integer?.unsigned, 9)
+    }
+
+    func testDecoderLimitClosesTheConnection() async throws {
+        let (client, peer) = try makeSocketPair()
+        defer { close(peer) }
+        var limits = RPCResourceLimits.production
+        limits.maximumStringBytes = 3
+        let process = NeovimProcess(limits: limits)
+        await process.attach(readFD: client, writeFD: client)
+
+        try writeAll(peer, [0xd9, 0x04])
+        var byte: UInt8 = 0
+        XCTAssertEqual(read(peer, &byte, 1), 0)
+    }
+
+    func testOutboundLimitClosesInsteadOfQueueingAResponse() async throws {
+        let (client, peer) = try makeSocketPair()
+        defer { close(peer) }
+        var limits = RPCResourceLimits.production
+        limits.maximumOutboundQueuedBytes = 1
+        let process = NeovimProcess(limits: limits)
+        await process.attach(readFD: client, writeFD: client)
+
+        var writer = MessagePackWriter()
+        writer.encodeRequest(id: 10, method: "unknown", arguments: [])
+        try writeAll(peer, writer.bytes)
+
+        var byte: UInt8 = 0
+        XCTAssertEqual(read(peer, &byte, 1), 0)
+    }
+
+    func testReverseRequestConcurrencyLimitClosesConnection() async throws {
+        let (client, peer) = try makeSocketPair()
+        defer { close(peer) }
+        var limits = RPCResourceLimits.production
+        limits.maximumReverseRequests = 1
+        let process = NeovimProcess(limits: limits)
+        await process.attach(readFD: client, writeFD: client)
+        await process.registerRequestHandler("slow") { _ in
+            try? await Task.sleep(for: .milliseconds(200))
+            return .result(.null)
+        }
+
+        var writer = MessagePackWriter()
+        writer.encodeRequest(id: 11, method: "slow", arguments: [])
+        writer.encodeRequest(id: 12, method: "slow", arguments: [])
+        try writeAll(peer, writer.bytes)
+
+        var byte: UInt8 = 0
+        XCTAssertEqual(read(peer, &byte, 1), 0)
     }
 
     // MARK: Real-Neovim helper

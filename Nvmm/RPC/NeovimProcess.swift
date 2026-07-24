@@ -225,8 +225,11 @@ actor NeovimProcess {
     private var io: TransportIO?
     private var consumer: Task<Void, Never>?
 
+    private let limits: RPCResourceLimits
     private var writer = MessagePackWriter()
-    private var unpacker = MessagePackUnpacker()
+    private var unpacker: MessagePackUnpacker
+    private var streamedRedrawGrid: Grid?
+    private var activeReverseRequests = 0
 
     private let inbound: AsyncStream<Inbound>
     private let inboundContinuation: AsyncStream<Inbound>.Continuation
@@ -263,14 +266,18 @@ actor NeovimProcess {
     nonisolated let progressUpdates: AsyncStream<ProgressUpdate>
     private let progressUpdatesContinuation: AsyncStream<ProgressUpdate>.Continuation
 
-    init() {
+    init(limits: RPCResourceLimits = .production) {
+        self.limits = limits
+        unpacker = MessagePackUnpacker(limits: limits)
+
         let inboundPair = AsyncStream.makeStream(of: Inbound.self)
         inbound = inboundPair.stream
         inboundContinuation = inboundPair.continuation
 
         let notificationPair = AsyncStream.makeStream(
             of: RPCNotification.self,
-            bufferingPolicy: .bufferingNewest(256))
+            bufferingPolicy: .bufferingNewest(
+                limits.maximumRetainedNotifications))
         notifications = notificationPair.stream
         notificationsContinuation = notificationPair.continuation
 
@@ -281,11 +288,13 @@ actor NeovimProcess {
         grids = gridsPair.stream
         gridsContinuation = gridsPair.continuation
 
-        let modifiedPair = AsyncStream.makeStream(of: Bool.self)
+        let modifiedPair = AsyncStream.makeStream(
+            of: Bool.self, bufferingPolicy: .bufferingNewest(1))
         modifiedStates = modifiedPair.stream
         modifiedStatesContinuation = modifiedPair.continuation
 
-        let progressPair = AsyncStream.makeStream(of: ProgressUpdate.self)
+        let progressPair = AsyncStream.makeStream(
+            of: ProgressUpdate.self, bufferingPolicy: .bufferingNewest(1))
         progressUpdates = progressPair.stream
         progressUpdatesContinuation = progressPair.continuation
     }
@@ -351,7 +360,8 @@ actor NeovimProcess {
         guard state == .idle else { return }
 
         let continuation = inboundContinuation
-        io = TransportIO(readFD: readFD, writeFD: writeFD) { event in
+        io = TransportIO(readFD: readFD, writeFD: writeFD,
+                         limits: limits) { event in
             continuation.yield(event)
         }
         state = .connected
@@ -572,7 +582,23 @@ actor NeovimProcess {
         switch event {
         case .data(let bytes):
             unpacker.feed(bytes)
-            while let value = unpacker.unpack() {
+            let redrawItem: ((MessagePackRedrawItem) -> Void)? =
+                ui == nil ? nil : { [self] item in
+                guard let ui else { return }
+                switch item {
+                case .event(let event):
+                    if let grid = ui.applyRedrawEvent(event) {
+                        streamedRedrawGrid = grid
+                    }
+                case .gridLineStart(let prefix):
+                    ui.beginStreamingGridLine(prefix)
+                case .gridLineCell(let cell):
+                    ui.applyStreamingGridLineCell(cell)
+                case .gridLineEnd(let wrap):
+                    ui.endStreamingGridLine(wrap)
+                }
+            }
+            while let value = unpacker.unpack(redrawItem: redrawItem) {
                 dispatch(value)
             }
             // A decoder limit was hit. Shut down through the transport rather
@@ -582,6 +608,7 @@ actor NeovimProcess {
             if unpacker.failed {
                 io?.shutdown(.protocolViolation)
             }
+            io?.didConsumeInbound(bytes.count)
         case .disconnected(let error):
             finishDisconnect(error)
         }
@@ -616,7 +643,14 @@ actor NeovimProcess {
         if let ui {
             switch method {
             case "redraw":
-                for grid in ui.redraw(arguments) { gridsContinuation.yield(grid) }
+                if let grid = streamedRedrawGrid {
+                    streamedRedrawGrid = nil
+                    gridsContinuation.yield(grid)
+                } else {
+                    for grid in ui.redraw(arguments) {
+                        gridsContinuation.yield(grid)
+                    }
+                }
                 return
             case "vimenter":
                 ui.vimenter()
@@ -627,12 +661,14 @@ actor NeovimProcess {
                     case .ignored:
                         break
                     case .changed:
-                        progressUpdatesContinuation.yield(
+                        publishProgressUpdate(
                             ProgressUpdate(percent: ui.progressPercent,
-                                           isCompletion: false))
+                                           isCompletion: false),
+                            to: progressUpdatesContinuation)
                     case .completed(let percent):
-                        progressUpdatesContinuation.yield(
-                            ProgressUpdate(percent: percent, isCompletion: true))
+                        publishProgressUpdate(
+                            ProgressUpdate(percent: percent, isCompletion: true),
+                            to: progressUpdatesContinuation)
                     }
                 }
                 return
@@ -660,13 +696,21 @@ actor NeovimProcess {
             return
         }
 
-        // Neovim blocks on `rpcrequest` until answered, so at most one request
-        // per method is in flight; run the (main-actor) handler and respond on
-        // the actor once it returns.
+        guard activeReverseRequests < limits.maximumReverseRequests else {
+            io?.shutdown(.protocolViolation)
+            return
+        }
+        activeReverseRequests += 1
+
         Task { [weak self] in
             let outcome = await handler(arguments)
-            await self?.respond(id: id, outcome: outcome)
+            await self?.finishRequest(id: id, outcome: outcome)
         }
+    }
+
+    private func finishRequest(id: UInt64, outcome: RequestOutcome) {
+        activeReverseRequests -= 1
+        respond(id: id, outcome: outcome)
     }
 
     /// Registers a handler for an inbound RPC request method, replacing any
@@ -734,6 +778,22 @@ actor NeovimProcess {
     }
 }
 
+/// Publishes progress without allowing a state snapshot to displace an unseen
+/// completion. The process actor remains authoritative for the latest state,
+/// so dropping a snapshot while a completion is pending loses no state.
+nonisolated func publishProgressUpdate(
+    _ update: ProgressUpdate,
+    to continuation: AsyncStream<ProgressUpdate>.Continuation
+) {
+    switch continuation.yield(update) {
+    case .dropped(let displaced)
+        where displaced.isCompletion && !update.isCompletion:
+        _ = continuation.yield(displaced)
+    default:
+        break
+    }
+}
+
 // MARK: - UI attachment
 
 extension NeovimProcess {
@@ -761,7 +821,7 @@ extension NeovimProcess {
     /// published on `grids`.
     func uiAttach(width: Int, height: Int, options: UIOptions,
                   timeout: Duration = .seconds(5)) async -> UIAttachResult {
-        let controller = ui ?? UIController()
+        let controller = ui ?? UIController(limits: limits)
         ui = controller
 
         let deadline = ContinuousClock.now.advanced(by: timeout)
@@ -988,19 +1048,27 @@ private nonisolated final class TransportIO: @unchecked Sendable {
     private let queue = DispatchQueue(label: "io.nvmm.rpc", qos: .userInitiated)
     private let readFD: Int32
     private let writeFD: Int32
+    private let limits: RPCResourceLimits
     private let emit: @Sendable (Inbound) -> Void
 
     private var readSource: DispatchSourceRead!
     private var writeSource: DispatchSourceWrite!
+    private var readResumed = true
     private var writeResumed = false
-    private var outgoing: [UInt8] = []
+    private var outgoing: [[UInt8]] = []
+    private var outgoingHead = 0
+    private var outgoingOffset = 0
+    private var outgoingBytes = 0
+    private var inboundQueuedBytes = 0
     private var readBuffer = [UInt8](repeating: 0, count: 16384)
     private var closed = false
     private var pendingCancels = 2
 
-    init(readFD: Int32, writeFD: Int32, emit: @escaping @Sendable (Inbound) -> Void) {
+    init(readFD: Int32, writeFD: Int32, limits: RPCResourceLimits,
+         emit: @escaping @Sendable (Inbound) -> Void) {
         self.readFD = readFD
         self.writeFD = writeFD
+        self.limits = limits
         self.emit = emit
 
         setNonBlocking(readFD)
@@ -1022,10 +1090,31 @@ private nonisolated final class TransportIO: @unchecked Sendable {
     func send(_ bytes: [UInt8]) {
         queue.async {
             guard !self.closed else { return }
-            self.outgoing.append(contentsOf: bytes)
+            guard bytes.count <=
+                    self.limits.maximumOutboundQueuedBytes -
+                    self.outgoingBytes
+            else {
+                self.beginShutdown(.protocolViolation)
+                return
+            }
+            self.outgoing.append(bytes)
+            self.outgoingBytes += bytes.count
             if !self.writeResumed {
                 self.writeSource.resume()
                 self.writeResumed = true
+            }
+        }
+    }
+
+    /// Returns credit after the process actor has consumed an inbound chunk.
+    func didConsumeInbound(_ count: Int) {
+        queue.async {
+            self.inboundQueuedBytes -= count
+            assert(self.inboundQueuedBytes >= 0)
+            if !self.closed, !self.readResumed,
+               self.inboundQueuedBytes <= self.limits.inboundResumeBytes {
+                self.readSource.resume()
+                self.readResumed = true
             }
         }
     }
@@ -1047,13 +1136,19 @@ private nonisolated final class TransportIO: @unchecked Sendable {
         guard !closed else { return }
         var count = -1
         readBuffer.withUnsafeMutableBytes { raw in
+            let credit = limits.maximumInboundQueuedBytes - inboundQueuedBytes
             repeat {
-                count = read(readFD, raw.baseAddress, raw.count)
+                count = read(readFD, raw.baseAddress, min(raw.count, credit))
             } while count == -1 && errno == EINTR
         }
 
         if count > 0 {
+            inboundQueuedBytes += count
             emit(.data(Array(readBuffer[0..<count])))
+            if inboundQueuedBytes >= limits.maximumInboundQueuedBytes {
+                readSource.suspend()
+                readResumed = false
+            }
             return
         }
         if count == 0 {
@@ -1067,7 +1162,7 @@ private nonisolated final class TransportIO: @unchecked Sendable {
 
     private func canWrite() {
         guard !closed else { return }
-        if outgoing.isEmpty {
+        if outgoingHead == outgoing.count {
             if writeResumed {
                 writeSource.suspend()
                 writeResumed = false
@@ -1076,9 +1171,11 @@ private nonisolated final class TransportIO: @unchecked Sendable {
         }
 
         var written = -1
-        outgoing.withUnsafeBytes { raw in
+        outgoing[outgoingHead].withUnsafeBytes { raw in
             repeat {
-                written = write(writeFD, raw.baseAddress, raw.count)
+                written = write(writeFD,
+                                raw.baseAddress?.advanced(by: outgoingOffset),
+                                raw.count - outgoingOffset)
             } while written == -1 && errno == EINTR
         }
 
@@ -1090,10 +1187,21 @@ private nonisolated final class TransportIO: @unchecked Sendable {
             return
         }
 
-        outgoing.removeFirst(written)
-        if outgoing.isEmpty {
-            writeSource.suspend()
-            writeResumed = false
+        outgoingOffset += written
+        outgoingBytes -= written
+        if outgoingOffset == outgoing[outgoingHead].count {
+            outgoingHead += 1
+            outgoingOffset = 0
+            if outgoingHead == outgoing.count {
+                outgoing.removeAll(keepingCapacity: true)
+                outgoingHead = 0
+                writeSource.suspend()
+                writeResumed = false
+            } else if outgoingHead > 1_024,
+                      outgoingHead * 2 > outgoing.count {
+                outgoing.removeFirst(outgoingHead)
+                outgoingHead = 0
+            }
         }
     }
 
@@ -1102,6 +1210,10 @@ private nonisolated final class TransportIO: @unchecked Sendable {
         closed = true
         emit(.disconnected(error))
 
+        if !readResumed {
+            readSource.resume()
+            readResumed = true
+        }
         readSource.cancel()
         // A suspended source must be resumed before it can be cancelled.
         if !writeResumed {
