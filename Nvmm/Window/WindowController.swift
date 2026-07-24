@@ -21,6 +21,8 @@ import Cocoa
 import CoreText
 
 final class WindowController: NSWindowController, NSWindowDelegate, QuitSession {
+    // MARK: - State
+
     private let gridView = GridView(frame: .zero)
     private let scroller = Scroller(frame: .zero)
     private let progressIndicator = ProgressIndicator(frame: .zero)
@@ -202,6 +204,8 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         return nil
     }
 
+    // MARK: - Lifecycle
+
     convenience init(renderManager: RenderContextManager,
                      coordinator: TerminationCoordinator,
                      cascadingFrom source: WindowController? = nil) {
@@ -233,6 +237,8 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not supported")
     }
+
+    // MARK: - Starting the session
 
     /// Enqueues a command for the process, preserving order across input sources.
     private func enqueue(_ command: NvimCommand) {
@@ -366,6 +372,8 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         contentView.layoutSubtreeIfNeeded()
     }
 
+    // MARK: - Window geometry
+
     /// The inset between the grid view's trailing edge and the window's: the
     /// margin, plus the scrollbar's width while it is shown.
     private var trailingInset: CGFloat {
@@ -470,6 +478,8 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
             resizeWindow(in: window?.screen)
         }
     }
+
+    // MARK: - Neovim session
 
     /// The argv Neovim is launched with. Startup files follow `--embed`, opened
     /// one per tab page unless the buffers preference is set, matching how the
@@ -766,6 +776,8 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         alert.addButton(withTitle: "OK")
         alert.runModal()
     }
+
+    // MARK: - Showing the window
 
     /// Drops the `VimEnter` requirement after a short delay, so a session that
     /// never reaches `VimEnter` still shows its window; if a grid has already
