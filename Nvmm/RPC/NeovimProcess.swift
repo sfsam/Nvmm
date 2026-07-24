@@ -465,7 +465,12 @@ actor NeovimProcess {
     /// could silently discard work.
     func hasUnsavedBuffers() async -> Bool {
         let expr = "len(filter(map(getbufinfo(), 'v:val.changed'), 'v:val'))"
-        guard let response = try? await request("nvim_eval", [.string(expr)]),
+        // Bounded: a Neovim wedged in a plugin or prompt would otherwise never
+        // answer, and this runs before the quit drain's own deadline, leaving
+        // the app terminating forever. A timeout counts as unsaved so the quit
+        // path prompts rather than discards.
+        guard case .response(let response) = await requestBounded(
+                  "nvim_eval", [.string(expr)], timeout: .seconds(1)),
               !response.isError,
               let count = response.result.integer?.signed else { return true }
         return count != 0
