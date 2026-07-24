@@ -260,9 +260,16 @@ nonisolated struct Grid: Sendable {
     var textEntryMode: TextEntryMode { Nvmm.textEntryMode(for: modeState.semantic) }
 
     /// The grid's cursor, with colors resolved against the cell beneath it.
+    ///
+    /// The position is clamped into the grid so the cursor is always safe to
+    /// read: a cursor left out of bounds by a shrink, or any grid with no cells
+    /// yet, cannot index past the storage.
     var cursor: Cursor {
-        Cursor(row: cursorRow, column: cursorCol,
-               cell: cell(cursorRow, cursorCol), attributes: modeState.cursor)
+        let row = min(max(cursorRow, 0), max(height - 1, 0))
+        let column = min(max(cursorCol, 0), max(width - 1, 0))
+        let beneath = cells.isEmpty ? Cell() : cell(row, column)
+        return Cursor(row: row, column: column,
+                      cell: beneath, attributes: modeState.cursor)
     }
 
     /// The semantic highlight group of the cell at the given position.

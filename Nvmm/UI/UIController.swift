@@ -161,15 +161,16 @@ nonisolated final class UIController {
 
     private func gridCursorGoto(_ tuple: [MPValue]) {
         guard tuple.count >= 3, isMainGrid(tuple[0]),
-              let row = asInt(tuple[1]), let col = asInt(tuple[2]) else { return }
-        guard row < writing.height, col < writing.width else { return }
+              let row = asIndex(tuple[1]), let col = asIndex(tuple[2]),
+              row < writing.height, col < writing.width else { return }
         writing.cursorRow = row
         writing.cursorCol = col
     }
 
     private func gridScroll(_ tuple: [MPValue]) {
-        guard tuple.count >= 6, let top = asInt(tuple[1]), let bottom = asInt(tuple[2]),
-              let left = asInt(tuple[3]), let right = asInt(tuple[4]),
+        guard tuple.count >= 6,
+              let top = asIndex(tuple[1]), let bottom = asIndex(tuple[2]),
+              let left = asIndex(tuple[3]), let right = asIndex(tuple[4]),
               let rows = asInt(tuple[5]) else { return }
         guard bottom >= top, right >= left else { return }
         guard isMainGrid(tuple[0]) else { return }
@@ -207,7 +208,7 @@ nonisolated final class UIController {
 
     private func gridLine(_ tuple: [MPValue]) {
         guard tuple.count >= 4, isMainGrid(tuple[0]),
-              let row = asInt(tuple[1]), let col = asInt(tuple[2]),
+              let row = asIndex(tuple[1]), let col = asIndex(tuple[2]),
               case .array(let updates) = tuple[3] else { return }
         guard row < writing.height, col < writing.width else { return }
 
@@ -640,4 +641,15 @@ nonisolated final class UIController {
 /// Extracts a signed `Int` from a MessagePack integer, or nil for non-integers.
 private nonisolated func asInt(_ value: MPValue) -> Int? {
     value.integer.map { Int(truncatingIfNeeded: $0.signed) }
+}
+
+/// A grid coordinate decoded from the wire: nil unless it is a nonnegative
+/// integer. Rejecting negatives here lets each handler's existing upper-bound
+/// check (`< width`, `<= height`) stand in for a full range check, the way the
+/// reference's unsigned `size_t` coordinates collapse negative and too-large
+/// into one failure. A coordinate large enough to overflow later arithmetic is
+/// caught first by that upper-bound check, before it is used.
+private nonisolated func asIndex(_ value: MPValue) -> Int? {
+    guard let raw = value.integer?.signed, raw >= 0 else { return nil }
+    return Int(raw)
 }

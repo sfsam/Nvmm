@@ -227,6 +227,56 @@ final class UIControllerTests: XCTestCase {
         XCTAssertEqual(grid.height, 1)
     }
 
+    func testNegativeCoordinateRedrawEventsAreIgnored() {
+        // Negative row/column/rectangle coordinates would index cell storage
+        // out of range; each event is dropped without touching the grid.
+        let controller = UIController()
+        _ = controller.redraw([
+            ["grid_resize", [1, 3, 2]],
+            ["grid_line", [1, 0, 0, [["a", 0], ["b", 0], ["c", 0]]]],
+            ["grid_cursor_goto", [1, -1, -1]],           // negative cursor
+            ["grid_line", [1, -1, 0, [["x", 0]]]],       // negative row
+            ["grid_line", [1, 0, -1, [["x", 0]]]],       // negative column
+            ["grid_scroll", [1, -1, 2, 0, 3, 1]],        // negative top
+            ["grid_scroll", [1, 0, 2, -1, 3, 1]],        // negative left
+            ["flush", []],
+        ])
+        let grid = controller.globalGrid
+        // The valid line stands; the cursor stayed at the origin; no crash.
+        XCTAssertEqual(rowText(grid, row: 0, count: 3), "abc")
+        XCTAssertEqual(grid.cursor.row, 0)
+        XCTAssertEqual(grid.cursor.column, 0)
+    }
+
+    func testCursorIsSafeWhenLeftOutOfBoundsByShrink() {
+        // The cursor is placed near the edge, then the grid shrinks below it.
+        // Reading the cursor must clamp into the smaller grid, not index past.
+        let controller = UIController()
+        _ = controller.redraw([
+            ["grid_resize", [1, 10, 10]],
+            ["grid_cursor_goto", [1, 9, 9]],
+            ["grid_resize", [1, 2, 2]],
+            ["flush", []],
+        ])
+        let cursor = controller.globalGrid.cursor
+        XCTAssertLessThan(cursor.row, 2)
+        XCTAssertLessThan(cursor.column, 2)
+    }
+
+    func testCursorIsSafeOnEmptyGrid() {
+        // A grid whose first resize never produced storage still answers a
+        // cursor read without indexing an empty cell array.
+        let controller = UIController()
+        _ = controller.redraw([
+            ["grid_resize", [1, -1, -1]], // invalid, dropped, leaves 0x0
+            ["flush", []],
+        ])
+        let grid = controller.globalGrid
+        XCTAssertEqual(grid.width, 0)
+        XCTAssertEqual(grid.cursor.row, 0)   // does not crash
+        XCTAssertEqual(grid.cursor.column, 0)
+    }
+
     func testOversizedHighlightDefinitionIsIgnored() {
         // A highlight id past the cap is dropped rather than growing the dense
         // table to it; an ordinary definition afterward still resolves.
