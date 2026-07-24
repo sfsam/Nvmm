@@ -105,6 +105,26 @@ final class MessagePackTests: XCTestCase {
         assertUnpacks([0xca, 0x3f, 0x80, 0x00, 0x00], to: .double(1.0))
     }
 
+    func testVariableExtensionHeaderWaitsForTypeByte() {
+        let cases: [([UInt8], [UInt8])] = [
+            ([0xc7, 0x01], [0xfe, 0xaa]),
+            ([0xc8, 0x00, 0x01], [0xfe, 0xaa]),
+            ([0xc9, 0x00, 0x00, 0x00, 0x01], [0xfe, 0xaa]),
+        ]
+
+        for (lengthHeader, remainder) in cases {
+            var unpacker = MessagePackUnpacker()
+            unpacker.feed(lengthHeader)
+            XCTAssertNil(unpacker.unpack())
+            XCTAssertFalse(unpacker.failed)
+
+            unpacker.feed(remainder)
+            XCTAssertEqual(unpacker.unpack(),
+                           .ext(type: -2, payload: [0xaa]))
+            XCTAssertFalse(unpacker.failed)
+        }
+    }
+
     // MARK: Unpack strings
 
     func testUnpackStrings() {
@@ -325,6 +345,114 @@ final class MessagePackTests: XCTestCase {
         XCTAssertEqual(unpacker.unpack(), .array([.int(1), .int(7), .null, .int(2)]))
     }
 
+    func testRedrawEventsStreamWithoutRetainingTheBatch() {
+        let events: [MPValue] = [
+            .array([.string("busy_start"), .array([])]),
+            .array([.string("flush"), .array([])]),
+        ]
+        var writer = MessagePackWriter()
+        writer.encodeNotification(method: "redraw", arguments: events)
+
+        var received: [MPValue] = []
+        var unpacker = MessagePackUnpacker()
+        var message: MPValue?
+        for byte in writer.bytes {
+            unpacker.feed(CollectionOfOne(byte))
+            if let value = unpacker.unpack(redrawItem: {
+                if case .event(let event) = $0 { received.append(event) }
+            }) {
+                message = value
+            }
+        }
+
+        XCTAssertEqual(received, events)
+        XCTAssertEqual(message, .array([.int(2), .string("redraw"), .array([])]))
+    }
+
+    func testMalformedRedrawEnvelopeDoesNotStreamEvents() {
+        let event = MPValue.array([.string("flush"), .array([])])
+        var writer = MessagePackWriter()
+        writer.startArray(4)
+        writer.packUInt64(2)
+        writer.packString("redraw")
+        writer.pack(.array([event]))
+        writer.packNil()
+
+        var streamedCount = 0
+        var unpacker = MessagePackUnpacker()
+        unpacker.feed(writer.bytes)
+        let message = unpacker.unpack(redrawItem: { _ in streamedCount += 1 })
+
+        XCTAssertEqual(streamedCount, 0)
+        XCTAssertEqual(
+            message,
+            .array([.int(2), .string("redraw"), .array([event]), .null]))
+    }
+
+    func testOrdinaryUnpackRetainsRedrawEvents() {
+        let event = MPValue.array([.string("flush"), .array([])])
+        var writer = MessagePackWriter()
+        writer.encodeNotification(method: "redraw", arguments: [event])
+
+        var unpacker = MessagePackUnpacker()
+        unpacker.feed(writer.bytes)
+        XCTAssertEqual(unpacker.unpack(),
+                       .array([.int(2), .string("redraw"), .array([event])]))
+    }
+
+    func testGridLineStreamsCellsWithoutBuildingAnEvent() {
+        let cells: [MPValue] = [
+            .array([.string("a"), .int(0)]),
+            .array([.string("b")]),
+        ]
+        let event: MPValue = .array([
+            .string("grid_line"),
+            .array([.int(1), .int(2), .int(3), .array(cells), .bool(false)]),
+        ])
+        var writer = MessagePackWriter()
+        writer.encodeNotification(method: "redraw", arguments: [event])
+
+        var starts: [[MPValue]] = []
+        var receivedCells: [MPValue] = []
+        var ends: [MPValue] = []
+        var genericEvents: [MPValue] = []
+        var unpacker = MessagePackUnpacker()
+        for byte in writer.bytes {
+            unpacker.feed(CollectionOfOne(byte))
+            _ = unpacker.unpack(redrawItem: {
+                switch $0 {
+                case .event(let value): genericEvents.append(value)
+                case .gridLineStart(let prefix): starts.append(prefix)
+                case .gridLineCell(let cell): receivedCells.append(cell)
+                case .gridLineEnd(let wrap): ends.append(wrap)
+                }
+            })
+        }
+
+        XCTAssertEqual(starts, [[.int(1), .int(2), .int(3)]])
+        XCTAssertEqual(receivedCells, cells)
+        XCTAssertEqual(ends, [.bool(false)])
+        XCTAssertTrue(genericEvents.isEmpty)
+        XCTAssertFalse(unpacker.failed)
+    }
+
+    func testGridLineCellTextLimitFailsBeforeRetainingTheCell() {
+        let text = String(repeating: "x", count: 25)
+        let event: MPValue = .array([
+            .string("grid_line"),
+            .array([.int(1), .int(0), .int(0),
+                    .array([.array([.string(text), .int(0)])]),
+                    .bool(false)]),
+        ])
+        var writer = MessagePackWriter()
+        writer.encodeNotification(method: "redraw", arguments: [event])
+
+        var unpacker = MessagePackUnpacker()
+        unpacker.feed(writer.bytes)
+        XCTAssertNil(unpacker.unpack(redrawItem: { _ in }))
+        XCTAssertTrue(unpacker.failed)
+    }
+
     // MARK: Value independence
 
     func testDecodedValuesAreIndependent() {
@@ -394,5 +522,27 @@ final class MessagePackTests: XCTestCase {
         }
         XCTAssertEqual(values.count, 1000)
         XCTAssertFalse(unpacker.failed)
+    }
+
+    func testDeclaredStringAboveByteLimitFailsAtItsHeader() {
+        var limits = RPCResourceLimits.production
+        limits.maximumStringBytes = 3
+        var unpacker = MessagePackUnpacker(limits: limits)
+        unpacker.feed([0xd9, 0x04])
+
+        XCTAssertNil(unpacker.unpack())
+        XCTAssertTrue(unpacker.failed)
+    }
+
+    func testWholeValueByteLimitIncludesFragmentedContainers() {
+        var limits = RPCResourceLimits.production
+        limits.maximumValueBytes = 4
+        var unpacker = MessagePackUnpacker(limits: limits)
+
+        for byte in [UInt8(0x95), 0xc0, 0xc0, 0xc0, 0xc0, 0xc0] {
+            unpacker.feed(CollectionOfOne(byte))
+            _ = unpacker.unpack()
+        }
+        XCTAssertTrue(unpacker.failed)
     }
 }

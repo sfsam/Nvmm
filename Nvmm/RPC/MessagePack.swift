@@ -14,8 +14,6 @@
 //  is inherently Sendable and owns its storage: decoded values can cross actors
 //  and outlive the buffer they were decoded from, needing no arena.
 //
-//  TODO: add a zero-copy reader for the redraw hot path (grid_line).
-//
 //  These types are nonisolated so the RPC actor can use them off the main actor,
 //  despite the project's MainActor-by-default isolation.
 //
@@ -130,6 +128,14 @@ nonisolated extension MPValue: ExpressibleByStringLiteral {
 
 nonisolated extension MPValue: ExpressibleByArrayLiteral {
     nonisolated init(arrayLiteral elements: MPValue...) { self = .array(elements) }
+}
+
+/// Values emitted while a redraw notification is decoded incrementally.
+nonisolated enum MessagePackRedrawItem {
+    case event(MPValue)
+    case gridLineStart([MPValue])
+    case gridLineCell(MPValue)
+    case gridLineEnd(MPValue)
 }
 
 // MARK: - Writer
@@ -352,38 +358,429 @@ nonisolated extension MessagePackWriter {
 nonisolated struct MessagePackUnpacker {
     private var storage: [UInt8] = []
     private var offset = 0
+    private let limits: RPCResourceLimits
+    private var frames: [Frame] = []
+    private var payload: Payload?
+    private var valueBytes = 0
 
-    // Product safety limits on one decoded value. These are not MessagePack or
-    // Neovim protocol limits; they cap what a single malformed value can make
-    // the decoder allocate. A violation sets `failed` and is not retryable,
-    // because MessagePack gives no way to resynchronize past a rejected value.
-    private static let maxDepth = 128
-    private static let maxCollectionCount = 1 << 20
+    private struct Frame {
+        enum Kind: Equatable { case array, map }
+        enum Role: Equatable {
+            case normal
+            case redrawArguments
+            case redrawEvent
+            case gridLineEvent
+            case gridLineTuple
+            case streamedGridLineTuple
+            case gridLineCells
+            case gridLineCell
+        }
+        var kind: Kind
+        var role: Role
+        var remaining: Int
+        var values: [MPValue]
+    }
+
+    private struct Payload {
+        enum Kind {
+            case string
+            case binary
+            case ext(Int8)
+        }
+        var kind: Kind
+        var remaining: Int
+        var bytes: [UInt8]
+    }
 
     /// Set once a limit above is exceeded. The caller stops decoding and closes
     /// the connection. This is distinct from the nil `unpack` returns for an
     /// incomplete buffer, which is retried once more bytes arrive.
     private(set) var failed = false
 
-    init() {}
+    init(limits: RPCResourceLimits = .production) {
+        self.limits = limits
+    }
 
     /// Appends bytes to the input buffer.
     mutating func feed<S: Sequence>(_ bytes: S) where S.Element == UInt8 {
+        guard !failed else { return }
         storage.append(contentsOf: bytes)
     }
 
     /// Appends raw bytes to the input buffer.
     mutating func feed(_ buffer: UnsafeRawBufferPointer) {
+        guard !failed else { return }
         storage.append(contentsOf: buffer)
     }
 
     /// Unpacks the next complete value, or nil if the buffer is exhausted or
     /// holds only a partial value.
-    mutating func unpack() -> MPValue? {
+    mutating func unpack(
+        redrawItem: ((MessagePackRedrawItem) -> Void)? = nil
+    ) -> MPValue? {
         guard !failed else { return nil }
-        var cursor = offset
-        guard let value = parse(&cursor, depth: 0) else { return nil }
-        offset = cursor
+        while !failed {
+            if payload != nil {
+                guard let value = consumePayload() else {
+                    compact()
+                    return nil
+                }
+                if let completed = accept(value, redrawItem: redrawItem) {
+                    compact()
+                    return completed
+                }
+                continue
+            }
+
+            guard let item = parseItem() else {
+                compact()
+                return nil
+            }
+            switch item {
+            case .value(let value):
+                if let completed = accept(value, redrawItem: redrawItem) {
+                    compact()
+                    return completed
+                }
+            case .container(let kind, let count):
+                if count < 0 || count > limits.maximumCollectionCount ||
+                    frames.count >= limits.maximumNestingDepth {
+                    failed = true
+                    break
+                }
+                let childCount: Int
+                if kind == .map {
+                    let (count, overflow) = count.multipliedReportingOverflow(by: 2)
+                    if overflow {
+                        failed = true
+                        break
+                    }
+                    childCount = count
+                } else {
+                    childCount = count
+                }
+                let role = containerRole(kind: kind, redrawItem: redrawItem)
+                if childCount == 0 {
+                    let value: MPValue = kind == .array ? .array([]) : .map([])
+                    if let completed = accept(value, redrawItem: redrawItem) {
+                        compact()
+                        return completed
+                    }
+                } else {
+                    frames.append(Frame(kind: kind, role: role,
+                                        remaining: childCount, values: []))
+                }
+            case .payload(let newPayload):
+                payload = newPayload
+            }
+        }
+        return nil
+    }
+
+    private enum Item {
+        case value(MPValue)
+        case container(Frame.Kind, Int)
+        case payload(Payload)
+    }
+
+    private mutating func accept(
+        _ newValue: MPValue,
+        redrawItem: ((MessagePackRedrawItem) -> Void)?
+    ) -> MPValue? {
+        var value = newValue
+        while let index = frames.indices.last {
+            if frames[index].role == .redrawEvent,
+               frames[index].values.isEmpty,
+               value.stringValue == "grid_line" {
+                frames[index].role = .gridLineEvent
+            }
+
+            switch frames[index].role {
+            case .redrawArguments:
+                if value != .invalid { redrawItem?(.event(value)) }
+            case .gridLineEvent:
+                if frames[index].values.isEmpty {
+                    frames[index].values.append(value)
+                }
+            case .gridLineCells:
+                redrawItem?(.gridLineCell(value))
+            default:
+                frames[index].values.append(value)
+            }
+            frames[index].remaining -= 1
+            if frames[index].remaining > 0 {
+                return nil
+            }
+
+            let frame = frames.removeLast()
+            switch frame.kind {
+            case .array:
+                switch frame.role {
+                case .redrawArguments:
+                    value = .array([])
+                case .streamedGridLineTuple:
+                    redrawItem?(.gridLineEnd(frame.values.last ?? .invalid))
+                    value = .invalid
+                case .gridLineEvent:
+                    value = .invalid
+                case .gridLineCells:
+                    value = .array([])
+                default:
+                    value = .array(frame.values)
+                }
+            case .map:
+                var pairs: [(MPValue, MPValue)] = []
+                pairs.reserveCapacity(frame.values.count / 2)
+                var index = 0
+                while index < frame.values.count {
+                    pairs.append((frame.values[index], frame.values[index + 1]))
+                    index += 2
+                }
+                value = .map(pairs)
+            }
+        }
+        valueBytes = 0
+        return value
+    }
+
+    private mutating func containerRole(
+        kind: Frame.Kind,
+        redrawItem: ((MessagePackRedrawItem) -> Void)?
+    ) -> Frame.Role {
+        guard kind == .array, redrawItem != nil else { return .normal }
+        if frames.count == 1, frames[0].kind == .array,
+           frames[0].remaining == 1,
+           frames[0].values.count == 2,
+           frames[0].values[0].integer?.unsigned == 2,
+           frames[0].values[1].stringValue == "redraw" {
+            return .redrawArguments
+        }
+        guard let index = frames.indices.last else { return .normal }
+        switch frames[index].role {
+        case .redrawArguments:
+            return .redrawEvent
+        case .gridLineEvent:
+            return .gridLineTuple
+        case .gridLineTuple where frames[index].values.count == 3:
+            frames[index].role = .streamedGridLineTuple
+            redrawItem?(.gridLineStart(frames[index].values))
+            return .gridLineCells
+        case .gridLineCells:
+            return .gridLineCell
+        default:
+            return .normal
+        }
+    }
+
+    private mutating func consumePayload() -> MPValue? {
+        guard var current = payload else { return nil }
+        let available = storage.count - offset
+        let count = min(available, current.remaining)
+        if count > 0 {
+            current.bytes.append(contentsOf: storage[offset..<(offset + count)])
+            offset += count
+            current.remaining -= count
+            valueBytes += count
+        }
+        guard checkValueBytes() else { return nil }
+        if current.remaining > 0 {
+            payload = current
+            return nil
+        }
+        payload = nil
+        switch current.kind {
+        case .string:
+            return .string(String(decoding: current.bytes, as: UTF8.self))
+        case .binary:
+            return .binary(current.bytes)
+        case .ext(let type):
+            return .ext(type: type, payload: current.bytes)
+        }
+    }
+
+    private mutating func parseItem() -> Item? {
+        guard let byte = peekByte() else { return nil }
+        let headerBytes = headerLength(for: byte)
+        guard offset + headerBytes <= storage.count else { return nil }
+
+        let start = offset
+        offset += 1
+        let item: Item?
+        switch byte {
+        case 0x00...0x7f:
+            item = .value(.int(MPInteger(UInt64(byte))))
+        case 0xe0...0xff:
+            item = .value(.int(MPInteger(Int64(Int8(bitPattern: byte)))))
+        case 0x80...0x8f:
+            item = .container(.map, Int(byte & 0x0f))
+        case 0x90...0x9f:
+            item = .container(.array, Int(byte & 0x0f))
+        case 0xa0...0xbf:
+            item = makePayload(.string, count: Int(byte & 0x1f))
+        case 0xc0:
+            item = .value(.null)
+        case 0xc1:
+            item = .value(.invalid)
+        case 0xc2:
+            item = .value(.bool(false))
+        case 0xc3:
+            item = .value(.bool(true))
+        case 0xc4:
+            item = makePayload(.binary, count: Int(readUInt(1)))
+        case 0xc5:
+            item = makePayload(.binary, count: Int(readUInt(2)))
+        case 0xc6:
+            item = makePayload(.binary, count: checkedInt(readUInt(4)))
+        case 0xc7:
+            let count = Int(readUInt(1))
+            item = makeExtension(count: count)
+        case 0xc8:
+            let count = Int(readUInt(2))
+            item = makeExtension(count: count)
+        case 0xc9:
+            item = makeExtension(count: checkedInt(readUInt(4)))
+        case 0xca:
+            item = .value(.double(Double(Float(bitPattern: UInt32(readUInt(4))))))
+        case 0xcb:
+            item = .value(.double(Double(bitPattern: readUInt(8))))
+        case 0xcc:
+            item = .value(.int(MPInteger(readUInt(1))))
+        case 0xcd:
+            item = .value(.int(MPInteger(readUInt(2))))
+        case 0xce:
+            item = .value(.int(MPInteger(readUInt(4))))
+        case 0xcf:
+            item = .value(.int(MPInteger(readUInt(8))))
+        case 0xd0:
+            item = .value(.int(MPInteger(Int64(
+                Int8(bitPattern: UInt8(readUInt(1)))))))
+        case 0xd1:
+            item = .value(.int(MPInteger(Int64(
+                Int16(bitPattern: UInt16(readUInt(2)))))))
+        case 0xd2:
+            item = .value(.int(MPInteger(Int64(
+                Int32(bitPattern: UInt32(readUInt(4)))))))
+        case 0xd3:
+            item = .value(.int(MPInteger(Int64(bitPattern: readUInt(8)))))
+        case 0xd4:
+            item = makeExtension(count: 1)
+        case 0xd5:
+            item = makeExtension(count: 2)
+        case 0xd6:
+            item = makeExtension(count: 4)
+        case 0xd7:
+            item = makeExtension(count: 8)
+        case 0xd8:
+            item = makeExtension(count: 16)
+        case 0xd9:
+            item = makePayload(.string, count: Int(readUInt(1)))
+        case 0xda:
+            item = makePayload(.string, count: Int(readUInt(2)))
+        case 0xdb:
+            item = makePayload(.string, count: checkedInt(readUInt(4)))
+        case 0xdc:
+            item = .container(.array, Int(readUInt(2)))
+        case 0xdd:
+            item = .container(.array, checkedInt(readUInt(4)))
+        case 0xde:
+            item = .container(.map, Int(readUInt(2)))
+        case 0xdf:
+            item = .container(.map, checkedInt(readUInt(4)))
+        default:
+            item = nil
+        }
+        valueBytes += offset - start
+        guard checkValueBytes() else { return nil }
+        return item
+    }
+
+    private func headerLength(for byte: UInt8) -> Int {
+        switch byte {
+        case 0xc4, 0xcc, 0xd0, 0xd9: return 2
+        case 0xc5, 0xcd, 0xd1, 0xda, 0xdc, 0xde: return 3
+        case 0xc6, 0xca, 0xce, 0xd2, 0xdb, 0xdd, 0xdf: return 5
+        case 0xc7: return 3
+        case 0xc8: return 4
+        case 0xc9: return 6
+        case 0xcb, 0xcf, 0xd3: return 9
+        case 0xd4, 0xd5, 0xd6, 0xd7, 0xd8: return 2
+        default: return 1
+        }
+    }
+
+    private mutating func readUInt(_ count: Int) -> UInt64 {
+        var value: UInt64 = 0
+        for _ in 0..<count {
+            value = value << 8 | UInt64(storage[offset])
+            offset += 1
+        }
+        return value
+    }
+
+    private func peekByte() -> UInt8? {
+        offset < storage.count ? storage[offset] : nil
+    }
+
+    private mutating func makePayload(_ kind: Payload.Kind, count: Int) -> Item? {
+        guard count >= 0 else {
+            failed = true
+            return nil
+        }
+        let maximum: Int
+        switch kind {
+        case .string:
+            if frames.last?.role == .gridLineCell,
+               frames.last?.values.isEmpty == true {
+                maximum = limits.maximumCellTextBytes
+            } else {
+                maximum = limits.maximumStringBytes
+            }
+        case .binary, .ext: maximum = limits.maximumBinaryBytes
+        }
+        guard count <= maximum, valueBytes <= limits.maximumValueBytes - count
+        else {
+            failed = true
+            return nil
+        }
+        if count == 0 {
+            switch kind {
+            case .string: return .value(.string(""))
+            case .binary: return .value(.binary([]))
+            case .ext(let type): return .value(.ext(type: type, payload: []))
+            }
+        }
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(count)
+        return .payload(Payload(kind: kind, remaining: count, bytes: bytes))
+    }
+
+    private mutating func makeExtension(count: Int) -> Item? {
+        guard count >= 0, offset < storage.count else {
+            failed = count < 0
+            return nil
+        }
+        let type = Int8(bitPattern: storage[offset])
+        offset += 1
+        return makePayload(.ext(type), count: count)
+    }
+
+    private mutating func checkedInt(_ value: UInt64) -> Int {
+        guard value <= UInt64(Int.max) else {
+            failed = true
+            return -1
+        }
+        return Int(value)
+    }
+
+    private mutating func checkValueBytes() -> Bool {
+        if valueBytes > limits.maximumValueBytes {
+            failed = true
+            return false
+        }
+        return true
+    }
+
+    private mutating func compact() {
         if offset == storage.count {
             storage.removeAll(keepingCapacity: true)
             offset = 0
@@ -391,214 +788,6 @@ nonisolated struct MessagePackUnpacker {
             storage.removeFirst(offset)
             offset = 0
         }
-        return value
-    }
-
-    // MARK: Parsing
-
-    // Each reader returns nil when the buffer lacks the requested bytes. That
-    // nil propagates up through `parse` to `unpack`, which then leaves the
-    // buffer untouched for a later feed to complete.
-
-    private func readByte(_ cursor: inout Int) -> UInt8? {
-        guard cursor < storage.count else { return nil }
-        defer { cursor += 1 }
-        return storage[cursor]
-    }
-
-    private func readUInt16(_ cursor: inout Int) -> UInt16? {
-        guard cursor + 2 <= storage.count else { return nil }
-        let value = UInt16(storage[cursor]) << 8 | UInt16(storage[cursor + 1])
-        cursor += 2
-        return value
-    }
-
-    private func readUInt32(_ cursor: inout Int) -> UInt32? {
-        guard cursor + 4 <= storage.count else { return nil }
-        var value: UInt32 = 0
-        for i in 0..<4 { value = value << 8 | UInt32(storage[cursor + i]) }
-        cursor += 4
-        return value
-    }
-
-    private func readUInt64(_ cursor: inout Int) -> UInt64? {
-        guard cursor + 8 <= storage.count else { return nil }
-        var value: UInt64 = 0
-        for i in 0..<8 { value = value << 8 | UInt64(storage[cursor + i]) }
-        cursor += 8
-        return value
-    }
-
-    private func readBytes(_ cursor: inout Int, _ count: Int) -> ArraySlice<UInt8>? {
-        guard cursor + count <= storage.count else { return nil }
-        defer { cursor += count }
-        return storage[cursor..<cursor + count]
-    }
-
-    private mutating func parse(_ cursor: inout Int, depth: Int) -> MPValue? {
-        if depth > Self.maxDepth {
-            failed = true
-            return nil
-        }
-        guard let byte = readByte(&cursor) else { return nil }
-
-        switch byte {
-        case 0x00...0x7f:
-            return .int(MPInteger(UInt64(byte)))
-        case 0xe0...0xff:
-            return .int(MPInteger(Int64(Int8(bitPattern: byte))))
-        case 0x80...0x8f:
-            return parseMap(&cursor, count: Int(byte & 0x0f), depth: depth)
-        case 0x90...0x9f:
-            return parseArray(&cursor, count: Int(byte & 0x0f), depth: depth)
-        case 0xa0...0xbf:
-            return parseString(&cursor, count: Int(byte & 0x1f))
-        case 0xc0:
-            return .null
-        case 0xc1:
-            return .invalid
-        case 0xc2:
-            return .bool(false)
-        case 0xc3:
-            return .bool(true)
-        case 0xc4:
-            guard let count = readByte(&cursor) else { return nil }
-            return parseBinary(&cursor, count: Int(count))
-        case 0xc5:
-            guard let count = readUInt16(&cursor) else { return nil }
-            return parseBinary(&cursor, count: Int(count))
-        case 0xc6:
-            guard let count = readUInt32(&cursor) else { return nil }
-            return parseBinary(&cursor, count: Int(count))
-        case 0xc7:
-            guard let count = readByte(&cursor) else { return nil }
-            return parseExtension(&cursor, count: Int(count))
-        case 0xc8:
-            guard let count = readUInt16(&cursor) else { return nil }
-            return parseExtension(&cursor, count: Int(count))
-        case 0xc9:
-            guard let count = readUInt32(&cursor) else { return nil }
-            return parseExtension(&cursor, count: Int(count))
-        case 0xca:
-            guard let raw = readUInt32(&cursor) else { return nil }
-            return .double(Double(Float(bitPattern: raw)))
-        case 0xcb:
-            guard let raw = readUInt64(&cursor) else { return nil }
-            return .double(Double(bitPattern: raw))
-        case 0xcc:
-            guard let raw = readByte(&cursor) else { return nil }
-            return .int(MPInteger(UInt64(raw)))
-        case 0xcd:
-            guard let raw = readUInt16(&cursor) else { return nil }
-            return .int(MPInteger(UInt64(raw)))
-        case 0xce:
-            guard let raw = readUInt32(&cursor) else { return nil }
-            return .int(MPInteger(UInt64(raw)))
-        case 0xcf:
-            guard let raw = readUInt64(&cursor) else { return nil }
-            return .int(MPInteger(raw))
-        case 0xd0:
-            guard let raw = readByte(&cursor) else { return nil }
-            return .int(MPInteger(Int64(Int8(bitPattern: raw))))
-        case 0xd1:
-            guard let raw = readUInt16(&cursor) else { return nil }
-            return .int(MPInteger(Int64(Int16(bitPattern: raw))))
-        case 0xd2:
-            guard let raw = readUInt32(&cursor) else { return nil }
-            return .int(MPInteger(Int64(Int32(bitPattern: raw))))
-        case 0xd3:
-            guard let raw = readUInt64(&cursor) else { return nil }
-            return .int(MPInteger(Int64(bitPattern: raw)))
-        case 0xd4:
-            return parseExtension(&cursor, count: 1)
-        case 0xd5:
-            return parseExtension(&cursor, count: 2)
-        case 0xd6:
-            return parseExtension(&cursor, count: 4)
-        case 0xd7:
-            return parseExtension(&cursor, count: 8)
-        case 0xd8:
-            return parseExtension(&cursor, count: 16)
-        case 0xd9:
-            guard let count = readByte(&cursor) else { return nil }
-            return parseString(&cursor, count: Int(count))
-        case 0xda:
-            guard let count = readUInt16(&cursor) else { return nil }
-            return parseString(&cursor, count: Int(count))
-        case 0xdb:
-            guard let count = readUInt32(&cursor) else { return nil }
-            return parseString(&cursor, count: Int(count))
-        case 0xdc:
-            guard let count = readUInt16(&cursor) else { return nil }
-            return parseArray(&cursor, count: Int(count), depth: depth)
-        case 0xdd:
-            guard let count = readUInt32(&cursor) else { return nil }
-            return parseArray(&cursor, count: Int(count), depth: depth)
-        case 0xde:
-            guard let count = readUInt16(&cursor) else { return nil }
-            return parseMap(&cursor, count: Int(count), depth: depth)
-        case 0xdf:
-            guard let count = readUInt32(&cursor) else { return nil }
-            return parseMap(&cursor, count: Int(count), depth: depth)
-        default:
-            return nil // Unreachable: every byte value is handled above.
-        }
-    }
-
-    private func parseString(_ cursor: inout Int, count: Int) -> MPValue? {
-        guard let slice = readBytes(&cursor, count) else { return nil }
-        return .string(String(decoding: slice, as: UTF8.self))
-    }
-
-    private func parseBinary(_ cursor: inout Int, count: Int) -> MPValue? {
-        guard let slice = readBytes(&cursor, count) else { return nil }
-        return .binary(Array(slice))
-    }
-
-    private func parseExtension(_ cursor: inout Int, count: Int) -> MPValue? {
-        guard let type = readByte(&cursor),
-              let slice = readBytes(&cursor, count)
-        else { return nil }
-        return .ext(type: Int8(bitPattern: type), payload: Array(slice))
-    }
-
-    private mutating func parseArray(_ cursor: inout Int, count: Int,
-                                     depth: Int) -> MPValue? {
-        if count > Self.maxCollectionCount {
-            failed = true
-            return nil
-        }
-        var values: [MPValue] = []
-        // Reserve only what the buffered bytes could hold: each element is at
-        // least one byte, so a header claiming more than remains is incomplete,
-        // not a reason to allocate for the claim.
-        values.reserveCapacity(min(count, storage.count - cursor))
-        for _ in 0..<count {
-            guard let value = parse(&cursor, depth: depth + 1) else {
-                return nil
-            }
-            values.append(value)
-        }
-        return .array(values)
-    }
-
-    private mutating func parseMap(_ cursor: inout Int, count: Int,
-                                   depth: Int) -> MPValue? {
-        if count > Self.maxCollectionCount {
-            failed = true
-            return nil
-        }
-        var pairs: [(MPValue, MPValue)] = []
-        // Each pair is at least two bytes; reserve no more than remains.
-        pairs.reserveCapacity(min(count, (storage.count - cursor) / 2))
-        for _ in 0..<count {
-            guard let key = parse(&cursor, depth: depth + 1),
-                  let value = parse(&cursor, depth: depth + 1) else {
-                return nil
-            }
-            pairs.append((key, value))
-        }
-        return .map(pairs)
     }
 }
 

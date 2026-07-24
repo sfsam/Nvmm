@@ -170,6 +170,39 @@ final class UIControllerTests: XCTestCase {
         XCTAssertEqual(grid.cursor.column, 1)
     }
 
+    func testRedrawRetainsOnlyItsLatestFlush() {
+        let controller = UIController()
+        let flushed = controller.redraw([
+            ["grid_resize", [1, 1, 1]],
+            ["grid_line", [1, 0, 0, [["a", 0]]]],
+            ["flush", []],
+            ["grid_line", [1, 0, 0, [["b", 0]]]],
+            ["flush", []],
+        ])
+
+        XCTAssertEqual(flushed.count, 1)
+        XCTAssertEqual(flushed[0].cells[0].text, "b")
+    }
+
+    func testGridAndCellLimitsRejectOversizedPeerValues() {
+        var limits = RPCResourceLimits.production
+        limits.maximumGridWidth = 2
+        limits.maximumGridHeight = 2
+        limits.maximumCellTextBytes = 1
+        let controller = UIController(limits: limits)
+
+        _ = controller.redraw([
+            ["grid_resize", [1, 2, 1]],
+            ["grid_line", [1, 0, 0, [["a", 0], ["é"]]]],
+            ["grid_resize", [1, 3, 1]],
+            ["flush", []],
+        ])
+
+        XCTAssertEqual(controller.globalGrid.width, 2)
+        XCTAssertEqual(controller.globalGrid.cells[0].text, "a")
+        XCTAssertEqual(controller.globalGrid.cells[1].text, "")
+    }
+
     func testGridLineWithoutInitialHighlightIsIgnored() {
         let controller = UIController()
         _ = controller.redraw([

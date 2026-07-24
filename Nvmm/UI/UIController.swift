@@ -54,6 +54,7 @@ nonisolated final class UIController {
     // bound; a definition at or past the cap is dropped.
     private static let maxHighlightID = 1 << 16
 
+    private let limits: RPCResourceLimits
     // Highlight state.
     private var hlTable: [CellAttributes] = [.defaultGroup]
     private var modeTable: [ModeState] = []
@@ -63,6 +64,14 @@ nonisolated final class UIController {
     // The grid being written to, and the most recent flushed snapshot.
     private var writing = Grid()
     private(set) var globalGrid = Grid()
+    private struct ActiveGridLine {
+        var rowBegin: Int
+        var index: Int
+        var remaining: Int
+        var highlightID = 0
+        var attributes: CellAttributes?
+    }
+    private var activeGridLine: ActiveGridLine?
 
     // Scalar option/state snapshots.
     private(set) var defaultBackgroundRGB: UInt32 = 0
@@ -83,7 +92,9 @@ nonisolated final class UIController {
     private var progressEntries: [String: ProgressEntry] = [:]
     private var progressSequence: UInt64 = 0
 
-    init() {}
+    init(limits: RPCResourceLimits = .production) {
+        self.limits = limits
+    }
 
     /// The default background color, tagged as a default color.
     var defaultBackgroundColor: RGBColor {
@@ -92,17 +103,19 @@ nonisolated final class UIController {
 
     // MARK: Redraw entry point
 
-    /// Applies a batch of redraw events. Returns the grid snapshots flushed while
-    /// applying them (usually zero or one).
+    /// Applies a batch and retains only its newest complete snapshot.
     func redraw(_ events: [MPValue]) -> [Grid] {
-        var flushed: [Grid] = []
-        for event in events { apply(event, &flushed) }
-        return flushed
+        var latest: Grid?
+        for event in events {
+            if let flushed = applyRedrawEvent(event) { latest = flushed }
+        }
+        return latest.map { [$0] } ?? []
     }
 
-    private func apply(_ event: MPValue, _ flushed: inout [Grid]) {
+    /// Applies one event from a streaming redraw notification.
+    func applyRedrawEvent(_ event: MPValue) -> Grid? {
         guard case .array(let fields) = event,
-              let name = fields.first?.stringValue else { return }
+              let name = fields.first?.stringValue else { return nil }
         let args = fields.dropFirst()
 
         switch name {
@@ -112,7 +125,7 @@ nonisolated final class UIController {
         case "grid_clear": forEachTuple(args, gridClear)
         case "grid_cursor_goto": forEachTuple(args, gridCursorGoto)
         case "flush":
-            for tuple in args where tuple.arrayValue != nil { flushed.append(flush()) }
+            return args.contains { $0.arrayValue != nil } ? flush() : nil
         case "hl_attr_define": forEachTuple(args, hlAttrDefine)
         case "hl_group_set": forEachTuple(args, hlGroupSet)
         case "default_colors_set": forEachTuple(args, defaultColorsSet)
@@ -127,6 +140,7 @@ nonisolated final class UIController {
         case "connect": applyHandoff(args, .connect)
         default: break // mouse_on / mouse_off / set_icon / unknown: ignored.
         }
+        return nil
     }
 
     /// Invokes `body` once per argument tuple, skipping non-array tuples.
@@ -147,7 +161,9 @@ nonisolated final class UIController {
 
     private func gridResize(_ tuple: [MPValue]) {
         guard tuple.count >= 3, isMainGrid(tuple[0]),
-              let width = asInt(tuple[1]), let height = asInt(tuple[2]) else { return }
+              let width = asInt(tuple[1]), let height = asInt(tuple[2]),
+              width <= limits.maximumGridWidth,
+              height <= limits.maximumGridHeight else { return }
         writing.resize(width: width, height: height)
     }
 
@@ -208,66 +224,94 @@ nonisolated final class UIController {
 
     private func gridLine(_ tuple: [MPValue]) {
         guard tuple.count >= 4, isMainGrid(tuple[0]),
-              let row = asIndex(tuple[1]), let col = asIndex(tuple[2]),
               case .array(let updates) = tuple[3] else { return }
+        beginStreamingGridLine(Array(tuple.prefix(3)))
+        for update in updates { applyStreamingGridLineCell(update) }
+        endStreamingGridLine(tuple.count > 4 ? tuple[4] : .invalid)
+    }
+
+    func beginStreamingGridLine(_ prefix: [MPValue]) {
+        activeGridLine = nil
+        guard prefix.count == 3, isMainGrid(prefix[0]),
+              let row = asIndex(prefix[1]), let col = asIndex(prefix[2])
+        else { return }
         guard row < writing.height, col < writing.width else { return }
 
         let rowBegin = row * writing.width
-        var index = rowBegin + col
-        var remaining = writing.width - col
+        activeGridLine = ActiveGridLine(
+            rowBegin: rowBegin, index: rowBegin + col,
+            remaining: writing.width - col)
+    }
 
-        // Highlight id and attributes carry across cells: a bare-text cell inherits
-        // the previous cell's highlight.
-        var hlid = 0
-        var hlattr: CellAttributes?
+    func applyStreamingGridLineCell(_ object: MPValue) {
+        guard var line = activeGridLine,
+              case .array(let fields) = object,
+              let text = fields.first?.stringValue,
+              text.utf8.count <= limits.maximumCellTextBytes else {
+            activeGridLine = nil
+            return
+        }
 
-        for object in updates {
-            guard case .array(let cellFields) = object,
-                  let text = cellFields.first?.stringValue else { return }
-
-            var repeatCount = 1
-            switch cellFields.count {
-            case 1:
-                break // text only; hlid and hlattr inherited.
-            case 2:
-                guard let id = asInt(cellFields[1]) else { return }
-                hlid = id
-                hlattr = hlEntry(id)
-            case 3:
-                guard let id = asInt(cellFields[1]),
-                      let count = asInt(cellFields[2]) else { return }
-                hlid = id
-                hlattr = hlEntry(id)
-                repeatCount = count
-            default:
+        var repeatCount = 1
+        switch fields.count {
+        case 1:
+            break
+        case 2:
+            guard let id = asInt(fields[1]) else {
+                activeGridLine = nil
                 return
             }
-
-            // The first cell of a line must establish a highlight.
-            guard let attr = hlattr else { return }
-            guard repeatCount <= remaining else { return }
-
-            let pointerStyle: UInt8 = hlid >= 0 && hlid < hlGroupTypes.count
-                ? hlGroupTypes[hlid] : 0
-
-            if text.isEmpty {
-                // The right half of a double-width character. Be defensive about a
-                // stray empty leading cell.
-                if index == rowBegin { return }
-                writing.cells[index - 1].addDoubleWidth()
-                var right = Cell()
-                right.setAttributes(writing.cells[index - 1].attributes)
-                right.pointerStyle = pointerStyle
-                writing.cells[index] = right
-                index += 1
-                remaining -= 1
-            } else if repeatCount > 0 {
-                let updated = Cell(text: text, attrs: attr, pointerStyle: pointerStyle)
-                for offset in 0..<repeatCount { writing.cells[index + offset] = updated }
-                index += repeatCount
-                remaining -= repeatCount
+            line.highlightID = id
+            line.attributes = hlEntry(id)
+        case 3:
+            guard let id = asInt(fields[1]),
+                  let count = asInt(fields[2]) else {
+                activeGridLine = nil
+                return
             }
+            line.highlightID = id
+            line.attributes = hlEntry(id)
+            repeatCount = count
+        default:
+            activeGridLine = nil
+            return
         }
+
+        guard let attributes = line.attributes,
+              repeatCount <= line.remaining else {
+            activeGridLine = nil
+            return
+        }
+        let pointerStyle: UInt8 =
+            line.highlightID >= 0 && line.highlightID < hlGroupTypes.count
+            ? hlGroupTypes[line.highlightID] : 0
+
+        if text.isEmpty {
+            guard line.index != line.rowBegin else {
+                activeGridLine = nil
+                return
+            }
+            writing.cells[line.index - 1].addDoubleWidth()
+            var right = Cell()
+            right.setAttributes(writing.cells[line.index - 1].attributes)
+            right.pointerStyle = pointerStyle
+            writing.cells[line.index] = right
+            line.index += 1
+            line.remaining -= 1
+        } else if repeatCount > 0 {
+            let updated = Cell(text: text, attrs: attributes,
+                               pointerStyle: pointerStyle)
+            for offset in 0..<repeatCount {
+                writing.cells[line.index + offset] = updated
+            }
+            line.index += repeatCount
+            line.remaining -= repeatCount
+        }
+        activeGridLine = line
+    }
+
+    func endStreamingGridLine(_ wrap: MPValue) {
+        activeGridLine = nil
     }
 
     // MARK: Highlights
