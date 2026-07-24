@@ -19,6 +19,7 @@ final class GlyphTextureCache {
     private let queue: MTLCommandQueue
     private(set) var texture: MTLTexture
     private let growthFactor: Double
+    private let maximumPages: Int
 
     private var pageCount: Int
     private var pageIndex: Int
@@ -29,17 +30,20 @@ final class GlyphTextureCache {
     private var rowHeight: Int
 
     init(queue: MTLCommandQueue, pageWidth: Int, pageHeight: Int,
-         initialCapacity: Int, growthFactor: Double) {
+         initialCapacity: Int, growthFactor: Double,
+         maximumPages: Int = 64) {
+        precondition(maximumPages > 0)
         self.device = queue.device
         self.queue = queue
         self.growthFactor = growthFactor
+        self.maximumPages = maximumPages
         xUsed = 0
         yUsed = 0
         xSize = pageWidth
         ySize = pageHeight
         rowHeight = 0
         pageIndex = 0
-        pageCount = max(1, initialCapacity)
+        pageCount = min(maximumPages, max(1, initialCapacity))
         texture = Self.allocTexture(device: device, width: pageWidth,
                                     height: pageHeight, length: pageCount)
     }
@@ -89,13 +93,16 @@ final class GlyphTextureCache {
     }
 
     /// Starts a new page for the bitmap, growing the page array if needed.
-    private func addNewPage(_ bitmap: GlyphBitmap) -> simd_short3 {
-        pageIndex += 1
+    private func addNewPage(_ bitmap: GlyphBitmap) -> simd_short3? {
+        let nextPage = pageIndex + 1
+        guard nextPage < maximumPages else { return nil }
+        pageIndex = nextPage
 
         if pageIndex >= pageCount {
             let grown = Int((Double(pageCount) * growthFactor).rounded(.up))
-            reallocate(newPageCount: max(pageIndex, grown), begin: 0,
-                       count: pageCount)
+            let newCount = min(maximumPages,
+                               max(pageIndex + 1, grown))
+            reallocate(newPageCount: newCount, begin: 0, count: pageCount)
         }
 
         xUsed = min(Int(bitmap.width) + 1, xSize)
@@ -111,7 +118,7 @@ final class GlyphTextureCache {
 
     /// Adds a bitmap and returns its origin: x and y pixel coordinates of the
     /// top-left corner and the cache page it landed on.
-    func add(_ bitmap: GlyphBitmap) -> simd_short3 {
+    func add(_ bitmap: GlyphBitmap) -> simd_short3? {
         let glyphHeight = Int(bitmap.height)
         let glyphWidth = Int(bitmap.width)
 

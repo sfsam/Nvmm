@@ -17,10 +17,23 @@ import simd
 
 final class GlyphManager {
     private struct Key: Hashable {
-        let fontID: UInt
+        let font: CTFont
         let text: String
         let background: UInt32
         let foreground: UInt32
+
+        static func == (lhs: Key, rhs: Key) -> Bool {
+            lhs.font === rhs.font && lhs.text == rhs.text &&
+                lhs.background == rhs.background &&
+                lhs.foreground == rhs.foreground
+        }
+
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(ObjectIdentifier(font))
+            hasher.combine(text)
+            hasher.combine(background)
+            hasher.combine(foreground)
+        }
     }
 
     private let rasterizer: GlyphRasterizer
@@ -28,6 +41,7 @@ final class GlyphManager {
     private let evictThreshold: Int
     private let evictPreserve: Int
     private var map: [Key: glyph_rect] = [:]
+    private var needsEviction = false
 
     init(rasterizer: GlyphRasterizer, textureCache: GlyphTextureCache,
          evictThreshold: Int, evictPreserve: Int) {
@@ -48,14 +62,18 @@ final class GlyphManager {
     /// caching it on first use.
     func glyph(font: CTFont, text: String, background: RGBColor,
                foreground: RGBColor) -> glyph_rect {
-        let key = Key(fontID: fontIdentity(font), text: text,
+        let key = Key(font: font, text: text,
                       background: background.opaque, foreground: foreground.opaque)
 
         if let cached = map[key] { return cached }
 
         let bitmap = rasterizer.rasterize(font: font, background: background,
                                           foreground: foreground, text: text)
-        let position = textureCache.add(bitmap)
+        guard let position = textureCache.add(bitmap) else {
+            needsEviction = true
+            return glyph_rect(size: .zero, position: .zero,
+                              texture_origin: .zero)
+        }
 
         let rect = glyph_rect(
             size: simd_short2(bitmap.width, bitmap.height),
@@ -84,8 +102,9 @@ final class GlyphManager {
     /// Evicts old cache pages once the allocated page count exceeds the
     /// eviction threshold.
     func evict() {
-        if textureCache.pagesCapacity > evictThreshold {
+        if needsEviction || textureCache.pagesCapacity > evictThreshold {
             performEviction()
+            needsEviction = false
         }
     }
 
@@ -106,9 +125,5 @@ final class GlyphManager {
             newMap[key] = shifted
         }
         map = newMap
-    }
-
-    private func fontIdentity(_ font: CTFont) -> UInt {
-        UInt(bitPattern: Unmanaged.passUnretained(font).toOpaque())
     }
 }

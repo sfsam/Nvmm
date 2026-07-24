@@ -92,9 +92,32 @@ final class RenderTests: XCTestCase {
             font: family.regular, background: RGBColor(neovim: 0),
             foreground: RGBColor(neovim: 0xFFFFFF), text: "W")
 
-        let first = cache.add(bitmap)
-        let second = cache.add(bitmap)
+        let first = try XCTUnwrap(cache.add(bitmap))
+        let second = try XCTUnwrap(cache.add(bitmap))
         XCTAssertGreaterThan(second.z, first.z)
         XCTAssertGreaterThan(cache.pagesSize, 0)
+    }
+
+    func testTextureCacheRefusesToExceedHardPageLimit() throws {
+        try requireDevice()
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let queue = device.makeCommandQueue() else {
+            throw XCTSkip("No Metal command queue")
+        }
+        let rasterizer = GlyphRasterizer(width: 64, height: 64)
+        let family = FontManager().family(
+            descriptor: FontManager.defaultDescriptor(), size: 15,
+            scaleFactor: 1)
+        let bitmap = rasterizer.rasterize(
+            font: family.regular, background: RGBColor(neovim: 0),
+            foreground: RGBColor(neovim: 0xFFFFFF), text: "W")
+        let cache = GlyphTextureCache(
+            queue: queue, pageWidth: Int(bitmap.width) + 1,
+            pageHeight: Int(bitmap.height), initialCapacity: 1,
+            growthFactor: 2, maximumPages: 1)
+
+        XCTAssertNotNil(cache.add(bitmap))
+        XCTAssertNil(cache.add(bitmap))
+        XCTAssertEqual(cache.pagesCapacity, 1)
     }
 }

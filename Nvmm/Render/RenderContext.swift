@@ -75,7 +75,8 @@ final class RenderContext {
             pageWidth: options.cachePageWidth,
             pageHeight: options.cachePageHeight,
             initialCapacity: options.cacheInitialCapacity,
-            growthFactor: options.cacheGrowthFactor)
+            growthFactor: options.cacheGrowthFactor,
+            maximumPages: options.cacheEvictionThreshold)
 
         glyphManager = GlyphManager(
             rasterizer: rasterizer, textureCache: textureCache,
