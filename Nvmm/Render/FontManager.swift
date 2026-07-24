@@ -85,6 +85,10 @@ final class FontManager {
 
     private var usedFonts: [Entry] = []
 
+    // Nonisolated so teardown skips the isolated-deinit executor hop that trips
+    // a libmalloc double-free under XCTest's post-test memory checker.
+    nonisolated deinit {}
+
     /// A monospaced system-font descriptor with no symbolic traits set, ready
     /// to be resized and restyled.
     static func defaultDescriptor() -> CTFontDescriptor {

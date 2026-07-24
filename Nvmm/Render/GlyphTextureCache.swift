@@ -44,6 +44,10 @@ final class GlyphTextureCache {
                                     height: pageHeight, length: pageCount)
     }
 
+    // Nonisolated so teardown skips the isolated-deinit executor hop that trips
+    // a libmalloc double-free under XCTest's post-test memory checker.
+    nonisolated deinit {}
+
     /// The number of cache pages currently allocated.
     var pagesCapacity: Int { pageCount }
 

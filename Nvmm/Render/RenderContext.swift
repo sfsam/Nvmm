@@ -83,6 +83,10 @@ final class RenderContext {
             evictPreserve: options.cacheEvictionPreserve)
     }
 
+    // Nonisolated so teardown skips the isolated-deinit executor hop that trips
+    // a libmalloc double-free under XCTest's post-test memory checker.
+    nonisolated deinit {}
+
     private static func pipeline(device: MTLDevice, library: MTLLibrary,
                                  blended: Bool, vertex: String, fragment: String,
                                  label: String) throws -> MTLRenderPipelineState {
@@ -130,6 +134,10 @@ final class RenderContextManager {
         rasterizer = GlyphRasterizer(width: options.rasterizerWidth,
                                      height: options.rasterizerHeight)
     }
+
+    // Nonisolated so teardown skips the isolated-deinit executor hop that trips
+    // a libmalloc double-free under XCTest's post-test memory checker.
+    nonisolated deinit {}
 
     /// The render context for a device, creating one on first use.
     func renderContext(for device: MTLDevice) throws -> RenderContext {

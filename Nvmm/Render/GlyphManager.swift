@@ -37,6 +37,10 @@ final class GlyphManager {
         self.evictPreserve = evictPreserve
     }
 
+    // Nonisolated so teardown skips the isolated-deinit executor hop that trips
+    // a libmalloc double-free under XCTest's post-test memory checker.
+    nonisolated deinit {}
+
     /// The texture holding the cached glyphs.
     var texture: MTLTexture { textureCache.texture }
 
