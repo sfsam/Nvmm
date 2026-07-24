@@ -58,6 +58,11 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     private var hasShownWindow = false
     private var shouldCenter = false
 
+    /// True while the window is on its way but not yet on screen. The app can
+    /// hold no visible window in this state, which callers that would answer
+    /// that by opening another window need to be able to tell apart.
+    var isAwaitingFirstShow: Bool { !hasShownWindow }
+
     // The first paint is held until Neovim signals `VimEnter` (startup config,
     // notably `guifont`, applied), so the window never appears at an interim
     // font. `startupRelaxed` drops that requirement after a short fallback so a

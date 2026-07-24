@@ -138,6 +138,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    /// Whether a reopen — a Dock click, or an activation arriving from another
+    /// app — should get AppKit's default handling.
+    ///
+    /// A window waits for Neovim's first grid before showing itself, so the app
+    /// holds no visible window while one is starting. AppKit answers a reopen in
+    /// that state by opening an untitled file, which would make the window
+    /// already on its way a second one. Declining leaves it to show itself.
+    /// Every other case takes the default: with no window at all a reopen should
+    /// open one, and windows that are merely minimized should be restored.
+    func applicationShouldHandleReopen(_ sender: NSApplication,
+                                       hasVisibleWindows: Bool) -> Bool {
+        !windows.contains(where: \.isAwaitingFirstShow)
+    }
+
     /// Opens files handed over by the Finder, the `open` tool, or a service.
     ///
     /// With no window running, the files are passed to a new Neovim as
