@@ -48,6 +48,12 @@ nonisolated func handoffConnectionErrorIsStale(_ kind: UIHandoff.Kind,
 
 /// Applies Neovim UI redraw events, producing grid snapshots on flush.
 nonisolated final class UIController {
+    // Upper bound on distinct highlight ids. The highlight tables are dense,
+    // indexed by id, so an id defines every entry below it too. Capping the id
+    // keeps a sparse or malformed definition from growing the tables without
+    // bound; a definition at or past the cap is dropped.
+    private static let maxHighlightID = 1 << 16
+
     // Highlight state.
     private var hlTable: [CellAttributes] = [.defaultGroup]
     private var modeTable: [ModeState] = []
@@ -284,7 +290,8 @@ nonisolated final class UIController {
     }
 
     private func hlAttrDefine(_ tuple: [MPValue]) {
-        guard tuple.count >= 2, let hlid = asInt(tuple[0]), hlid >= 0,
+        guard tuple.count >= 2, let hlid = asInt(tuple[0]),
+              hlid >= 0, hlid < Self.maxHighlightID,
               case .map(let definition) = tuple[1] else { return }
 
         let index = hlNewEntry(hlid)
@@ -336,7 +343,8 @@ nonisolated final class UIController {
 
     private func hlGroupSet(_ tuple: [MPValue]) {
         guard tuple.count >= 2, let name = tuple[0].stringValue,
-              let id = asInt(tuple[1]) else { return }
+              let id = asInt(tuple[1]), id >= 0, id < Self.maxHighlightID
+        else { return }
 
         let type: HLGroup
         if name.hasPrefix("StatusLine") {

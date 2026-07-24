@@ -198,6 +198,11 @@ nonisolated struct ViewportState: Sendable, Equatable {
 
 /// A 2-D array of cells with cursor, mode, and draw-tick state.
 nonisolated struct Grid: Sendable {
+    /// Upper bound on cell storage, as a count of cells within a 64 MiB budget.
+    /// A resize past this is rejected rather than allocated, so a malformed
+    /// `grid_resize` cannot request an unbounded buffer.
+    static let maxCells = (64 << 20) / MemoryLayout<Cell>.stride
+
     /// Row-major cell storage; `cells[row * width + column]`.
     var cells: [Cell] = []
     private(set) var width = 0
@@ -267,17 +272,28 @@ nonisolated struct Grid: Sendable {
 
     /// True if the cell holds a common vertical-separator glyph.
     func isVerticalSeparatorChar(_ row: Int, _ column: Int) -> Bool {
-        guard row < height, column < width else { return false }
+        guard row >= 0, column >= 0, row < height, column < width else {
+            return false
+        }
         let text = cell(row, column).text
         return text == "│" || text == "┃" || text == "║" || text == "|"
     }
 
     // MARK: Mutation
 
-    /// Resizes the grid, reallocating its cell storage.
-    mutating func resize(width: Int, height: Int) {
+    /// Resizes the grid, reallocating its cell storage. Returns false without
+    /// changing the grid when the dimensions are not positive, their product
+    /// overflows, or the storage would exceed `maxCells`; the caller drops the
+    /// event rather than build an invalid grid.
+    @discardableResult
+    mutating func resize(width: Int, height: Int) -> Bool {
+        let (count, overflow) = width.multipliedReportingOverflow(by: height)
+        guard width > 0, height > 0, !overflow, count <= Grid.maxCells else {
+            return false
+        }
         self.width = width
         self.height = height
-        cells = Array(repeating: Cell(), count: width * height)
+        cells = Array(repeating: Cell(), count: count)
+        return true
     }
 }

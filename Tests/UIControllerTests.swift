@@ -214,6 +214,50 @@ final class UIControllerTests: XCTestCase {
         assertRGB(grid.cell(0, 1).background, 0xd0, 0xe0, 0xf0)
     }
 
+    func testInvalidGridResizeIsIgnored() {
+        let controller = UIController()
+        _ = controller.redraw([
+            ["grid_resize", [1, 2, 1]],    // establishes 2x1
+            ["grid_resize", [1, -3, 2]],   // negative width, dropped
+            ["grid_resize", [1, 100_000, 100_000]], // over budget, dropped
+            ["flush", []],
+        ])
+        let grid = controller.globalGrid
+        XCTAssertEqual(grid.width, 2)
+        XCTAssertEqual(grid.height, 1)
+    }
+
+    func testOversizedHighlightDefinitionIsIgnored() {
+        // A highlight id past the cap is dropped rather than growing the dense
+        // table to it; an ordinary definition afterward still resolves.
+        let controller = UIController()
+        _ = controller.redraw([
+            ["grid_resize", [1, 1, 1]],
+            ["hl_attr_define", [5_000_000, map(("foreground", 0x01_0203))]],
+            ["hl_attr_define", [8, map(("foreground", 0x11_2233),
+                                       ("background", 0x44_5566))]],
+            ["grid_line", [1, 0, 0, [["x", 8]]]],
+            ["flush", []],
+        ])
+        let cell = controller.globalGrid.cell(0, 0)
+        assertRGB(cell.foreground, 0x11, 0x22, 0x33)
+        assertRGB(cell.background, 0x44, 0x55, 0x66)
+    }
+
+    func testInvalidHighlightGroupIdIsIgnored() {
+        // Negative and over-cap group ids are dropped without crashing or
+        // growing the group-type table; a later redraw still works.
+        let controller = UIController()
+        _ = controller.redraw([
+            ["grid_resize", [1, 1, 1]],
+            ["hl_group_set", ["StatusLine", -1]],
+            ["hl_group_set", ["StatusLine", 5_000_000]],
+            ["grid_line", [1, 0, 0, [["y", 0]]]],
+            ["flush", []],
+        ])
+        XCTAssertEqual(controller.globalGrid.cell(0, 0).text, "y")
+    }
+
     func testGridLineCellsInheritPreviousHighlight() {
         let controller = UIController()
         _ = controller.redraw([
