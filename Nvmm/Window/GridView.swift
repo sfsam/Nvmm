@@ -234,8 +234,6 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         needsDisplay = true
     }
 
-    var renderContextValue: RenderContext? { renderContext }
-
     /// Sets the font and recomputes cell and line-decoration metrics.
     func setFont(_ font: FontFamily) {
         fontFamily = font
@@ -307,8 +305,6 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         needsDisplay = true
     }
 
-    var fontFamilyValue: FontFamily? { fontFamily }
-
     /// The size of a single-width cell in the view's coordinate space.
     var cellSize: NSSize { backingCellSize }
 
@@ -361,8 +357,6 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         restartBlink()
         needsDisplay = true
     }
-
-    var gridValue: Grid? { grid }
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)

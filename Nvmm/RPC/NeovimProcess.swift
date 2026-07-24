@@ -717,9 +717,6 @@ actor NeovimProcess {
 // MARK: - UI attachment
 
 extension NeovimProcess {
-    /// The most recent flushed grid, or nil if no UI has attached and drawn.
-    func currentGrid() -> Grid? { ui?.globalGrid }
-
     /// A pending restart/connect handoff Neovim requested, if any.
     func pendingHandoff() -> UIHandoff? { ui?.handoff }
 

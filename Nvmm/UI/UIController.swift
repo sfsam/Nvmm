@@ -79,9 +79,6 @@ nonisolated final class UIController {
 
     init() {}
 
-    /// True once at least one flush has produced a drawable grid.
-    var isDrawable: Bool { globalGrid.tick > 0 }
-
     /// The default background color, tagged as a default color.
     var defaultBackgroundColor: RGBColor {
         RGBColor(neovim: defaultBackgroundRGB, default: ())

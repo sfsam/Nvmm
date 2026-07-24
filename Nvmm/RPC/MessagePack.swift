@@ -76,7 +76,6 @@ nonisolated enum MPValue: Sendable {
 
 nonisolated extension MPValue {
     var isNull: Bool { if case .null = self { true } else { false } }
-    var isInvalid: Bool { if case .invalid = self { true } else { false } }
 
     var boolValue: Bool? { if case .bool(let value) = self { value } else { nil } }
     var integer: MPInteger? { if case .int(let value) = self { value } else { nil } }

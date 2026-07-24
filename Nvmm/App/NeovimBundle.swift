@@ -25,12 +25,6 @@ enum NeovimBundle {
         return FileManager.default.isExecutableFile(atPath: url.path) ? url : nil
     }
 
-    /// The bundled Neovim runtime directory (VIMRUNTIME).
-    static var runtimeURL: URL? {
-        Bundle.main.bundleURL
-            .appendingPathComponent("Contents/share/nvim/runtime", isDirectory: true)
-    }
-
     /// The executable and argv to launch the embedded nvim with `arguments`
     /// (for example `["--embed"]`).
     ///
