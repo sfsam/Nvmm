@@ -72,6 +72,11 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     private var hasReceivedGrid = false
     private var startupTimeoutTask: Task<Void, Never>?
 
+    // Caps how long the window can stay hidden regardless of how startup
+    // stalls. Independent of `startupTimeoutTask`, which only runs once Neovim
+    // has attached and so cannot bound a stall before that.
+    private var hiddenWindowBackstopTask: Task<Void, Never>?
+
     // The title Neovim last set. Shown while the window is not being resized; a
     // live resize replaces it with the grid size and restores it when it ends.
     private var currentTitle = "NVIM"
@@ -504,6 +509,8 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     }
 
     private func startNeovim() {
+        startHiddenWindowBackstop()
+
         let plan: LaunchPlan
         switch source {
         case .spawn:
@@ -763,12 +770,38 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     /// Drops the `VimEnter` requirement after a short delay, so a session that
     /// never reaches `VimEnter` still shows its window; if a grid has already
     /// arrived it is shown at once, otherwise the next grid shows it.
+    ///
+    /// Cancellation ends the task rather than falling through it, so a window
+    /// closed while it is still starting is never shown after the fact.
     private func startStartupTimeout() {
         startupTimeoutTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(1))
-            guard let self, !self.hasShownWindow else { return }
-            self.startupRelaxed = true
-            if self.hasReceivedGrid { self.showInitialWindow() }
+            do { try await Task.sleep(for: .seconds(1)) } catch { return }
+            guard self?.hasShownWindow == false else { return }
+            self?.startupRelaxed = true
+            if self?.hasReceivedGrid == true { self?.showInitialWindow() }
+        }
+    }
+
+    /// Bounds how long the window may stay hidden, whatever Neovim is doing.
+    ///
+    /// Started when the session starts rather than once it has attached, so it
+    /// covers every way startup can stall: a spawn or connect that never
+    /// completes, a setup request that never comes back, and a Neovim that
+    /// attached but flushed no grid — blocked partway through `init.lua`, say.
+    /// A deadline further in would be downstream of those stalls and so could
+    /// not bound them; `startStartupTimeout` runs after attach for that reason
+    /// and cannot serve here.
+    ///
+    /// It matters because an app holding no visible window has nothing for the
+    /// user to close and nothing for a reopen to bring forward, so it answers a
+    /// Dock click by opening a second window (see
+    /// `applicationShouldHandleReopen`). An empty window is the more honest end
+    /// state, and it paints as soon as a grid does arrive.
+    private func startHiddenWindowBackstop() {
+        hiddenWindowBackstopTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            guard self?.hasShownWindow == false else { return }
+            self?.showInitialWindow()
         }
     }
 
@@ -1103,6 +1136,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         progressHoldTask?.cancel()
         settingsTask?.cancel()
         startupTimeoutTask?.cancel()
+        hiddenWindowBackstopTask?.cancel()
         // Close the transport so this window's Neovim does not outlive it.
         let process = self.process
         Task { await process?.disconnect() }
