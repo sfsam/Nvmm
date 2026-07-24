@@ -29,10 +29,25 @@ nonisolated struct UIOptions: Sendable, Equatable {
 }
 
 /// A Neovim API version triple.
-nonisolated struct APIVersion: Sendable, Equatable {
+nonisolated struct APIVersion: Sendable, Equatable, Comparable {
     var major: UInt64 = 0
     var minor: UInt64 = 0
     var patch: UInt64 = 0
+
+    /// The oldest Neovim this client supports, and the only place that floor is
+    /// written down: `UIAttachResult.requiredVersion` defaults to it, and the
+    /// version gate both compares against it and builds its diagnostic from it.
+    static let minimumSupported = APIVersion(major: 0, minor: 12, patch: 0)
+
+    /// Ordered as a triple, so 0.11 precedes 0.12 and any 1.x follows it.
+    static func < (lhs: APIVersion, rhs: APIVersion) -> Bool {
+        (lhs.major, lhs.minor, lhs.patch) < (rhs.major, rhs.minor, rhs.patch)
+    }
+
+    /// The version as Neovim names its releases, dropping a zero patch.
+    var displayName: String {
+        patch == 0 ? "\(major).\(minor)" : "\(major).\(minor).\(patch)"
+    }
 }
 
 /// The outcome category of a UI attachment attempt.
@@ -50,7 +65,7 @@ nonisolated struct UIAttachResult: Sendable {
     /// A diagnostic suitable for logs or a user-visible startup error.
     var message = ""
     /// The minimum supported Neovim version; always populated.
-    var requiredVersion = APIVersion(major: 0, minor: 12, patch: 0)
+    var requiredVersion = APIVersion.minimumSupported
     /// The detected version, populated once valid metadata has been parsed.
     var detectedVersion = APIVersion()
     /// Neovim's error value when `status` is `.rpcError`.
@@ -123,11 +138,12 @@ nonisolated func validateAPIMetadata(_ metadata: MPValue,
     var result = UIAttachResult()
     result.detectedVersion = capabilities.version
 
-    // A future major is newer than 0.12 but still must advertise every required
+    // A version at or past the floor still must advertise every required
     // function and capability checked below.
-    if capabilities.version.major == 0 && capabilities.version.minor < 12 {
+    if capabilities.version < result.requiredVersion {
         result.status = .incompatible
-        result.message = "Neovim 0.12 or newer is required"
+        result.message =
+            "Neovim \(result.requiredVersion.displayName) or newer is required"
         return (result, capabilities)
     }
 
