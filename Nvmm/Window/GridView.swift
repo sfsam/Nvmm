@@ -658,7 +658,8 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                compositionCellGraphicCount: cellGraphicCount - gridCellGraphicCount,
                lineOffset: lineRegion.offset, gridLineCount: gridLineCount,
                compositionLineCount: lineCount - gridLineCount,
-               cursorShape: drawnShape)
+               cursorShape: drawnShape,
+               clearColor: clearColor(for: grid.defaultBackground))
     }
 
     /// Appends the preedit's synthetic cells after the grid's: full-block cell
@@ -733,6 +734,27 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                         blue: UInt8((color.blueComponent * 255).rounded()))
     }
 
+    /// The render pass clear color for the default background.
+    ///
+    /// Any pixel the grid does not cover — the sub-cell strip a fractional cell
+    /// size can leave along an edge — takes this color, so it matches the text
+    /// area instead of standing out against it.
+    ///
+    /// The drawable's pixel format is sRGB, and Metal applies the sRGB transfer
+    /// function when it writes the clear value. The color therefore has to be
+    /// given in linear space, which is also the space the shaders work in after
+    /// unpacking their sRGB byte colors.
+    private func clearColor(for background: RGBColor) -> MTLClearColor {
+        func linear(_ component: UInt8) -> Double {
+            let value = Double(component) / 255
+            return value <= 0.04045 ? value / 12.92
+                                    : pow((value + 0.055) / 1.055, 2.4)
+        }
+        return MTLClearColor(red: linear(background.red),
+                             green: linear(background.green),
+                             blue: linear(background.blue), alpha: 1)
+    }
+
     private func encode(context: RenderContext, drawable: CAMetalDrawable,
                         buffer: MTLBuffer, frame: MetalFrameBuffer, index: Int,
                         gridSize: Int, uniformOffset: Int, backgroundOffset: Int,
@@ -742,15 +764,15 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                         compositionCellGraphicCount: Int,
                         lineOffset: Int, gridLineCount: Int,
                         compositionLineCount: Int,
-                        cursorShape: CursorShape?) {
+                        cursorShape: CursorShape?,
+                        clearColor: MTLClearColor) {
         let glyphStride = MemoryLayout<glyph_data>.stride
         let lineStride = MemoryLayout<line_data>.stride
         let cellGraphicStride = MemoryLayout<cell_graphic_data>.stride
 
         let descriptor = MTLRenderPassDescriptor()
         descriptor.colorAttachments[0].texture = drawable.texture
-        descriptor.colorAttachments[0].clearColor = MTLClearColor(
-            red: 1, green: 1, blue: 1, alpha: 1)
+        descriptor.colorAttachments[0].clearColor = clearColor
         descriptor.colorAttachments[0].loadAction = .clear
         descriptor.colorAttachments[0].storeAction = .store
 
