@@ -73,6 +73,9 @@ nonisolated enum RPCTransportError: Error, Sendable, Equatable {
     case readFailed(errno: Int32)
     /// A write to the transport failed with the given errno.
     case writeFailed(errno: Int32)
+    /// The peer sent a value that violated a decoder resource limit. The stream
+    /// cannot be resynchronized after this, so the connection is closed.
+    case protocolViolation
 }
 
 /// An error thrown by an asynchronous `request`.

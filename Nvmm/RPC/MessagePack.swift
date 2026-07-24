@@ -353,6 +353,18 @@ nonisolated struct MessagePackUnpacker {
     private var storage: [UInt8] = []
     private var offset = 0
 
+    // Product safety limits on one decoded value. These are not MessagePack or
+    // Neovim protocol limits; they cap what a single malformed value can make
+    // the decoder allocate. A violation sets `failed` and is not retryable,
+    // because MessagePack gives no way to resynchronize past a rejected value.
+    private static let maxDepth = 128
+    private static let maxCollectionCount = 1 << 20
+
+    /// Set once a limit above is exceeded. The caller stops decoding and closes
+    /// the connection. This is distinct from the nil `unpack` returns for an
+    /// incomplete buffer, which is retried once more bytes arrive.
+    private(set) var failed = false
+
     init() {}
 
     /// Appends bytes to the input buffer.
@@ -368,8 +380,9 @@ nonisolated struct MessagePackUnpacker {
     /// Unpacks the next complete value, or nil if the buffer is exhausted or
     /// holds only a partial value.
     mutating func unpack() -> MPValue? {
+        guard !failed else { return nil }
         var cursor = offset
-        guard let value = parse(&cursor) else { return nil }
+        guard let value = parse(&cursor, depth: 0) else { return nil }
         offset = cursor
         if offset == storage.count {
             storage.removeAll(keepingCapacity: true)
@@ -422,7 +435,11 @@ nonisolated struct MessagePackUnpacker {
         return storage[cursor..<cursor + count]
     }
 
-    private func parse(_ cursor: inout Int) -> MPValue? {
+    private mutating func parse(_ cursor: inout Int, depth: Int) -> MPValue? {
+        if depth > Self.maxDepth {
+            failed = true
+            return nil
+        }
         guard let byte = readByte(&cursor) else { return nil }
 
         switch byte {
@@ -431,9 +448,9 @@ nonisolated struct MessagePackUnpacker {
         case 0xe0...0xff:
             return .int(MPInteger(Int64(Int8(bitPattern: byte))))
         case 0x80...0x8f:
-            return parseMap(&cursor, count: Int(byte & 0x0f))
+            return parseMap(&cursor, count: Int(byte & 0x0f), depth: depth)
         case 0x90...0x9f:
-            return parseArray(&cursor, count: Int(byte & 0x0f))
+            return parseArray(&cursor, count: Int(byte & 0x0f), depth: depth)
         case 0xa0...0xbf:
             return parseString(&cursor, count: Int(byte & 0x1f))
         case 0xc0:
@@ -513,16 +530,16 @@ nonisolated struct MessagePackUnpacker {
             return parseString(&cursor, count: Int(count))
         case 0xdc:
             guard let count = readUInt16(&cursor) else { return nil }
-            return parseArray(&cursor, count: Int(count))
+            return parseArray(&cursor, count: Int(count), depth: depth)
         case 0xdd:
             guard let count = readUInt32(&cursor) else { return nil }
-            return parseArray(&cursor, count: Int(count))
+            return parseArray(&cursor, count: Int(count), depth: depth)
         case 0xde:
             guard let count = readUInt16(&cursor) else { return nil }
-            return parseMap(&cursor, count: Int(count))
+            return parseMap(&cursor, count: Int(count), depth: depth)
         case 0xdf:
             guard let count = readUInt32(&cursor) else { return nil }
-            return parseMap(&cursor, count: Int(count))
+            return parseMap(&cursor, count: Int(count), depth: depth)
         default:
             return nil // Unreachable: every byte value is handled above.
         }
@@ -545,21 +562,40 @@ nonisolated struct MessagePackUnpacker {
         return .ext(type: Int8(bitPattern: type), payload: Array(slice))
     }
 
-    private func parseArray(_ cursor: inout Int, count: Int) -> MPValue? {
+    private mutating func parseArray(_ cursor: inout Int, count: Int,
+                                     depth: Int) -> MPValue? {
+        if count > Self.maxCollectionCount {
+            failed = true
+            return nil
+        }
         var values: [MPValue] = []
-        values.reserveCapacity(count)
+        // Reserve only what the buffered bytes could hold: each element is at
+        // least one byte, so a header claiming more than remains is incomplete,
+        // not a reason to allocate for the claim.
+        values.reserveCapacity(min(count, storage.count - cursor))
         for _ in 0..<count {
-            guard let value = parse(&cursor) else { return nil }
+            guard let value = parse(&cursor, depth: depth + 1) else {
+                return nil
+            }
             values.append(value)
         }
         return .array(values)
     }
 
-    private func parseMap(_ cursor: inout Int, count: Int) -> MPValue? {
+    private mutating func parseMap(_ cursor: inout Int, count: Int,
+                                   depth: Int) -> MPValue? {
+        if count > Self.maxCollectionCount {
+            failed = true
+            return nil
+        }
         var pairs: [(MPValue, MPValue)] = []
-        pairs.reserveCapacity(count)
+        // Each pair is at least two bytes; reserve no more than remains.
+        pairs.reserveCapacity(min(count, (storage.count - cursor) / 2))
         for _ in 0..<count {
-            guard let key = parse(&cursor), let value = parse(&cursor) else { return nil }
+            guard let key = parse(&cursor, depth: depth + 1),
+                  let value = parse(&cursor, depth: depth + 1) else {
+                return nil
+            }
             pairs.append((key, value))
         }
         return .map(pairs)

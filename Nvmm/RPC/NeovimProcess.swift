@@ -562,6 +562,13 @@ actor NeovimProcess {
             while let value = unpacker.unpack() {
                 dispatch(value)
             }
+            // A decoder limit was hit. Shut down through the transport rather
+            // than finishing the disconnect here, so the ordered disconnect
+            // event runs the normal teardown after the dispatch sources are
+            // cancelled. The unpacker stays failed, ignoring any further data.
+            if unpacker.failed {
+                io?.shutdown(.protocolViolation)
+            }
         case .disconnected(let error):
             finishDisconnect(error)
         }
@@ -924,7 +931,7 @@ extension NeovimProcess {
             result.transportError = error
             switch error {
             case .readFailed(let code), .writeFailed(let code): result.systemError = code
-            case .connectionClosed: break
+            case .connectionClosed, .protocolViolation: break
             }
         }
         return result

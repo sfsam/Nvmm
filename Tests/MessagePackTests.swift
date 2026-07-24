@@ -340,4 +340,59 @@ final class MessagePackTests: XCTestCase {
         XCTAssertEqual(decoded,
                        .map([(.string("items"), .array([.string("value"), .int(-42)]))]))
     }
+
+    // MARK: Resource limits
+
+    func testOversizedArrayHeaderFailsWithoutItsPayload() {
+        // array32 claiming 0xFFFFFFFF elements, header only.
+        var unpacker = MessagePackUnpacker()
+        unpacker.feed([0xdd, 0xff, 0xff, 0xff, 0xff])
+        XCTAssertNil(unpacker.unpack())
+        XCTAssertTrue(unpacker.failed)
+    }
+
+    func testOversizedMapHeaderFails() {
+        var unpacker = MessagePackUnpacker()
+        unpacker.feed([0xdf, 0xff, 0xff, 0xff, 0xff]) // map32, count 0xFFFFFFFF
+        XCTAssertNil(unpacker.unpack())
+        XCTAssertTrue(unpacker.failed)
+    }
+
+    func testDeeplyNestedValueFails() {
+        // Nesting past the depth limit fails while descending, before it could
+        // run out of bytes, so the many fixarray headers alone are enough.
+        var unpacker = MessagePackUnpacker()
+        unpacker.feed(Array(repeating: 0x91, count: 200)) // fixarray(1) x 200
+        XCTAssertNil(unpacker.unpack())
+        XCTAssertTrue(unpacker.failed)
+    }
+
+    func testDecoderIsTerminalAfterFailure() {
+        var unpacker = MessagePackUnpacker()
+        unpacker.feed([0xdd, 0xff, 0xff, 0xff, 0xff])
+        XCTAssertNil(unpacker.unpack())
+        XCTAssertTrue(unpacker.failed)
+
+        // A perfectly valid value fed afterward is not decoded: a rejected
+        // value leaves the stream unsynchronizable.
+        unpacker.feed([0xc0]) // null
+        XCTAssertNil(unpacker.unpack())
+        XCTAssertTrue(unpacker.failed)
+    }
+
+    func testLargeButValidArrayHeaderWaitsForDataInsteadOfFailing() {
+        // A count within the limit but with no elements yet is incomplete, not
+        // a violation: it must not reserve for the claim, fail, or lose data.
+        var unpacker = MessagePackUnpacker()
+        unpacker.feed([0xdc, 0x03, 0xe8]) // array16, count 1000, no elements
+        XCTAssertNil(unpacker.unpack())
+        XCTAssertFalse(unpacker.failed)
+
+        unpacker.feed(Array(repeating: 0xc0, count: 1000)) // 1000 nulls
+        guard case .array(let values)? = unpacker.unpack() else {
+            return XCTFail("expected the completed array")
+        }
+        XCTAssertEqual(values.count, 1000)
+        XCTAssertFalse(unpacker.failed)
+    }
 }
