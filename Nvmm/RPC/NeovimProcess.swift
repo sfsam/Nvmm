@@ -237,16 +237,19 @@ actor NeovimProcess {
 
     /// Notifications Neovim sends the client, in wire order. Once a UI is
     /// attached, the controller consumes `redraw`, `vimenter`, `progress`, and
-    /// `modified`, so those no longer appear here. The stream finishes when the
-    /// connection closes.
+    /// `modified`, so those no longer appear here. Bounded to the most recent
+    /// few, so an unconsumed or slow reader cannot grow it without limit. The
+    /// stream finishes when the connection closes.
     nonisolated let notifications: AsyncStream<RPCNotification>
     private let notificationsContinuation: AsyncStream<RPCNotification>.Continuation
 
     /// UI model, present once `uiAttach` has run. Redraw notifications feed it.
     private var ui: UIController?
 
-    /// Grid snapshots published on each flush, in order. The stream finishes
-    /// when the connection closes.
+    /// Grid snapshots published on each flush. Each is a complete snapshot, so
+    /// the stream keeps only the newest: a consumer that falls behind renders
+    /// the latest frame and skips the ones it superseded. Finishes on
+    /// disconnect.
     nonisolated let grids: AsyncStream<Grid>
     private let gridsContinuation: AsyncStream<Grid>.Continuation
 
@@ -265,11 +268,16 @@ actor NeovimProcess {
         inbound = inboundPair.stream
         inboundContinuation = inboundPair.continuation
 
-        let notificationPair = AsyncStream.makeStream(of: RPCNotification.self)
+        let notificationPair = AsyncStream.makeStream(
+            of: RPCNotification.self,
+            bufferingPolicy: .bufferingNewest(256))
         notifications = notificationPair.stream
         notificationsContinuation = notificationPair.continuation
 
-        let gridsPair = AsyncStream.makeStream(of: Grid.self)
+        // Each grid is a complete snapshot, so a consumer that falls behind
+        // wants the latest frame, not a backlog: keep only the newest.
+        let gridsPair = AsyncStream.makeStream(
+            of: Grid.self, bufferingPolicy: .bufferingNewest(1))
         grids = gridsPair.stream
         gridsContinuation = gridsPair.continuation
 
