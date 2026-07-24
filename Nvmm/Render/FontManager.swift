@@ -77,6 +77,8 @@ struct FontFamily {
 /// identifies it for hashing and equality. This keeps fonts cheap to compare
 /// and lets glyph caches key on font identity.
 final class FontManager {
+    private static let maximumCachedFonts = 64
+
     private struct Entry {
         let font: CTFont
         let name: String
@@ -116,6 +118,9 @@ final class FontManager {
 
         let font = CTFontCreateWithFontDescriptorAndOptions(
             descriptor, size, nil, [])
+        if usedFonts.count >= Self.maximumCachedFonts {
+            usedFonts.removeFirst()
+        }
         usedFonts.append(Entry(font: font, name: name, size: size))
         return font
     }

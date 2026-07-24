@@ -26,13 +26,14 @@ nonisolated struct GuifontEntry: Sendable, Equatable {
 /// - Returns: The entries in list order; empty when `guifont` is empty.
 nonisolated func parseGuifont(_ guifont: String,
                               defaultSize: CGFloat) -> [GuifontEntry] {
+    let maximumEntries = 32
     var fonts: [GuifontEntry] = []
     if guifont.isEmpty { return fonts }
 
     let chars = Array(guifont)
     var index = 0
 
-    while true {
+    while fonts.count < maximumEntries {
         guard let pos = findUnescapedComma(chars, from: index) else {
             fonts.append(makeGuifontEntry(chars[index...], defaultSize: defaultSize))
             break
@@ -76,20 +77,31 @@ private nonisolated func makeGuifontEntry(_ fontstr: ArraySlice<Character>,
     var index = chars.count
     var multiply = 1
     var size = 0
+    var validSize = true
 
     // Accumulate a run of trailing ASCII digits, least significant first.
     while index > 0 {
         index -= 1
         let c = chars[index]
         if c.isASCII, c.isNumber, let digit = c.wholeNumberValue {
-            size += multiply * digit
-            multiply *= 10
+            let (part, partOverflow) = multiply.multipliedReportingOverflow(
+                by: digit)
+            let (nextSize, sizeOverflow) = size.addingReportingOverflow(part)
+            let (nextMultiply, multiplyOverflow) =
+                multiply.multipliedReportingOverflow(by: 10)
+            if partOverflow || sizeOverflow || multiplyOverflow {
+                validSize = false
+            } else {
+                size = nextSize
+                multiply = nextMultiply
+            }
         } else {
             break
         }
     }
 
-    if size != 0 && index != 0 && chars[index] == "h" && chars[index - 1] == ":" {
+    if validSize, (1...512).contains(size), index != 0,
+       chars[index] == "h", chars[index - 1] == ":" {
         return GuifontEntry(name: String(chars[0..<(index - 1)]),
                             size: CGFloat(size))
     }

@@ -388,6 +388,7 @@ nonisolated final class UIController {
 
     private func hlGroupSet(_ tuple: [MPValue]) {
         guard tuple.count >= 2, let name = tuple[0].stringValue,
+              name.utf8.count <= 128,
               let id = asInt(tuple[1]), id >= 0, id < Self.maxHighlightID
         else { return }
 
@@ -402,6 +403,10 @@ nonisolated final class UIController {
             return
         }
 
+        if hlGroupMappings[name] == nil,
+           hlGroupMappings.count >= limits.maximumHighlightGroupMappings {
+            return
+        }
         let previousID = hlGroupMappings[name]?.id ?? id
         hlGroupMappings[name] = (id, type)
 
@@ -552,7 +557,10 @@ nonisolated final class UIController {
         let value = tuple[1]
         switch name {
         case "guifont":
-            if let font = value.stringValue { guifont = font }
+            if let font = value.stringValue,
+               font.utf8.count <= limits.maximumGuifontBytes {
+                guifont = font
+            }
         case "mousemoveevent":
             if let on = value.boolValue { mousemoveevent = on }
         case "ambiwidth":
@@ -646,6 +654,13 @@ nonisolated final class UIController {
             if percent == 100 {
                 progressEntries.removeValue(forKey: key)
                 return .completed(100)
+            }
+            if progressEntries[key] == nil,
+               progressEntries.count >= limits.maximumProgressEntries,
+               let oldest = progressEntries.min(by: {
+                   $0.value.sequence < $1.value.sequence
+               })?.key {
+                progressEntries.removeValue(forKey: oldest)
             }
             progressSequence += 1
             progressEntries[key] = ProgressEntry(percent: percent, sequence: progressSequence)

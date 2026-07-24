@@ -75,4 +75,12 @@ final class GuifontTests: XCTestCase {
         XCTAssertEqual(parseGuifont("123", defaultSize: 15),
                        [GuifontEntry(name: "123", size: 15)])
     }
+
+    func testOverflowingAndExcessiveSizesAreNotApplied() {
+        let huge = "Menlo:h" + String(repeating: "9", count: 100)
+        XCTAssertEqual(parseGuifont(huge, defaultSize: 15),
+                       [GuifontEntry(name: huge, size: 15)])
+        XCTAssertEqual(parseGuifont("Menlo:h513", defaultSize: 15),
+                       [GuifontEntry(name: "Menlo:h513", size: 15)])
+    }
 }
