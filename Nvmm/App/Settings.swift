@@ -103,9 +103,6 @@ final class SettingsWindowController: NSWindowController {
         let titlebar = Self.checkbox(
             NSLocalizedString("Transparent title bar", comment: "Settings checkbox"),
             key: Settings.titlebarAppearsTransparentKey)
-        let progress = Self.checkbox(
-            NSLocalizedString("Progress bar", comment: "Settings checkbox"),
-            key: Settings.progressBarKey)
         let scrollbar = Self.checkbox(
             NSLocalizedString("Vertical scrollbar", comment: "Settings checkbox"),
             key: Settings.verticalScrollbarKey)
@@ -120,7 +117,6 @@ final class SettingsWindowController: NSWindowController {
                                       [empty, buffersNote],
                                       [empty, terminate],
                                       [appearance, titlebar],
-                                      [empty, progress],
                                       [empty, scrollbar],
                                       [empty, scrollbarNote]])
         grid.translatesAutoresizingMaskIntoConstraints = false
