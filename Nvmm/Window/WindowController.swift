@@ -954,10 +954,6 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         updateProgressIndicator()
         guard update.isCompletion else { return }
 
-        // Paint the completed value now: without this a task that completes in
-        // one report would never be drawn, since the fallback lands first.
-        progressIndicator.displayIfNeeded()
-
         let generation = progressGeneration
         progressHoldTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(1))
@@ -973,11 +969,11 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     /// nothing to show or the setting is off.
     private func updateProgressIndicator() {
         guard Settings.progressBar, let percent = progressPercent else {
-            progressIndicator.isHidden = true
+            progressIndicator.setVisible(false)
             return
         }
-        progressIndicator.doubleValue = Double(percent)
-        progressIndicator.isHidden = false
+        progressIndicator.setProgress(Double(percent))
+        progressIndicator.setVisible(true)
     }
 
     /// Scrolls the window so `line` (one-based) is its top line, in response to
