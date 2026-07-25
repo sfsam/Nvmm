@@ -10,6 +10,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let renderManager = RenderContextManager()
     private let terminationCoordinator = TerminationCoordinator()
+    private var controlServer: ControlServer?
+    // Set when the helper's launch marker is present, and cleared by the first
+    // control request. AppKit's untitled window is suppressed while it is true
+    // so the request's own window is the only one.
+    private var awaitingInitialCLIRequest =
+        ProcessInfo.processInfo.arguments.contains("--nvmm-client")
 
     // True while a termination check is awaiting Neovim; a second quit request
     // in that window is answered with `.terminateLater` so the in-flight check's
@@ -28,6 +34,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // setting sees the registered value rather than a bare `false`.
     func applicationWillFinishLaunching(_ notification: Notification) {
         Settings.registerDefaults()
+        do {
+            controlServer = try ControlServer { [weak self] request, channel in
+                self?.handleCLIRequest(request, channel: channel)
+            }
+        } catch let error as CLIError {
+            NSLog("Nvmm: control server unavailable: \(error.message)")
+        } catch {
+            NSLog("Nvmm: control server unavailable: \(error)")
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -35,6 +50,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the app depends on — the utf8proc bridge and the bundled nvim binary.
         logUTF8ProcVersion()
         logBundledNeovim()
+        if awaitingInitialCLIRequest {
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(10))
+                self?.recoverAbandonedCLILaunch()
+            }
+        }
     }
 
     // MARK: - Windows
@@ -58,9 +79,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// ready, so its first paint is the intro screen rather than a blank frame.
     @discardableResult
     private func openWindow(files: [String] = [],
-                            directory: String? = nil) -> WindowController {
+                            directory: String? = nil,
+                            arguments: [String] = []) -> WindowController {
         let controller = makeRegisteredController()
-        controller.start(files: files, directory: directory)
+        controller.start(files: files, directory: directory,
+                         arguments: arguments)
         return controller
     }
 
@@ -68,10 +91,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// with the coordinator, but does not start it. The caller chooses how it
     /// reaches Neovim — `start(files:directory:)` to spawn,
     /// `start(connectingTo:)` to connect to a running server.
-    private func makeRegisteredController() -> WindowController {
-        let controller = WindowController(renderManager: renderManager,
-                                          coordinator: terminationCoordinator,
-                                          cascadingFrom: frontmostWindow)
+    private func makeRegisteredController(
+        cascadingFrom source: WindowController? = nil
+    ) -> WindowController {
+        let controller = WindowController(
+            renderManager: renderManager,
+            coordinator: terminationCoordinator,
+            cascadingFrom: source ?? frontmostWindow)
         terminationCoordinator.register(controller)
         return controller
     }
@@ -125,10 +151,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Opening files from outside the app
 
-    /// Whether launching should open an empty window. Always yes: the app has
-    /// no other way to be told what to open at launch.
+    /// The CLI's socket request is authoritative when its private launch marker
+    /// is present, so AppKit must not race it with an empty window.
     func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool {
-        true
+        !awaitingInitialCLIRequest
+    }
+
+    /// Recovers from a launch whose control request never arrived — the helper
+    /// was interrupted between launching the app and connecting. Without this
+    /// the app keeps running with no window, and nothing asks it for one until
+    /// the next reopen.
+    private func recoverAbandonedCLILaunch() {
+        guard awaitingInitialCLIRequest else { return }
+        awaitingInitialCLIRequest = false
+        if windows.isEmpty { openWindow() }
     }
 
     /// Opens an empty window when AppKit asks for one and none is already live.
@@ -207,6 +243,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return best ?? frontmostWindow ?? candidates.first
     }
 
+    // MARK: - Command-line helper
+
+    private func handleCLIRequest(_ request: CLIRequest,
+                                  channel: CLIResponseChannel) {
+        // The request is now synchronously registering any window it needs, so
+        // the cold-start guard must not suppress a later Dock reopen.
+        awaitingInitialCLIRequest = false
+        // A warm helper request bypasses LaunchServices. The cooperative
+        // `activate()` API does not guarantee activation when the terminal is
+        // active, so explicitly take activation for this user-initiated open.
+        NSApp.activate(ignoringOtherApps: true)
+        let candidates = windows
+        if candidates.isEmpty || request.needsNewWindow {
+            openCLIWindow(request, channel: channel,
+                          cascadingFrom: candidates.last)
+            return
+        }
+        guard !request.files.isEmpty else {
+            channel.accepted(wait: false)
+            return
+        }
+
+        let paths = request.absoluteFiles
+        Task {
+            if let controller = await self.bestWindow(for: paths,
+                                                      among: candidates),
+               !controller.hasExited {
+                controller.open(paths: paths)
+                channel.accepted(wait: false)
+            } else {
+                self.openCLIWindow(
+                    request, channel: channel,
+                    cascadingFrom: candidates.last { !$0.hasExited })
+            }
+        }
+    }
+
+    private func openCLIWindow(_ request: CLIRequest,
+                               channel: CLIResponseChannel,
+                               cascadingFrom source: WindowController?) {
+        let controller = makeRegisteredController(cascadingFrom: source)
+        if request.wait { controller.setCLIResponseChannel(channel) }
+        controller.start(files: request.files,
+                         directory: request.workingDirectory,
+                         arguments: request.arguments)
+        Task {
+            switch await controller.waitForStartup() {
+            case .started:
+                channel.accepted(wait: request.wait)
+            case .failed(let message):
+                channel.error(message)
+            }
+        }
+    }
+
     func applicationShouldTerminate(
         _ sender: NSApplication) -> NSApplication.TerminateReply {
         // A second quit while a check or drain is already running defers to it.
@@ -227,6 +318,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(
         _ sender: NSApplication) -> Bool {
         Settings.terminateAfterLastWindow
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        controlServer?.stop()
     }
 
     /// Quits every window, prompting first (app-modal) if any have unsaved

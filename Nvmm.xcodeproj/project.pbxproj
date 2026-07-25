@@ -6,6 +6,11 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		C10000000000000000000001 /* Nvmm/App/CLIProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000003 /* Nvmm/App/CLIProtocol.swift */; };
+		C10000000000000000000002 /* nvmm in Embed CLI Helper */ = {isa = PBXBuildFile; fileRef = C10000000000000000000004 /* nvmm */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		9261A7B6300CA65600B23EF8 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -14,11 +19,34 @@
 			remoteGlobalIDString = 9261A75D300CA65600B23EF8;
 			remoteInfo = Nvmm;
 		};
+		C10000000000000000000005 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 9261A756300CA65600B23EF8 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C10000000000000000000010;
+			remoteInfo = NvmmCLI;
+		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		C10000000000000000000008 /* Embed CLI Helper */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = Contents/bin;
+			dstSubfolderSpec = 1;
+			files = (
+				C10000000000000000000002 /* nvmm in Embed CLI Helper */,
+			);
+			name = "Embed CLI Helper";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		9261A75E300CA65600B23EF8 /* Nvmm.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Nvmm.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		9261A7B1300CA65600B23EF8 /* NvmmTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NvmmTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		C10000000000000000000003 /* Nvmm/App/CLIProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Nvmm/App/CLIProtocol.swift; sourceTree = SOURCE_ROOT; };
+		C10000000000000000000004 /* nvmm */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = nvmm; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -45,6 +73,11 @@
 			path = Tests;
 			sourceTree = "<group>";
 		};
+		C10000000000000000000006 /* Tools */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Tools;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -62,6 +95,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C10000000000000000000007 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -70,6 +110,8 @@
 			children = (
 				9261A760300CA65600B23EF8 /* Nvmm */,
 				9261A7B2300CA65600B23EF8 /* Tests */,
+				C10000000000000000000006 /* Tools */,
+				C10000000000000000000003 /* Nvmm/App/CLIProtocol.swift */,
 				9261A75F300CA65600B23EF8 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -79,6 +121,7 @@
 			children = (
 				9261A75E300CA65600B23EF8 /* Nvmm.app */,
 				9261A7B1300CA65600B23EF8 /* NvmmTests.xctest */,
+				C10000000000000000000004 /* nvmm */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -94,10 +137,12 @@
 				9261A75B300CA65600B23EF8 /* Frameworks */,
 				9261A75C300CA65600B23EF8 /* Resources */,
 				9261A7A1300CA65600B23EF8 /* Bundle Neovim */,
+				C10000000000000000000008 /* Embed CLI Helper */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				C10000000000000000000009 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				9261A760300CA65600B23EF8 /* Nvmm */,
@@ -132,6 +177,27 @@
 			productReference = 9261A7B1300CA65600B23EF8 /* NvmmTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		C10000000000000000000010 /* NvmmCLI */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C10000000000000000000011 /* Build configuration list for PBXNativeTarget "NvmmCLI" */;
+			buildPhases = (
+				C10000000000000000000012 /* Sources */,
+				C10000000000000000000007 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				C10000000000000000000006 /* Tools */,
+			);
+			name = NvmmCLI;
+			packageProductDependencies = (
+			);
+			productName = nvmm;
+			productReference = C10000000000000000000004 /* nvmm */;
+			productType = "com.apple.product-type.tool";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -148,6 +214,9 @@
 					9261A7B0300CA65600B23EF8 = {
 						CreatedOnToolsVersion = 26.2;
 						TestTargetID = 9261A75D300CA65600B23EF8;
+					};
+					C10000000000000000000010 = {
+						CreatedOnToolsVersion = 26.2;
 					};
 				};
 			};
@@ -166,6 +235,7 @@
 			projectRoot = "";
 			targets = (
 				9261A75D300CA65600B23EF8 /* Nvmm */,
+				C10000000000000000000010 /* NvmmCLI */,
 				9261A7B0300CA65600B23EF8 /* NvmmTests */,
 			);
 		};
@@ -224,6 +294,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C10000000000000000000012 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C10000000000000000000001 /* Nvmm/App/CLIProtocol.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -231,6 +309,11 @@
 			isa = PBXTargetDependency;
 			target = 9261A75D300CA65600B23EF8 /* Nvmm */;
 			targetProxy = 9261A7B6300CA65600B23EF8 /* PBXContainerItemProxy */;
+		};
+		C10000000000000000000009 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C10000000000000000000010 /* NvmmCLI */;
+			targetProxy = C10000000000000000000005 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -477,6 +560,38 @@
 			};
 			name = Release;
 		};
+		C10000000000000000000013 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = HFT3T55WND;
+				ENABLE_HARDENED_RUNTIME = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.7;
+				PRODUCT_MODULE_NAME = NvmmCLI;
+				PRODUCT_NAME = nvmm;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		C10000000000000000000014 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = HFT3T55WND;
+				ENABLE_HARDENED_RUNTIME = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.7;
+				PRODUCT_MODULE_NAME = NvmmCLI;
+				PRODUCT_NAME = nvmm;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -503,6 +618,15 @@
 			buildConfigurations = (
 				9261A7B9300CA65600B23EF8 /* Debug */,
 				9261A7BA300CA65600B23EF8 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C10000000000000000000011 /* Build configuration list for PBXNativeTarget "NvmmCLI" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C10000000000000000000013 /* Debug */,
+				C10000000000000000000014 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

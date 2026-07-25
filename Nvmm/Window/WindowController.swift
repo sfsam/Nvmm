@@ -20,6 +20,16 @@
 import Cocoa
 import CoreText
 
+/// Whether a window reached its Neovim transport or failed before it could.
+///
+/// The CLI acknowledges a new-window request at this boundary: the child
+/// exists and owns its RPC pipes, but Nvmm does not wait for configuration,
+/// UI attachment, or the first rendered grid.
+nonisolated enum WindowStartupOutcome: Sendable, Equatable {
+    case started
+    case failed(String)
+}
+
 final class WindowController: NSWindowController, NSWindowDelegate, QuitSession {
     // MARK: - State
 
@@ -78,6 +88,16 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     // stalls. Independent of `startupTimeoutTask`, which only runs once Neovim
     // has attached and so cannot bound a stall before that.
     private var hiddenWindowBackstopTask: Task<Void, Never>?
+
+    // The first transport-start result and callers awaiting it. Normal GUI
+    // launches do not wait; the CLI does so it can report a spawn failure.
+    private var startupOutcome: WindowStartupOutcome?
+    private var startupWaiters:
+        [CheckedContinuation<WindowStartupOutcome, Never>] = []
+
+    // A waiting CLI request associated with this window. It observes closure
+    // but does not own the window or affect its quit behavior.
+    private var cliResponseChannel: CLIResponseChannel?
 
     // The title Neovim last set. Shown while the window is not being resized; a
     // live resize replaces it with the grid size and restores it when it ends.
@@ -158,9 +178,10 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     // rather than restoring the saved frame on top of it.
     private weak var cascadeSource: WindowController?
 
-    // The files this window's Neovim opens at startup, and the directory it
-    // starts in. Set before `start()`.
+    // The files and allowlisted Neovim options this window opens with, and the
+    // directory it starts in. Set before `start()`.
     private var startupFiles: [String] = []
+    private var startupArguments: [String] = []
     private var startupDirectory: String?
 
     /// How this window reaches Neovim: spawn an embedded process, or connect to
@@ -250,11 +271,36 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     /// `directory` is the working directory Neovim starts in; when nil it is
     /// derived from the first file, falling back to the invoking shell's
     /// working directory and then the home directory.
-    func start(files: [String] = [], directory: String? = nil) {
+    func start(files: [String] = [], directory: String? = nil,
+               arguments: [String] = []) {
         startupFiles = files
+        startupArguments = arguments
         startupDirectory = directory
         source = .spawn
         launch()
+    }
+
+    /// Waits for the first transport start attempt to succeed or fail.
+    ///
+    /// The result is retained, so a caller arriving after the spawn completed
+    /// receives it immediately. Reconnection does not change the first result.
+    func waitForStartup() async -> WindowStartupOutcome {
+        if let startupOutcome { return startupOutcome }
+        return await withCheckedContinuation { continuation in
+            startupWaiters.append(continuation)
+        }
+    }
+
+    func setCLIResponseChannel(_ channel: CLIResponseChannel) {
+        cliResponseChannel = channel
+    }
+
+    private func resolveStartup(_ outcome: WindowStartupOutcome) {
+        guard startupOutcome == nil else { return }
+        startupOutcome = outcome
+        let waiters = startupWaiters
+        startupWaiters.removeAll()
+        for waiter in waiters { waiter.resume(returning: outcome) }
     }
 
     /// Configures rendering and connects to an already-running Neovim listening
@@ -267,13 +313,24 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     }
 
     private func launch() {
-        guard let window, let screen = window.screen ?? NSScreen.main else { return }
+        guard let window else {
+            resolveStartup(.failed("Could not create an editor window."))
+            return
+        }
+        guard let screen = window.screen ?? NSScreen.main else {
+            resolveStartup(.failed("No display is available."))
+            handleDisconnect()
+            return
+        }
 
         let context: RenderContext
         do {
             context = try renderManager.renderContext(for: screen)
         } catch {
             NSLog("Nvmm: no Metal render context: \(error)")
+            resolveStartup(.failed("Could not initialize Metal: "
+                                   + error.localizedDescription))
+            handleDisconnect()
             return
         }
         gridView.setRenderContext(context)
@@ -481,14 +538,55 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
 
     // MARK: - Neovim session
 
-    /// The argv Neovim is launched with. Startup files follow `--embed`, opened
-    /// one per tab page unless the buffers preference is set, matching how the
-    /// same files would be opened into a window that is already running.
-    private func neovimArguments() -> [String] {
+    /// Builds Neovim argv after the executable name.
+    ///
+    /// Forwarded arguments retain their order. This preserves both `-c` and its
+    /// value and the execution order of `-c` and `+` commands. The tab
+    /// preference is expressed as a leading `-p`, but only when the caller did
+    /// not choose a layout itself: Neovim takes one layout from `-d`, `-o`,
+    /// `-O`, and `-p`, so with `-d` the added `-p` would win the layout slot
+    /// and leave one file per tab with nothing to diff against.
+    ///
+    /// A `--` separates the options from the files, so a name beginning with
+    /// `+` or `-` opens as the file it is rather than being read as a command
+    /// or an option. Neovim then treats a lone `-` as a file too, which is
+    /// what it has to be here: standard input belongs to the RPC transport.
+    nonisolated static func neovimArguments(
+        options: [String], files: [String], openFilesInBuffers: Bool
+    ) -> [String] {
         var arguments = ["--embed"]
-        if startupFiles.isEmpty { return arguments }
-        if !Settings.openFilesInBuffers { arguments.append("-p") }
-        return arguments + startupFiles
+        if !files.isEmpty, !openFilesInBuffers, !forwardsLayout(options) {
+            arguments.append("-p")
+        }
+        arguments += options
+        if !files.isEmpty {
+            arguments.append("--")
+            arguments += files
+        }
+        return arguments
+    }
+
+    /// Whether `options` already chooses a window layout. A `-c` value is
+    /// skipped so a command that looks like an option is not mistaken for one.
+    private nonisolated static func forwardsLayout(
+        _ options: [String]
+    ) -> Bool {
+        var index = 0
+        while index < options.count {
+            if options[index] == "-c" {
+                index += 2
+            } else if ["-d", "-o", "-O", "-p"].contains(options[index]) {
+                return true
+            } else {
+                index += 1
+            }
+        }
+        return false
+    }
+
+    private func neovimArguments() -> [String] {
+        Self.neovimArguments(options: startupArguments, files: startupFiles,
+                             openFilesInBuffers: Settings.openFilesInBuffers)
     }
 
     /// The directory Neovim starts in: the caller's, else the first startup
@@ -526,6 +624,8 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         case .spawn:
             guard let nvimPath = NeovimBundle.executableURL?.path else {
                 NSLog("Nvmm: bundled nvim not found")
+                resolveStartup(.failed("Bundled Neovim executable not found."))
+                handleDisconnect()
                 return
             }
             let launch = NeovimBundle.launchCommand(nvimPath: nvimPath,
@@ -580,6 +680,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
                 case .connect(let address):
                     try await process.connect(address)
                 }
+                self?.resolveStartup(.started)
             } catch {
                 NSLog("Nvmm: failed to start nvim: \(error)")
                 let code = (error as? NeovimSpawnError)?.code
@@ -593,6 +694,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
                 }
                 let reason = (error as? NeovimSpawnError)?.message
                     ?? error.localizedDescription
+                self?.resolveStartup(.failed(reason))
                 // A failed `:connect`: return to the server we detached from
                 // (still alive for a plain `:connect`) rather than orphaning
                 // it, noting that the new address was unreachable.
@@ -1134,6 +1236,8 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         // The window is gone, so it counts as exited for any termination drain
         // holding a reference to it.
         hasExited = true
+        cliResponseChannel?.closed()
+        cliResponseChannel = nil
         saveFrame()
         coordinator?.deregister(self)
         commandsContinuation.finish()
