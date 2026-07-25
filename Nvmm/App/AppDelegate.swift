@@ -131,10 +131,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
-    /// Opens the empty window AppKit asks for at launch, and when the app is
-    /// activated with no windows open.
+    /// Opens an empty window when AppKit asks for one and none is already live.
+    ///
+    /// A debug launch can deliver its activation/reopen and normal launch
+    /// requests in either order. Both may ask for an untitled window, so this
+    /// callback must be idempotent. Explicit New and New Window actions bypass
+    /// it and always create another window.
     func applicationOpenUntitledFile(_ sender: NSApplication) -> Bool {
-        openWindow()
+        if windows.isEmpty { openWindow() }
         return true
     }
 
