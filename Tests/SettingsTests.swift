@@ -24,7 +24,10 @@ final class SettingsTests: XCTestCase {
                     Settings.terminateAfterLastWindowKey,
                     Settings.titlebarAppearsTransparentKey,
                     Settings.verticalScrollbarKey,
-                    Settings.progressBarKey]
+                    Settings.progressBarKey,
+                    Settings.cursorTrailEnabledKey,
+                    Settings.cursorTrailLengthFractionKey,
+                    Settings.cursorTrailOpacityKey]
 
         // The user's own values must not decide the outcome, and must survive
         // the test: only the registration domain is under test here.
@@ -42,5 +45,58 @@ final class SettingsTests: XCTestCase {
         XCTAssertFalse(Settings.terminateAfterLastWindow)
         XCTAssertFalse(Settings.titlebarAppearsTransparent)
         XCTAssertFalse(Settings.verticalScrollbar)
+        XCTAssertFalse(Settings.cursorTrailEnabled)
+        XCTAssertEqual(
+            Settings.cursorTrailLengthFraction, 0.55, accuracy: 0.001)
+        XCTAssertEqual(Settings.cursorTrailOpacity, 0.55, accuracy: 0.001)
+    }
+
+    @MainActor
+    func testCursorTrailValuesAreClamped() {
+        let defaults = UserDefaults.standard
+        let lengthKey = Settings.cursorTrailLengthFractionKey
+        let opacityKey = Settings.cursorTrailOpacityKey
+        let savedLength = defaults.object(forKey: lengthKey)
+        let savedOpacity = defaults.object(forKey: opacityKey)
+        defer {
+            defaults.set(savedLength, forKey: lengthKey)
+            defaults.set(savedOpacity, forKey: opacityKey)
+        }
+
+        defaults.set(-1, forKey: lengthKey)
+        defaults.set(2, forKey: opacityKey)
+
+        XCTAssertEqual(
+            Settings.cursorTrailLengthFraction,
+            Settings.cursorTrailMinimumValue)
+        XCTAssertEqual(
+            Settings.cursorTrailOpacity,
+            Settings.cursorTrailMaximumValue)
+    }
+
+    @MainActor
+    func testSettingsWindowContainsBoundCursorTrailSliders() throws {
+        let controller = SettingsWindowController()
+        let contentView = try XCTUnwrap(controller.window?.contentView)
+
+        func descendants(of view: NSView) -> [NSView] {
+            view.subviews + view.subviews.flatMap(descendants)
+        }
+
+        let sliders = descendants(of: contentView)
+            .compactMap { $0 as? NSSlider }
+        XCTAssertEqual(sliders.count, 2)
+        for slider in sliders {
+            XCTAssertEqual(slider.minValue, Settings.cursorTrailMinimumValue)
+            XCTAssertEqual(slider.maxValue, Settings.cursorTrailMaximumValue)
+            XCTAssertNotNil(slider.infoForBinding(.value))
+            XCTAssertNotNil(slider.infoForBinding(.enabled))
+            XCTAssertTrue(slider.isContinuous)
+        }
+
+        let colorBoundLabels = descendants(of: contentView)
+            .compactMap { $0 as? NSTextField }
+            .filter { $0.infoForBinding(.textColor) != nil }
+        XCTAssertEqual(colorBoundLabels.count, 2)
     }
 }

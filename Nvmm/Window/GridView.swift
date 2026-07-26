@@ -92,6 +92,13 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
 
     private enum BlinkPhase { case off, on }
 
+    // Cursor movement leaves a short, bounded Core Animation bridge above the
+    // Metal contents. It is purely visual: Neovim's destination remains
+    // authoritative and the real cursor moves there immediately.
+    private static let cursorTrailDuration: CFTimeInterval = 0.15
+    private static let maximumCursorTrails = 4
+    private var cursorTrailLayers: [CAGradientLayer] = []
+
     // MARK: Input
 
     /// Sends a key-notation payload to Neovim (`nvim_input`).
@@ -236,6 +243,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
 
     /// Sets the font and recomputes cell and line-decoration metrics.
     func setFont(_ font: FontFamily) {
+        clearCursorTrails()
         fontFamily = font
 
         let leading = font.leading.rounded(.down)
@@ -326,6 +334,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
 
     /// Publishes a new grid snapshot, redrawing and restarting the blink loop.
     func setGrid(_ newGrid: Grid) {
+        let previousGrid = grid
         let previousSize = grid?.size
         grid = newGrid
         cursorVisible = true
@@ -354,17 +363,21 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             if textInputCoordinator.isActive { refreshCompositionGeometry() }
         }
 
+        updateCursorTrail(from: previousGrid, to: newGrid,
+                          sizeChanged: gridSizeChanged)
         restartBlink()
         needsDisplay = true
     }
 
     override func setFrameSize(_ newSize: NSSize) {
+        clearCursorTrails()
         super.setFrameSize(newSize)
         metalLayer.drawableSize = convertToBacking(newSize)
         textInputGeometryDidChange()
     }
 
     override func viewDidChangeBackingProperties() {
+        clearCursorTrails()
         super.viewDidChangeBackingProperties()
         textInputGeometryDidChange()
     }
@@ -379,6 +392,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         blinkTimer?.invalidate()
         blinkTimer = nil
         cursorVisible = true
+        clearCursorTrails()
         needsDisplay = true
     }
 
@@ -915,6 +929,145 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         guard size.width > 0, size.height > 0 else { return nil }
         return GridPoint(row: min(max(point.row, 0), size.height - 1),
                          column: min(max(point.column, 0), size.width - 1))
+    }
+
+    // MARK: - Cursor trail
+
+    /// Applies settings whose disabled state must clear an active effect.
+    func applyCursorTrailSettings() {
+        if !Settings.cursorTrailEnabled { clearCursorTrails() }
+    }
+
+    private func updateCursorTrail(from previousGrid: Grid?, to newGrid: Grid,
+                                   sizeChanged: Bool) {
+        guard Settings.cursorTrailEnabled else {
+            clearCursorTrails()
+            return
+        }
+        guard !inactive, !sizeChanged,
+              let previousGrid,
+              previousGrid.size == newGrid.size,
+              !previousGrid.hideCursor, !newGrid.hideCursor,
+              !shouldSuppressNvimCursorForComposition() else {
+            if sizeChanged || newGrid.hideCursor {
+                clearCursorTrails()
+            }
+            return
+        }
+
+        let previous = previousGrid.cursor
+        let current = newGrid.cursor
+        // Neovim uses the bottom-left cell as a transient cursor location
+        // during some full-screen UI transitions. It is not editor travel.
+        let previousIsBottomLeft = CursorTrailGeometry.isBottomLeft(
+            row: previous.row, column: previous.column,
+            gridHeight: previousGrid.height)
+        let currentIsBottomLeft = CursorTrailGeometry.isBottomLeft(
+            row: current.row, column: current.column,
+            gridHeight: newGrid.height)
+        guard !previousIsBottomLeft, !currentIsBottomLeft else {
+            clearCursorTrails()
+            return
+        }
+        guard previous.row != current.row ||
+                previous.column != current.column else { return }
+
+        let thickness = CGFloat(cursorLineThickness)
+            / max(metalLayer.contentsScale, 1)
+        let oldRect = CursorTrailGeometry.cursorRect(
+            row: previous.row, column: previous.column,
+            cellWidth: previous.width, shape: previous.shape,
+            cellSize: backingCellSize, lineThickness: thickness)
+        let newRect = CursorTrailGeometry.cursorRect(
+            row: current.row, column: current.column,
+            cellWidth: current.width, shape: current.shape,
+            cellSize: backingCellSize, lineThickness: thickness)
+
+        guard let points = CursorTrailGeometry.bridge(
+            from: oldRect, to: newRect,
+            lengthFraction: CGFloat(Settings.cursorTrailLengthFraction)),
+              metalLayer.bounds.width > 0, metalLayer.bounds.height > 0 else {
+            return
+        }
+
+        addCursorTrail(
+            points: points,
+            from: midpoint(points[0], points[3]),
+            to: midpoint(points[1], points[2]),
+            color: current.background)
+    }
+
+    private func addCursorTrail(points: [CGPoint], from start: CGPoint,
+                                to end: CGPoint, color: RGBColor) {
+        if cursorTrailLayers.count >= Self.maximumCursorTrails {
+            let oldest = cursorTrailLayers.removeFirst()
+            oldest.removeAllAnimations()
+            oldest.removeFromSuperlayer()
+        }
+
+        let path = CGMutablePath()
+        path.move(to: points[0])
+        for point in points.dropFirst() { path.addLine(to: point) }
+        path.closeSubpath()
+
+        let mask = CAShapeLayer()
+        mask.frame = metalLayer.bounds
+        mask.path = path
+        mask.fillColor = CGColor(gray: 1, alpha: 1)
+
+        let opaque = NSColor(
+            srgbRed: CGFloat(color.red) / 255,
+            green: CGFloat(color.green) / 255,
+            blue: CGFloat(color.blue) / 255,
+            alpha: CGFloat(Settings.cursorTrailOpacity)).cgColor
+        let transparent = opaque.copy(alpha: 0) ?? opaque
+
+        let gradient = CAGradientLayer()
+        gradient.frame = metalLayer.bounds
+        gradient.colors = [transparent, opaque]
+        gradient.startPoint = normalized(start, in: gradient.bounds)
+        gradient.endPoint = normalized(end, in: gradient.bounds)
+        gradient.mask = mask
+        gradient.opacity = 0
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        metalLayer.addSublayer(gradient)
+        cursorTrailLayers.append(gradient)
+        CATransaction.commit()
+
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 1
+        fade.toValue = 0
+        fade.duration = Self.cursorTrailDuration
+        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { [weak self, weak gradient] in
+            guard let self, let gradient else { return }
+            gradient.removeFromSuperlayer()
+            self.cursorTrailLayers.removeAll { $0 === gradient }
+        }
+        gradient.add(fade, forKey: "cursorTrailFade")
+        CATransaction.commit()
+    }
+
+    private func clearCursorTrails() {
+        for layer in cursorTrailLayers {
+            layer.removeAllAnimations()
+            layer.removeFromSuperlayer()
+        }
+        cursorTrailLayers.removeAll()
+    }
+
+    private func normalized(_ point: CGPoint, in bounds: CGRect) -> CGPoint {
+        CGPoint(x: (point.x - bounds.minX) / bounds.width,
+                y: (point.y - bounds.minY) / bounds.height)
+    }
+
+    private func midpoint(_ first: CGPoint, _ second: CGPoint) -> CGPoint {
+        CGPoint(x: (first.x + second.x) * 0.5,
+                y: (first.y + second.y) * 0.5)
     }
 
     // MARK: - First responder
@@ -1536,6 +1689,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     /// Notes a change to the preedit state and relayouts, refreshing geometry
     /// when a fresh session needs its anchor bounds.
     private func compositionStateDidChange() {
+        clearCursorTrails()
         if textInputCoordinator.isActive, !compositionSession.anchored {
             compositionGeometry = nil
             refreshCompositionGeometry()

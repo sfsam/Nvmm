@@ -41,6 +41,18 @@ enum Settings {
     /// on unless the key is set by hand.
     static let contextSensitiveCursorKey = "NVEnableContextSensitiveMouseCursor"
 
+    /// Whether cursor movement leaves a transient polygon trail.
+    static let cursorTrailEnabledKey = "NVEnableCursorTrail"
+
+    /// The final fraction of a cursor move covered by its trail.
+    static let cursorTrailLengthFractionKey = "NVCursorTrailLengthFraction"
+
+    /// The maximum opacity of a cursor trail.
+    static let cursorTrailOpacityKey = "NVCursorTrailOpacity"
+
+    static let cursorTrailMinimumValue = 0.1
+    static let cursorTrailMaximumValue = 1.0
+
     static var openFilesInBuffers: Bool {
         UserDefaults.standard.bool(forKey: openFilesInBuffersKey)
     }
@@ -65,16 +77,35 @@ enum Settings {
         UserDefaults.standard.bool(forKey: contextSensitiveCursorKey)
     }
 
-    /// Registers the defaults that are on unless the user turns them off. Every
-    /// other setting is off unless set, which is what `bool(forKey:)` already
-    /// returns for a key that was never written.
+    static var cursorTrailEnabled: Bool {
+        UserDefaults.standard.bool(forKey: cursorTrailEnabledKey)
+    }
+
+    static var cursorTrailLengthFraction: Double {
+        clampedCursorTrailValue(forKey: cursorTrailLengthFractionKey)
+    }
+
+    static var cursorTrailOpacity: Double {
+        clampedCursorTrailValue(forKey: cursorTrailOpacityKey)
+    }
+
+    private static func clampedCursorTrailValue(forKey key: String) -> Double {
+        min(max(UserDefaults.standard.double(forKey: key),
+                cursorTrailMinimumValue), cursorTrailMaximumValue)
+    }
+
+    /// Registers settings whose resting value is not supplied by the relevant
+    /// typed `UserDefaults` accessor.
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [contextSensitiveCursorKey: true,
-                                                  progressBarKey: true])
+                                                  progressBarKey: true,
+                                                  cursorTrailEnabledKey: false,
+                                                  cursorTrailLengthFractionKey: 0.55,
+                                                  cursorTrailOpacityKey: 0.55])
     }
 }
 
-/// The settings window: a panel of checkboxes bound straight to the defaults.
+/// The settings window: controls bound straight to the defaults.
 ///
 /// The bindings are continuous, so a click writes the default immediately
 /// rather than at some later commit. That write is the only thing this window
@@ -111,6 +142,10 @@ final class SettingsWindowController: NSWindowController {
                 + "may not behave as expected if your text has wrapped lines "
                 + "or lines hidden by folds.",
             comment: "Settings note under the scrollbar checkbox"))
+        let cursorTrail = Self.checkbox(
+            NSLocalizedString("Cursor trail", comment: "Settings checkbox"),
+            key: Settings.cursorTrailEnabledKey)
+        let cursorTrailGrid = Self.cursorTrailGrid()
 
         let empty = NSGridCell.emptyContentView
         let grid = NSGridView(views: [[behavior, buffers],
@@ -118,26 +153,24 @@ final class SettingsWindowController: NSWindowController {
                                       [empty, terminate],
                                       [appearance, titlebar],
                                       [empty, scrollbar],
-                                      [empty, scrollbarNote]])
+                                      [empty, scrollbarNote],
+                                      [empty, cursorTrail],
+                                      [empty, cursorTrailGrid]])
         grid.translatesAutoresizingMaskIntoConstraints = false
         grid.rowAlignment = .firstBaseline
         grid.column(at: 0).xPlacement = .trailing
         grid.row(at: 2).bottomPadding = 12
 
-        // Each note belongs to the checkbox above it, so it lines up with that
+        // Each item belongs to the checkbox above it, so it lines up with that
         // checkbox's title rather than with the column.
-        let noteCell = grid.cell(for: buffersNote)
-        noteCell?.xPlacement = .none
-        noteCell?.customPlacementConstraints = [
-            buffersNote.leadingAnchor.constraint(
-                equalTo: buffers.leadingAnchor, constant: 21)
-        ]
-        let scrollbarNoteCell = grid.cell(for: scrollbarNote)
-        scrollbarNoteCell?.xPlacement = .none
-        scrollbarNoteCell?.customPlacementConstraints = [
-            scrollbarNote.leadingAnchor.constraint(
-                equalTo: buffersNote.leadingAnchor)
-        ]
+        for item in [buffersNote, scrollbarNote, cursorTrailGrid] {
+            let cell = grid.cell(for: item)
+            cell?.xPlacement = .none
+            cell?.customPlacementConstraints = [
+                item.leadingAnchor.constraint(
+                    equalTo: buffers.leadingAnchor, constant: 21)
+            ]
+        }
 
         let contentView = NSView()
         contentView.addSubview(grid)
@@ -185,5 +218,62 @@ final class SettingsWindowController: NSWindowController {
         field.setContentCompressionResistancePriority(
             NSLayoutConstraint.Priority(1), for: .horizontal)
         return field
+    }
+
+    /// A continuously bound slider for a cursor trail parameter.
+    private static func cursorTrailSlider(key: String) -> NSSlider {
+        let slider = NSSlider(
+            value: 0,
+            minValue: Settings.cursorTrailMinimumValue,
+            maxValue: Settings.cursorTrailMaximumValue,
+            target: nil,
+            action: nil)
+        slider.isContinuous = true
+        slider.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        let defaults = NSUserDefaultsController.shared
+        slider.bind(
+            .value, to: defaults, withKeyPath: "values.\(key)",
+            options: [.continuouslyUpdatesValue: true])
+        return slider
+    }
+
+    /// Cursor trail sliders in a grid.
+    private static func cursorTrailGrid() -> NSGridView {
+        let length = NSLocalizedString("Length:", comment: "Settings slider")
+        let intens = NSLocalizedString("Intensity:", comment: "Settings slider")
+        let lengthLabel = NSTextField(labelWithString:length)
+        let intensLabel = NSTextField(labelWithString:intens)
+        let lengthSlider = cursorTrailSlider(key: Settings.cursorTrailLengthFractionKey)
+        let intensSlider = cursorTrailSlider(key: Settings.cursorTrailOpacityKey)
+
+        let defaults = NSUserDefaultsController.shared
+        let enabledPath = "values.\(Settings.cursorTrailEnabledKey)"
+        for control in [lengthSlider, intensSlider] {
+            control.bind(.enabled, to: defaults, withKeyPath: enabledPath)
+        }
+        // Slider labels get disabled text color when disabled.
+        let colorTransformer = EnabledLabelColorTransformer()
+        for label in [lengthLabel, intensLabel] {
+            label.bind(.textColor, to: defaults, withKeyPath: enabledPath,
+                       options: [.valueTransformer: colorTransformer])
+        }
+
+        let grid = NSGridView(views: [[intensLabel, intensSlider],
+                                      [lengthLabel, lengthSlider]])
+        grid.rowAlignment = .firstBaseline
+        grid.column(at: 0).xPlacement = .trailing
+        return grid
+    }
+}
+
+/// Maps an enabled binding to AppKit's corresponding control-text color.
+nonisolated private final class EnabledLabelColorTransformer: ValueTransformer {
+    override class func transformedValueClass() -> AnyClass {
+        NSColor.self
+    }
+
+    override func transformedValue(_ value: Any?) -> Any? {
+        let enabled = (value as? NSNumber)?.boolValue ?? false
+        return enabled ? NSColor.labelColor : NSColor.disabledControlTextColor
     }
 }

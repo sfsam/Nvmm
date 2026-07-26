@@ -949,6 +949,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
                 self?.applyTitlebarTransparency()
                 self?.applyScrollbarVisibility()
                 self?.updateProgressIndicator()
+                self?.gridView.applyCursorTrailSettings()
             }
         }
     }
