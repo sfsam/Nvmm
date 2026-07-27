@@ -398,4 +398,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("Nvmm: bundled nvim NOT found (run Scripts/download_nvim.sh)")
         }
     }
+
+    // MARK: - Help menu
+
+    @IBAction func showHomepage(_ sender: Any?) {
+        let url = URL(string: "https://www.mowglii.com/nvmm")!
+        NSWorkspace.shared.open(url)
+    }
 }
