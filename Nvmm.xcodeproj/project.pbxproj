@@ -138,6 +138,7 @@
 				9261A75C300CA65600B23EF8 /* Resources */,
 				9261A7A1300CA65600B23EF8 /* Bundle Neovim */,
 				C10000000000000000000008 /* Embed CLI Helper */,
+				D20000000000000000000001 /* Stamp Neovim Version */,
 			);
 			buildRules = (
 			);
@@ -276,6 +277,23 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "set -e\nSRC=\"$SRCROOT/build/nvim\"\nif [ ! -d \"$SRC\" ]; then\n  echo \"warning: build/nvim missing; run Scripts/download_nvim.sh to bundle Neovim\"\n  exit 0\nfi\nCONTENTS=\"$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH\"\nEXEC_DIR=\"$BUILT_PRODUCTS_DIR/$EXECUTABLE_FOLDER_PATH\"\nmkdir -p \"$EXEC_DIR\" \"$CONTENTS\"\nrm -rf \"$CONTENTS/lib\" \"$CONTENTS/share\" \"$EXEC_DIR/nvim\"\ncp -R \"$SRC/lib\" \"$CONTENTS/lib\"\ncp -R \"$SRC/share\" \"$CONTENTS/share\"\ncp \"$SRC/bin/nvim\" \"$EXEC_DIR/nvim\"\n";
+		};
+		D20000000000000000000001 /* Stamp Neovim Version */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/$(EXECUTABLE_FOLDER_PATH)/nvim",
+				"$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
+			);
+			name = "Stamp Neovim Version";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\n\nnvim_path=\"$BUILT_PRODUCTS_DIR/$EXECUTABLE_FOLDER_PATH/nvim\"\nplist_path=\"$TARGET_BUILD_DIR/$INFOPLIST_PATH\"\n\nif [ ! -x \"$nvim_path\" ]; then\n  echo \"error: bundled Neovim is not executable: $nvim_path\" >&2\n  exit 1\nfi\n\nif [ ! -f \"$plist_path\" ]; then\n  echo \"error: processed Info.plist not found: $plist_path\" >&2\n  exit 1\nfi\n\nversion_output=$(\"$nvim_path\" --version)\nversion_line=$(printf '%s\\n' \"$version_output\" | sed -n '1p')\n\nif ! printf '%s\\n' \"$version_line\" |\n  grep -Eq '^NVIM v[0-9]+\\.[0-9]+\\.[0-9]+([.-][0-9A-Za-z.+-]+)?$'\nthen\n  echo \"error: invalid Neovim version: $version_line\" >&2\n  exit 1\nfi\n\n/usr/libexec/PlistBuddy -c \"Delete :NvimVersion\" \"$plist_path\" \\\n  2>/dev/null || true\n/usr/libexec/PlistBuddy \\\n  -c \"Add :NvimVersion string $version_line\" \"$plist_path\"\n\nstored=$(/usr/libexec/PlistBuddy -c \"Print :NvimVersion\" \"$plist_path\")\nif [ \"$stored\" != \"$version_line\" ]; then\n  echo \"error: failed to record Neovim version in Info.plist\" >&2\n  exit 1\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -456,7 +474,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSMainNibFile = MainMenu;
-				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				INFOPLIST_KEY_NSPrincipalClass = NvmmApplication;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -491,7 +509,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSMainNibFile = MainMenu;
-				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				INFOPLIST_KEY_NSPrincipalClass = NvmmApplication;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
