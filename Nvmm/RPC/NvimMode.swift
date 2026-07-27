@@ -122,3 +122,12 @@ nonisolated func parseNvimMode(_ response: RPCResponse) -> NvimMode {
     else { return .unknown }
     return classifyNvimMode(shortname)
 }
+
+/// Maps a bounded RPC result to the mode behavior menu actions consume.
+nonisolated func parseNvimMode(_ result: RPCSyncResult) -> NvimMode {
+    switch result {
+    case .response(let response): parseNvimMode(response)
+    case .timedOut: .timedOut
+    case .transport: .cancelled
+    }
+}

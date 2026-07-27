@@ -310,6 +310,34 @@ final class NeovimProcessTests: XCTestCase {
         await process.disconnect()
     }
 
+    private func attachLinegridUI(_ process: NeovimProcess) async throws {
+        var options = UIOptions()
+        options.extLinegrid = true
+        let result = await process.uiAttach(
+            width: 80, height: 24, options: options)
+        guard result.status == .success else { throw TestIOError() }
+    }
+
+    private func waitForEditorState(
+        _ process: NeovimProcess,
+        mode: NvimMode,
+        line: String,
+        timeout: Duration = .seconds(2)
+    ) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            let modeReply = try? await process.request("nvim_get_mode")
+            let lineReply = try? await process.request(
+                "nvim_get_current_line")
+            if modeReply.map(parseNvimMode) == mode,
+               lineReply?.result.stringValue == line {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return false
+    }
+
     // MARK: Real-Neovim cases
 
     func testEvalRoundTrip() async throws {
@@ -343,6 +371,58 @@ final class NeovimProcessTests: XCTestCase {
                 return XCTFail("expected .response, got \(result)")
             }
             XCTAssertEqual(response.result, .int(6))
+        }
+    }
+
+    func testUndoRedoReportsBoundariesAndPreservesInsertMode() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            await process.perform(.input("iabc"))
+
+            let firstUndo = await process.performUndoRedo(.undo)
+            XCTAssertEqual(firstUndo, .changed)
+            let undone = await waitForEditorState(
+                process, mode: .insert, line: "")
+            XCTAssertTrue(undone)
+            let oldestUndo = await process.performUndoRedo(.undo)
+            XCTAssertEqual(oldestUndo, .boundary)
+
+            let firstRedo = await process.performUndoRedo(.redo)
+            XCTAssertEqual(firstRedo, .changed)
+            let redone = await waitForEditorState(
+                process, mode: .insert, line: "abc")
+            XCTAssertTrue(redone)
+            let newestRedo = await process.performUndoRedo(.redo)
+            XCTAssertEqual(newestRedo, .boundary)
+        }
+    }
+
+    func testUndoRedoIsUnavailableWithoutAConnection() async {
+        let process = NeovimProcess()
+        let outcome = await process.performUndoRedo(.undo)
+        XCTAssertEqual(outcome, .unavailable)
+    }
+
+    func testRedoReportsBoundaryOnNewUndoBranch() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            _ = try await process.request(
+                "nvim_input", [.string("iabc\u{1b}")])
+            let firstChange = await waitForEditorState(
+                process, mode: .normal, line: "abc")
+            XCTAssertTrue(firstChange)
+            let firstUndo = await process.performUndoRedo(.undo)
+            XCTAssertEqual(firstUndo, .changed)
+
+            _ = try await process.request(
+                "nvim_input", [.string("iX\u{1b}")])
+            let branchChange = await waitForEditorState(
+                process, mode: .normal, line: "X")
+            XCTAssertTrue(branchChange)
+            let branchRedo = await process.performUndoRedo(.redo)
+            XCTAssertEqual(branchRedo, .boundary)
+            let branchUndo = await process.performUndoRedo(.undo)
+            XCTAssertEqual(branchUndo, .changed)
         }
     }
 }

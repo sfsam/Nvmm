@@ -435,10 +435,10 @@ actor NeovimProcess {
         send { $0.encodeNotification(method: method, arguments: arguments) }
     }
 
-    /// Applies one input command as its `nvim_*` notification. Callers funnel
-    /// key, mouse, resize, and focus events through a single ordered channel and
-    /// `perform` here so they reach Neovim in the order the user produced them.
-    func perform(_ command: NvimCommand) {
+    /// Applies one user command. Callers funnel commands through a single
+    /// ordered channel and await `perform` so a result-bearing operation
+    /// finishes before the next command reaches Neovim.
+    func perform(_ command: NvimCommand) async {
         switch command {
         case .input(let text):
             notify("nvim_input", [.string(text)])
@@ -457,6 +457,9 @@ actor NeovimProcess {
             // Mode "n" (no remapping) with K_SPECIAL escaping, so the raw
             // control bytes in `keys` are fed literally.
             notify("nvim_feedkeys", [.string(keys), .string("n"), .bool(true)])
+        case .undoRedo(let action, let reply):
+            let outcome = await performUndoRedo(action)
+            await reply(outcome)
         case .errorWriteln(let text):
             notify("nvim_echo",
                    [.array([.array([.string(text)])]), true,
@@ -476,6 +479,34 @@ actor NeovimProcess {
             notify("nvim_command",
                    [.string(force ? "silent! quitall!" : "silent! quitall")])
         }
+    }
+
+    /// Runs one mode-aware Undo or Redo and observes whether Neovim moved in
+    /// its undo tree.
+    func performUndoRedo(_ action: UndoRedoAction) async -> UndoRedoOutcome {
+        let mode = await mode()
+        guard let keys = action.keys(for: mode),
+              let before = await undoSequence()
+        else { return .unavailable }
+
+        let arguments: [MPValue] = [
+            .string(keys), .string("n"), .bool(true),
+        ]
+        guard let response = try? await request("nvim_feedkeys", arguments),
+              !response.isError,
+              let after = await undoSequence()
+        else { return .unavailable }
+
+        return undoRedoOutcome(before: before, after: after)
+    }
+
+    /// The current position in the current buffer's undo tree.
+    private func undoSequence() async -> MPInteger? {
+        guard let response = try? await request(
+                  "nvim_eval", [.string("undotree().seq_cur")]),
+              !response.isError
+        else { return nil }
+        return response.result.integer
     }
 
     /// Whether any loaded buffer has unsaved changes. Assumes unsaved on an

@@ -362,6 +362,13 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         gridView.sendFeedkeys = { [weak self] keys in
             self?.enqueue(.feedkeys(keys))
         }
+        gridView.sendUndoRedo = { [weak self] action, reply in
+            guard let self else {
+                reply(.unavailable)
+                return
+            }
+            self.enqueue(.undoRedo(action, reply: reply))
+        }
         gridView.fetchCompositionGeometry = { [weak self] in
             await self?.process?.getCompositionGeometry() ?? nil
         }

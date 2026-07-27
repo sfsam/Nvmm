@@ -60,11 +60,7 @@ extension NeovimProcess {
     /// fails is reported as such and reads as busy, so callers refuse to act
     /// rather than send a command into an unknown state.
     func mode(timeout: Duration = .milliseconds(100)) async -> NvimMode {
-        switch await requestBounded("nvim_get_mode", [], timeout: timeout) {
-        case .response(let response): return parseNvimMode(response)
-        case .timedOut: return .timedOut
-        case .transport: return .cancelled
-        }
+        parseNvimMode(await requestBounded("nvim_get_mode", [], timeout: timeout))
     }
 
     /// Issues a request bounded by a deadline, cancelling it if the deadline

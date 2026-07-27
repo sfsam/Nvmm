@@ -111,9 +111,15 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     /// Sends committed text too large or multiline for `nvim_input` as a paste.
     var sendPaste: ((String) -> Void)?
 
-    /// Feeds a raw key sequence to Neovim (`nvim_feedkeys`), for the mode-aware
-    /// copy/paste/cut menu actions.
+    /// Feeds a raw key sequence to Neovim (`nvim_feedkeys`) for mode-aware
+    /// Edit menu actions.
     var sendFeedkeys: ((String) -> Void)?
+
+    /// Runs a mode-aware Undo or Redo in the ordered command stream.
+    var sendUndoRedo: ((
+        UndoRedoAction,
+        @escaping @MainActor @Sendable (UndoRedoOutcome) -> Void
+    ) -> Void)?
 
     /// Fetches the current window's editable-text geometry for preedit layout.
     /// Async so it never blocks the main thread; the reply is generation-checked
@@ -1074,7 +1080,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
 
     override var acceptsFirstResponder: Bool { true }
 
-    // MARK: - Copy / paste menu actions
+    // MARK: - Edit menu actions
 
     // Neovim's current mode, from the latest grid snapshot. The mode drives the
     // clipboard actions and their menu-item enablement; it is already carried on
@@ -1099,6 +1105,28 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         case .visual: sendFeedkeys?("\"+x")
         case .select: sendFeedkeys?("\u{0f}\"+x")
         default: NSSound.beep()
+        }
+    }
+
+    @objc func undo(_ sender: Any?) {
+        guard let sendUndoRedo else {
+            NSSound.beep()
+            return
+        }
+        sendUndoRedo(.undo) { [weak self] outcome in
+            guard self != nil, outcome != .changed else { return }
+            NSSound.beep()
+        }
+    }
+
+    @objc func redo(_ sender: Any?) {
+        guard let sendUndoRedo else {
+            NSSound.beep()
+            return
+        }
+        sendUndoRedo(.redo) { [weak self] outcome in
+            guard self != nil, outcome != .changed else { return }
+            NSSound.beep()
         }
     }
 

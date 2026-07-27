@@ -63,6 +63,18 @@ final class NvimModeTests: XCTestCase {
         XCTAssertEqual(parseNvimMode(reply), .operatorPending)
     }
 
+    func testBoundedModeResultsMapFailuresSafely() {
+        let reply = RPCResponse(
+            error: .null,
+            result: .map([(.string("mode"), .string("i"))]))
+
+        XCTAssertEqual(parseNvimMode(RPCSyncResult.response(reply)), .insert)
+        XCTAssertEqual(parseNvimMode(RPCSyncResult.timedOut), .timedOut)
+        XCTAssertEqual(
+            parseNvimMode(RPCSyncResult.transport(.connectionClosed)),
+            .cancelled)
+    }
+
     /// An RPC error, or a reply without a mode, cannot be trusted as a mode.
     func testMalformedRepliesAreUnknown() {
         let errored = RPCResponse(error: .array([.int(0), .string("boom")]),

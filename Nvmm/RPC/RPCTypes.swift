@@ -11,9 +11,10 @@
 
 import Foundation
 
-/// A user-input command applied to Neovim as a fire-and-forget notification.
+/// A user command applied to Neovim.
+///
 /// Views produce these on the main actor and hand them to the process actor
-/// through one ordered channel, so key, mouse, resize, and focus events reach
+/// through one ordered channel, so input and result-bearing actions reach
 /// Neovim in the order the user produced them. See `NeovimProcess.perform`.
 nonisolated enum NvimCommand: Sendable {
     /// A key-notation payload for `nvim_input`.
@@ -27,10 +28,15 @@ nonisolated enum NvimCommand: Sendable {
     case focus(Bool)
     /// Text pasted at the cursor via `nvim_paste`.
     case paste(String)
-    /// A key sequence fed to Neovim via `nvim_feedkeys`, used for the mode-aware
-    /// copy/paste/cut menu actions. The string holds raw control bytes (e.g.
-    /// `\u{03}` for CTRL-C), not `<C-c>`-style notation.
+    /// A key sequence fed to Neovim via `nvim_feedkeys`, used for mode-aware
+    /// Edit menu actions. The string holds raw control bytes (e.g. `\u{03}` for
+    /// CTRL-C), not `<C-c>`-style notation.
     case feedkeys(String)
+    /// A mode-aware undo-tree operation. The main-actor callback reports
+    /// whether Neovim moved through history.
+    case undoRedo(
+        UndoRedoAction,
+        reply: @MainActor @Sendable (UndoRedoOutcome) -> Void)
     /// An error message written to Neovim via `nvim_echo` (`err: true`).
     case errorWriteln(String)
     /// Put the given one-based line at the top of the window, for the
