@@ -12,7 +12,6 @@
         <customObject id="-1" userLabel="First Responder" customClass="FirstResponder"/>
         <customObject id="-3" userLabel="Application" customClass="NSObject"/>
         <customObject id="Voe-Tx-rLC" customClass="AppDelegate" customModule="Nvmm" customModuleProvider="target"/>
-        <customObject id="YLy-65-1bz" customClass="NSFontManager"/>
         <menu title="Main Menu" systemMenu="main" id="AYu-sK-qS6">
             <items>
                 <menuItem title="Nvmm" id="1Xt-HY-uBw">
@@ -151,16 +150,16 @@
                             <menuItem isSeparatorItem="YES" id="uyl-h8-XO2"/>
                             <menuItem title="Font" id="Gi5-1S-RQB">
                                 <modifierMask key="keyEquivalentModifierMask"/>
-                                <menu key="submenu" title="Font" systemMenu="font" id="aXa-aM-Jaq">
+                                <menu key="submenu" title="Font" id="aXa-aM-Jaq">
                                     <items>
-                                        <menuItem title="Bigger" tag="3" keyEquivalent="+" id="Ptp-SP-VEL">
+                                        <menuItem title="Bigger" keyEquivalent="+" id="Ptp-SP-VEL">
                                             <connections>
-                                                <action selector="modifyFont:" target="YLy-65-1bz" id="Uc7-di-UnL"/>
+                                                <action selector="zoomIn:" target="-1" id="Uc7-di-UnL"/>
                                             </connections>
                                         </menuItem>
-                                        <menuItem title="Smaller" tag="4" keyEquivalent="-" id="i1d-Er-qST">
+                                        <menuItem title="Smaller" keyEquivalent="-" id="i1d-Er-qST">
                                             <connections>
-                                                <action selector="modifyFont:" target="YLy-65-1bz" id="HcX-Lf-eNd"/>
+                                                <action selector="zoomOut:" target="-1" id="HcX-Lf-eNd"/>
                                             </connections>
                                         </menuItem>
                                     </items>

@@ -61,7 +61,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     private var metalLayer: CAMetalLayer!
 
     private var renderContext: RenderContext?
-    private var fontFamily: FontFamily?
+    private(set) var fontFamily: FontFamily?
     private var grid: Grid?
 
     // Cell metrics, in backing pixels unless noted.

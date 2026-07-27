@@ -1153,6 +1153,30 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         saveFrame()
     }
 
+    /// Returns the zoom result, or nil when it crosses the inclusive 6–72
+    /// point range.
+    nonisolated static func zoomedFontSize(_ current: CGFloat,
+                                           delta: CGFloat) -> CGFloat? {
+        let size = current + delta
+        return size >= 6 && size <= 72 ? size : nil
+    }
+
+    private func performZoom(_ delta: CGFloat) {
+        guard let window, let font = gridView.fontFamily else { return }
+        guard let size = Self.zoomedFontSize(font.unscaledSize, delta: delta) else {
+            NSSound.beep()
+            return
+        }
+
+        let resized = renderManager.fontManager.resized(
+            font, size: size, scaleFactor: window.backingScaleFactor)
+        setFont(resized)
+    }
+
+    @IBAction func zoomIn(_ sender: Any?) { performZoom(1) }
+
+    @IBAction func zoomOut(_ sender: Any?) { performZoom(-1) }
+
     // MARK: - Window delegate
 
     // The window is authoritative for size: when it resizes, resize the Neovim

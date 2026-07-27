@@ -7,6 +7,7 @@
 //  texture cache. Tests skip when no Metal device is available.
 //
 
+import CoreText
 import Metal
 import XCTest
 @testable import Nvmm
@@ -46,6 +47,23 @@ final class RenderTests: XCTestCase {
         XCTAssertGreaterThan(family.ascent, 0)
         XCTAssertGreaterThan(family.descent, 0)
         XCTAssertGreaterThan(family.width, 0)
+    }
+
+    func testResizedFontFamilyPreservesFacesAndChangesSize() {
+        let manager = FontManager()
+        let family = manager.family(
+            descriptor: FontManager.defaultDescriptor(), size: 15,
+            scaleFactor: 1)
+        let resized = manager.resized(family, size: 16, scaleFactor: 2)
+        let faces: [FontAttributes] = [.none, .bold, .italic, .boldItalic]
+
+        XCTAssertEqual(resized.unscaledSize, 16)
+        XCTAssertEqual(resized.scaleFactor, 2)
+        XCTAssertEqual(resized.size, 32, accuracy: 0.001)
+        for face in faces {
+            XCTAssertEqual(CTFontCopyPostScriptName(resized.font(face)),
+                           CTFontCopyPostScriptName(family.font(face)))
+        }
     }
 
     func testGlyphManagerRasterizesAndCaches() throws {
