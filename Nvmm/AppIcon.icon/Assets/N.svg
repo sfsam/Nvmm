@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="512px" height="512px" viewBox="0 0 512 512" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <title>icon_</title>
+    <g id="icon_" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
+        <polygon id="Path-31-Copy-7" fill="#448F57" points="88 130 116.566406 200.523438 203.591943 288.150795 308 431 424 381 389.449219 294.117188 308.451378 222.908477 204 80"></polygon>
+        <path d="M234,328.709 L234,401 L118,451 L118,170 L234,120 L338,262.291 L338,390 L408.98,359.405 L338,262.291 L338,190 L454,140 L454,421 L338,471 L234,328.709 Z M234,201 L163.02,231.595 L234,328.709 L234,201 Z" id="Combined-Shape" fill-opacity="0.05" fill="#000000"></path>
+        <path d="M204,288.709 L204,361 L88,411 L88,130 L204,80 L308,222.291 L308,350 L378.98,319.405 L308,222.291 L308,150 L424,100 L424,381 L308,431 L204,288.709 Z M204,161 L133.02,191.595 L204,288.709 L204,161 Z" id="Combined-Shape-Copy" fill="#76C88B"></path>
+    </g>
+</svg>
