@@ -138,6 +138,7 @@
 				9261A75C300CA65600B23EF8 /* Resources */,
 				9261A7A1300CA65600B23EF8 /* Bundle Neovim */,
 				C10000000000000000000008 /* Embed CLI Helper */,
+				920872AD3017F3E5003D1479 /* Create nvim Symlink */,
 				D20000000000000000000001 /* Stamp Neovim Version */,
 			);
 			buildRules = (
@@ -260,6 +261,25 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		920872AD3017F3E5003D1479 /* Create nvim Symlink */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Create nvim Symlink";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\nBIN_DIR=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/bin\"\nmkdir -p \"$BIN_DIR\"\nln -sfn ../MacOS/nvim \"$BIN_DIR/nvim\"\n";
+		};
 		9261A7A1300CA65600B23EF8 /* Bundle Neovim */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
