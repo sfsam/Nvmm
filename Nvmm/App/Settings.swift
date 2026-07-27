@@ -138,9 +138,8 @@ final class SettingsWindowController: NSWindowController {
             NSLocalizedString("Vertical scrollbar", comment: "Settings checkbox"),
             key: Settings.verticalScrollbarKey)
         let scrollbarNote = Self.note(NSLocalizedString(
-            "The scrollbar scrolls by buffer lines, not visual lines, so it "
-                + "may not behave as expected if your text has wrapped lines "
-                + "or lines hidden by folds.",
+            "Scrolls by buffer lines, not visual lines. It may not behave "
+                + "as expected if your text has wrapped lines or folds.",
             comment: "Settings note under the scrollbar checkbox"))
         let cursorTrail = Self.checkbox(
             NSLocalizedString("Cursor trail", comment: "Settings checkbox"),
@@ -174,16 +173,12 @@ final class SettingsWindowController: NSWindowController {
 
         let contentView = NSView()
         contentView.addSubview(grid)
-        NSLayoutConstraint.activate([
-            grid.leadingAnchor.constraint(
-                equalTo: contentView.layoutMarginsGuide.leadingAnchor),
-            grid.trailingAnchor.constraint(
-                equalTo: contentView.layoutMarginsGuide.trailingAnchor),
-            grid.topAnchor.constraint(
-                equalTo: contentView.layoutMarginsGuide.topAnchor),
-            grid.bottomAnchor.constraint(
-                equalTo: contentView.layoutMarginsGuide.bottomAnchor)
-        ])
+        contentView.addConstraints(NSLayoutConstraint.constraints(
+            withVisualFormat: "H:|-[grid]-|", metrics: nil,
+            views: ["grid": grid]))
+        contentView.addConstraints(NSLayoutConstraint.constraints(
+            withVisualFormat: "V:|-[grid]-|", metrics: nil,
+            views: ["grid": grid]))
 
         let panel = NSPanel(contentRect: .zero,
                             styleMask: [.titled, .closable],
