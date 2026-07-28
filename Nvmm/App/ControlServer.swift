@@ -264,6 +264,11 @@ private final class ControlConnection {
             return
         }
         data.append(0x0a)
+        // One write suffices. A connection sends at most two short responses
+        // - an acknowledgement and, for a held connection, its close - and an
+        // error response is terminal, so what one connection writes cannot
+        // approach the socket's send buffer. A short write therefore means
+        // the peer is gone rather than that the buffer is full.
         let count = data.withUnsafeBytes {
             Darwin.write(descriptor, $0.baseAddress, $0.count)
         }
