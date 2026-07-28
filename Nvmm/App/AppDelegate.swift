@@ -34,6 +34,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // setting sees the registered value rather than a bare `false`.
     func applicationWillFinishLaunching(_ notification: Notification) {
         Settings.registerDefaults()
+        // A test host must not serve the CLI endpoint. It shares the endpoint
+        // path with an interactive build, so whichever binds second runs
+        // without a control channel; and the test runner ends the host without
+        // a quit, so the socket outlives it.
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["XCTestConfigurationFilePath"] == nil else { return }
         do {
             controlServer = try ControlServer { [weak self] request, channel in
                 self?.handleCLIRequest(request, channel: channel)
