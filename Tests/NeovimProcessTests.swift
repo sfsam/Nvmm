@@ -46,7 +46,7 @@ final class NeovimProcessTests: XCTestCase {
     private func readMessage(_ fd: Int32) throws -> MPValue {
         var unpacker = MessagePackUnpacker()
         var buffer = [UInt8](repeating: 0, count: 4096)
-        for _ in 0..<64 {
+        for _ in 0..<1_024 {
             let count = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
             if count <= 0 { break }
             unpacker.feed(buffer[0..<count])
@@ -127,6 +127,62 @@ final class NeovimProcessTests: XCTestCase {
         var iterator = pair.stream.makeAsyncIterator()
         let received = await iterator.next()
         XCTAssertNil(received)
+    }
+
+    func testPasteChunksPreserveUnicodeAtByteBoundaries() {
+        let text = "ab🙂cdéfg"
+        let chunks = pasteChunks(text, maximumBytes: 5)
+
+        XCTAssertEqual(chunks.joined(), text)
+        XCTAssertTrue(chunks.allSatisfy { $0.utf8.count <= 5 })
+    }
+
+    func testEmptyPasteRemainsOneChunk() {
+        XCTAssertEqual(pasteChunks("", maximumBytes: 4), [""])
+    }
+
+    func testLargePasteUsesSequentialRequests() async throws {
+        let (client, peer) = try makeSocketPair()
+        defer { close(peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: client, writeFD: client)
+        let queueLimit =
+            RPCResourceLimits.production.maximumOutboundQueuedBytes
+        let text = String(repeating: "🙂", count: (queueLimit / 4) + 1)
+        XCTAssertGreaterThan(text.utf8.count, queueLimit)
+        let chunkCount =
+            (text.utf8.count + nvimPasteChunkBytes - 1)
+            / nvimPasteChunkBytes
+
+        let paste = Task { await process.perform(.paste(text)) }
+        var received: [String] = []
+        var phases: [Int64] = []
+        for _ in 0..<chunkCount {
+            let message = try readMessage(peer)
+            guard case .array(let values) = message, values.count == 4,
+                  let id = values[1].integer?.unsigned,
+                  values[2].stringValue == "nvim_paste",
+                  let arguments = values[3].arrayValue,
+                  let chunk = arguments[0].stringValue,
+                  let phase = arguments[2].integer?.signed
+            else {
+                return XCTFail("invalid nvim_paste request: \(message)")
+            }
+            received.append(chunk)
+            phases.append(phase)
+
+            var response = MessagePackWriter()
+            response.encodeResponse(id: id, error: .null, result: true)
+            try writeAll(peer, response.bytes)
+        }
+        await paste.value
+
+        XCTAssertEqual(received.joined(), text)
+        XCTAssertEqual(phases.count, 17)
+        XCTAssertEqual(phases.first, 1)
+        XCTAssertEqual(phases.last, 3)
+        XCTAssertTrue(phases.dropFirst().dropLast().allSatisfy { $0 == 2 })
+        await process.disconnect()
     }
 
     func testRequestSyncTimesOut() async throws {

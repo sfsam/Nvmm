@@ -122,6 +122,32 @@ nonisolated enum RequestOutcome: Sendable {
 typealias RequestHandler =
     @MainActor @Sendable (_ arguments: [MPValue]) async -> RequestOutcome
 
+/// The maximum UTF-8 payload in one streaming `nvim_paste` request.
+nonisolated let nvimPasteChunkBytes = 256 << 10
+
+/// Splits text at valid UTF-8 boundaries without changing its contents.
+///
+/// Neovim's streaming paste protocol consumes these chunks sequentially. The
+/// empty string remains one chunk so it still represents a real paste request.
+nonisolated func pasteChunks(_ text: String, maximumBytes: Int) -> [String] {
+    precondition(maximumBytes > 0)
+    if text.utf8.count <= maximumBytes { return [text] }
+
+    var chunks: [String] = []
+    var start = text.startIndex
+    while start < text.endIndex {
+        var end = text.utf8.index(
+            start, offsetBy: maximumBytes, limitedBy: text.endIndex)
+            ?? text.endIndex
+        while String.Index(end, within: text) == nil {
+            end = text.utf8.index(before: end)
+        }
+        chunks.append(String(text[start..<end]))
+        start = end
+    }
+    return chunks
+}
+
 /// A failure to spawn a child process or connect a socket. `code` is an errno.
 nonisolated struct NeovimSpawnError: Error, Sendable {
     /// The errno reported by the failing operation.

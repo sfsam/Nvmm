@@ -452,7 +452,7 @@ actor NeovimProcess {
         case .focus(let focused):
             notify("nvim_ui_set_focus", [.bool(focused)])
         case .paste(let data):
-            notify("nvim_paste", [.string(data), false, -1])
+            await paste(data)
         case .feedkeys(let keys):
             // Mode "n" (no remapping) with K_SPECIAL escaping, so the raw
             // control bytes in `keys` are fed literally.
@@ -478,6 +478,31 @@ actor NeovimProcess {
             // press-a-key prompt into the editor.
             notify("nvim_command",
                    [.string(force ? "silent! quitall!" : "silent! quitall")])
+        }
+    }
+
+    /// Streams a paste through result-bearing requests. Keeping each request
+    /// bounded and awaiting its response prevents a large clipboard value from
+    /// overflowing the transport's finite outbound queue.
+    private func paste(_ data: String) async {
+        let chunks = pasteChunks(data, maximumBytes: nvimPasteChunkBytes)
+        for (index, chunk) in chunks.enumerated() {
+            let phase: Int
+            if chunks.count == 1 {
+                phase = -1
+            } else if index == 0 {
+                phase = 1
+            } else if index == chunks.count - 1 {
+                phase = 3
+            } else {
+                phase = 2
+            }
+
+            guard let response = try? await request(
+                "nvim_paste",
+                [.string(chunk), false, .int(MPInteger(phase))]),
+                  !response.isError, response.result.boolValue == true
+            else { return }
         }
     }
 
