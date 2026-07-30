@@ -15,19 +15,19 @@ final class AboutPanelTests: XCTestCase {
         let credits = NvmmApplication.aboutCredits(
             nvimVersion: "NVIM v0.12.4")
 
-        XCTAssertEqual(credits.string, "NVIM v0.12.4\n\nmowglii.com")
-        let linkRange = (credits.string as NSString).range(of: "mowglii.com")
+        XCTAssertEqual(credits.string, "NVIM v0.12.4\n\nmowglii.com/nvmm\n")
+        let linkRange = (credits.string as NSString).range(of: "mowglii.com/nvmm")
         let link = credits.attribute(.link, at: linkRange.location,
                                      effectiveRange: nil) as? URL
-        XCTAssertEqual(link, URL(string: "https://mowglii.com"))
+        XCTAssertEqual(link, URL(string: "https://mowglii.com/nvmm"))
     }
 
     func testCreditsOmitMissingVersion() {
         let missing = NvmmApplication.aboutCredits(nvimVersion: nil)
         let empty = NvmmApplication.aboutCredits(nvimVersion: "")
 
-        XCTAssertEqual(missing.string, "mowglii.com")
-        XCTAssertEqual(empty.string, "mowglii.com")
+        XCTAssertEqual(missing.string, "mowglii.com/nvmm\n")
+        XCTAssertEqual(empty.string, "mowglii.com/nvmm\n")
     }
 
     func testCreditsAreCenteredAndUseSmallSystemFont() {
