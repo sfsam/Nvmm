@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		C10000000000000000000001 /* Nvmm/App/CLIProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000003 /* Nvmm/App/CLIProtocol.swift */; };
 		C10000000000000000000002 /* nvmm in Embed CLI Helper */ = {isa = PBXBuildFile; fileRef = C10000000000000000000004 /* nvmm */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		E10000000000000000000002 /* build/nvim/Neovim-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000001 /* build/nvim/Neovim-LICENSE.txt */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -48,6 +49,7 @@
 		C10000000000000000000003 /* Nvmm/App/CLIProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Nvmm/App/CLIProtocol.swift; sourceTree = SOURCE_ROOT; };
 		C10000000000000000000004 /* nvmm */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = nvmm; sourceTree = BUILT_PRODUCTS_DIR; };
 		D30000000000000000000001 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/Signing.xcconfig; sourceTree = SOURCE_ROOT; };
+		E10000000000000000000001 /* build/nvim/Neovim-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "build/nvim/Neovim-LICENSE.txt"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -114,6 +116,7 @@
 				C10000000000000000000006 /* Tools */,
 				C10000000000000000000003 /* Nvmm/App/CLIProtocol.swift */,
 				D30000000000000000000001 /* Signing.xcconfig */,
+				E10000000000000000000001 /* build/nvim/Neovim-LICENSE.txt */,
 				9261A75F300CA65600B23EF8 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -250,6 +253,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E10000000000000000000002 /* build/nvim/Neovim-LICENSE.txt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
