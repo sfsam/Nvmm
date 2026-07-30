@@ -1,0 +1,10 @@
+// Shared signing defaults.
+//
+// These values produce an ad-hoc signature without an Apple Developer
+// account. Developer-specific values belong in Signing.local.xcconfig.
+
+DEVELOPMENT_TEAM =
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = -
+
+#include? "Signing.local.xcconfig"

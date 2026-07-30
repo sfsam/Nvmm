@@ -6,4 +6,7 @@ xcuserdata/
 *.xcuserstate
 DerivedData/
 
+# Developer-specific code-signing settings
+/Config/Signing.local.xcconfig
+
 .DS_Store

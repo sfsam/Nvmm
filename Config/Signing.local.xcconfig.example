@@ -1,0 +1,14 @@
+// Copy this file to Signing.local.xcconfig in this directory.
+//
+// Signing.local.xcconfig is ignored by Git. Never commit account-specific
+// signing values to the project.
+
+// Apple Development signing:
+DEVELOPMENT_TEAM = XXXXXXXXXX
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = Apple Development
+
+// Developer ID signing for a notarized release:
+// DEVELOPMENT_TEAM = XXXXXXXXXX
+// CODE_SIGN_STYLE = Manual
+// CODE_SIGN_IDENTITY = Developer ID Application
