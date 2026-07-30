@@ -10,6 +10,9 @@
 		C10000000000000000000001 /* Nvmm/App/CLIProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000003 /* Nvmm/App/CLIProtocol.swift */; };
 		C10000000000000000000002 /* nvmm in Embed CLI Helper */ = {isa = PBXBuildFile; fileRef = C10000000000000000000004 /* nvmm */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		E10000000000000000000002 /* build/nvim/Neovim-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000001 /* build/nvim/Neovim-LICENSE.txt */; };
+		F10000000000000000000001 /* build/nvim/bin/nvim in Copy Neovim Executable */ = {isa = PBXBuildFile; fileRef = F10000000000000000000006 /* build/nvim/bin/nvim */; };
+		F10000000000000000000002 /* build/nvim/lib in Copy Neovim Support */ = {isa = PBXBuildFile; fileRef = F10000000000000000000007 /* build/nvim/lib */; };
+		F10000000000000000000003 /* build/nvim/share in Copy Neovim Support */ = {isa = PBXBuildFile; fileRef = F10000000000000000000008 /* build/nvim/share */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -41,6 +44,29 @@
 			name = "Embed CLI Helper";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		F10000000000000000000004 /* Copy Neovim Support */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = Contents;
+			dstSubfolderSpec = 1;
+			files = (
+				F10000000000000000000002 /* build/nvim/lib in Copy Neovim Support */,
+				F10000000000000000000003 /* build/nvim/share in Copy Neovim Support */,
+			);
+			name = "Copy Neovim Support";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F10000000000000000000005 /* Copy Neovim Executable */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 6;
+			files = (
+				F10000000000000000000001 /* build/nvim/bin/nvim in Copy Neovim Executable */,
+			);
+			name = "Copy Neovim Executable";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
@@ -50,6 +76,10 @@
 		C10000000000000000000004 /* nvmm */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = nvmm; sourceTree = BUILT_PRODUCTS_DIR; };
 		D30000000000000000000001 /* Config/Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/Signing.xcconfig; sourceTree = SOURCE_ROOT; };
 		E10000000000000000000001 /* build/nvim/Neovim-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "build/nvim/Neovim-LICENSE.txt"; sourceTree = SOURCE_ROOT; };
+		F10000000000000000000006 /* build/nvim/bin/nvim */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; path = build/nvim/bin/nvim; sourceTree = SOURCE_ROOT; };
+		F10000000000000000000007 /* build/nvim/lib */ = {isa = PBXFileReference; lastKnownFileType = folder; path = build/nvim/lib; sourceTree = SOURCE_ROOT; };
+		F10000000000000000000008 /* build/nvim/share */ = {isa = PBXFileReference; lastKnownFileType = folder; path = build/nvim/share; sourceTree = SOURCE_ROOT; };
+		F10000000000000000000009 /* Config/Neovim.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Config/Neovim.entitlements; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -116,6 +146,10 @@
 				C10000000000000000000006 /* Tools */,
 				C10000000000000000000003 /* Nvmm/App/CLIProtocol.swift */,
 				D30000000000000000000001 /* Config/Signing.xcconfig */,
+				F10000000000000000000009 /* Config/Neovim.entitlements */,
+				F10000000000000000000006 /* build/nvim/bin/nvim */,
+				F10000000000000000000007 /* build/nvim/lib */,
+				F10000000000000000000008 /* build/nvim/share */,
 				E10000000000000000000001 /* build/nvim/Neovim-LICENSE.txt */,
 				9261A75F300CA65600B23EF8 /* Products */,
 			);
@@ -141,7 +175,9 @@
 				9261A75A300CA65600B23EF8 /* Sources */,
 				9261A75B300CA65600B23EF8 /* Frameworks */,
 				9261A75C300CA65600B23EF8 /* Resources */,
-				9261A7A1300CA65600B23EF8 /* Bundle Neovim */,
+				F10000000000000000000004 /* Copy Neovim Support */,
+				F10000000000000000000005 /* Copy Neovim Executable */,
+				F10000000000000000000010 /* Sign Bundled Neovim */,
 				C10000000000000000000008 /* Embed CLI Helper */,
 				920872AD3017F3E5003D1479 /* Create nvim Symlink */,
 				D20000000000000000000001 /* Stamp Neovim Version */,
@@ -286,24 +322,6 @@
 			shellPath = /bin/sh;
 			shellScript = "set -e\nBIN_DIR=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/bin\"\nmkdir -p \"$BIN_DIR\"\nln -sfn ../MacOS/nvim \"$BIN_DIR/nvim\"\n";
 		};
-		9261A7A1300CA65600B23EF8 /* Bundle Neovim */ = {
-			isa = PBXShellScriptBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputPaths = (
-				"$(SRCROOT)/build/nvim",
-			);
-			name = "Bundle Neovim";
-			outputPaths = (
-				"$(BUILT_PRODUCTS_DIR)/$(EXECUTABLE_FOLDER_PATH)/nvim",
-				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/lib",
-				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/share",
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "set -e\nSRC=\"$SRCROOT/build/nvim\"\nif [ ! -d \"$SRC\" ]; then\n  echo \"warning: build/nvim missing; run Scripts/download_nvim.sh to bundle Neovim\"\n  exit 0\nfi\nCONTENTS=\"$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH\"\nEXEC_DIR=\"$BUILT_PRODUCTS_DIR/$EXECUTABLE_FOLDER_PATH\"\nmkdir -p \"$EXEC_DIR\" \"$CONTENTS\"\nrm -rf \"$CONTENTS/lib\" \"$CONTENTS/share\" \"$EXEC_DIR/nvim\"\ncp -R \"$SRC/lib\" \"$CONTENTS/lib\"\ncp -R \"$SRC/share\" \"$CONTENTS/share\"\ncp \"$SRC/bin/nvim\" \"$EXEC_DIR/nvim\"\n";
-		};
 		D20000000000000000000001 /* Stamp Neovim Version */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
@@ -320,6 +338,25 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "set -eu\n\nnvim_path=\"$BUILT_PRODUCTS_DIR/$EXECUTABLE_FOLDER_PATH/nvim\"\nplist_path=\"$TARGET_BUILD_DIR/$INFOPLIST_PATH\"\n\nif [ ! -x \"$nvim_path\" ]; then\n  echo \"error: bundled Neovim is not executable: $nvim_path\" >&2\n  exit 1\nfi\n\nif [ ! -f \"$plist_path\" ]; then\n  echo \"error: processed Info.plist not found: $plist_path\" >&2\n  exit 1\nfi\n\nversion_output=$(\"$nvim_path\" --version)\nversion_line=$(printf '%s\\n' \"$version_output\" | sed -n '1p')\n\nif ! printf '%s\\n' \"$version_line\" |\n  grep -Eq '^NVIM v[0-9]+\\.[0-9]+\\.[0-9]+([.-][0-9A-Za-z.+-]+)?$'\nthen\n  echo \"error: invalid Neovim version: $version_line\" >&2\n  exit 1\nfi\n\n/usr/libexec/PlistBuddy -c \"Delete :NvimVersion\" \"$plist_path\" \\\n  2>/dev/null || true\n/usr/libexec/PlistBuddy \\\n  -c \"Add :NvimVersion string $version_line\" \"$plist_path\"\n\nstored=$(/usr/libexec/PlistBuddy -c \"Print :NvimVersion\" \"$plist_path\")\nif [ \"$stored\" != \"$version_line\" ]; then\n  echo \"error: failed to record Neovim version in Info.plist\" >&2\n  exit 1\nfi\n";
+		};
+		F10000000000000000000010 /* Sign Bundled Neovim */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/lib",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/share",
+				"$(BUILT_PRODUCTS_DIR)/$(EXECUTABLE_FOLDER_PATH)/nvim",
+				"$(SRCROOT)/Config/Neovim.entitlements",
+			);
+			name = "Sign Bundled Neovim";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\n\nif [ \"${CODE_SIGNING_ALLOWED:-NO}\" != \"YES\" ]; then\n  exit 0\nfi\n\nidentity=\"${EXPANDED_CODE_SIGN_IDENTITY:-}\"\nif [ -z \"$identity\" ]; then\n  exit 0\nfi\n\ncontents=\"$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH\"\nnvim=\"$BUILT_PRODUCTS_DIR/$EXECUTABLE_FOLDER_PATH/nvim\"\nentitlements=\"$SRCROOT/Config/Neovim.entitlements\"\n\nif [ ! -f \"$entitlements\" ]; then\n  echo \"error: missing Neovim entitlements: $entitlements\" >&2\n  exit 1\nfi\n\nif [ ! -x \"$nvim\" ]; then\n  echo \"error: missing bundled Neovim executable: $nvim\" >&2\n  exit 1\nfi\n\nsign_without_entitlements() {\n  file=\"$1\"\n\n  if [ \"$CONFIGURATION\" = \"Release\" ] && [ \"$identity\" != \"-\" ]; then\n    /usr/bin/codesign --force --sign \"$identity\" --options runtime \\\n      --timestamp \"$file\"\n  else\n    /usr/bin/codesign --force --sign \"$identity\" --options runtime \\\n      --timestamp=none \"$file\"\n  fi\n}\n\nfor root in \"$contents/lib\" \"$contents/share\"; do\n  if [ ! -d \"$root\" ]; then\n    echo \"error: missing bundled Neovim directory: $root\" >&2\n    exit 1\n  fi\n\n  find \"$root\" -type f | while IFS= read -r file; do\n    case \"$(/usr/bin/file -b \"$file\")\" in\n      Mach-O*) sign_without_entitlements \"$file\" ;;\n    esac\n  done\ndone\n\nif [ \"$CONFIGURATION\" = \"Release\" ] && [ \"$identity\" != \"-\" ]; then\n  /usr/bin/codesign --force --sign \"$identity\" --options runtime \\\n    --timestamp --entitlements \"$entitlements\" \"$nvim\"\nelse\n  /usr/bin/codesign --force --sign \"$identity\" --options runtime \\\n    --timestamp=none --entitlements \"$entitlements\" \"$nvim\"\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -496,6 +533,7 @@
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Config/Nvmm-Info.plist";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "© 2026 mowglii.com";
 				INFOPLIST_KEY_NSMainNibFile = MainMenu;
 				INFOPLIST_KEY_NSPrincipalClass = NvmmApplication;
@@ -529,6 +567,7 @@
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Config/Nvmm-Info.plist";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "© 2026 mowglii.com";
 				INFOPLIST_KEY_NSMainNibFile = MainMenu;
 				INFOPLIST_KEY_NSPrincipalClass = NvmmApplication;
@@ -603,6 +642,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 15.7;
 				PRODUCT_MODULE_NAME = NvmmCLI;
 				PRODUCT_NAME = nvmm;
+				SKIP_INSTALL = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
@@ -617,6 +657,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 15.7;
 				PRODUCT_MODULE_NAME = NvmmCLI;
 				PRODUCT_NAME = nvmm;
+				SKIP_INSTALL = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
