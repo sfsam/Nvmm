@@ -48,7 +48,7 @@
 		9261A7B1300CA65600B23EF8 /* NvmmTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NvmmTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		C10000000000000000000003 /* Nvmm/App/CLIProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Nvmm/App/CLIProtocol.swift; sourceTree = SOURCE_ROOT; };
 		C10000000000000000000004 /* nvmm */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = nvmm; sourceTree = BUILT_PRODUCTS_DIR; };
-		D30000000000000000000001 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/Signing.xcconfig; sourceTree = SOURCE_ROOT; };
+		D30000000000000000000001 /* Config/Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/Signing.xcconfig; sourceTree = SOURCE_ROOT; };
 		E10000000000000000000001 /* build/nvim/Neovim-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "build/nvim/Neovim-LICENSE.txt"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
@@ -115,7 +115,7 @@
 				9261A7B2300CA65600B23EF8 /* Tests */,
 				C10000000000000000000006 /* Tools */,
 				C10000000000000000000003 /* Nvmm/App/CLIProtocol.swift */,
-				D30000000000000000000001 /* Signing.xcconfig */,
+				D30000000000000000000001 /* Config/Signing.xcconfig */,
 				E10000000000000000000001 /* build/nvim/Neovim-LICENSE.txt */,
 				9261A75F300CA65600B23EF8 /* Products */,
 			);
@@ -364,7 +364,7 @@
 /* Begin XCBuildConfiguration section */
 		9261A768300CA65800B23EF8 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = D30000000000000000000001 /* Signing.xcconfig */;
+			baseConfigurationReference = D30000000000000000000001 /* Config/Signing.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ARCHS = arm64;
@@ -429,7 +429,7 @@
 		};
 		9261A769300CA65800B23EF8 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = D30000000000000000000001 /* Signing.xcconfig */;
+			baseConfigurationReference = D30000000000000000000001 /* Config/Signing.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ARCHS = arm64;
