@@ -364,11 +364,18 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
 
     private func launch() {
         guard let window else {
-            resolveStartup(.failed("Could not create an editor window."))
+            let reason = "Could not create an editor window."
+            Log.app.error("\(reason, privacy: .public)")
+            resolveStartup(.failed(reason))
+            presentError("Could Not Open an Editor Window", detail: reason)
+            handleDisconnect()
             return
         }
         guard let screen = window.screen ?? NSScreen.main else {
-            resolveStartup(.failed("No display is available."))
+            let reason = "No display is available."
+            Log.app.error("\(reason, privacy: .public)")
+            resolveStartup(.failed(reason))
+            presentError("Could Not Open an Editor Window", detail: reason)
             handleDisconnect()
             return
         }
@@ -378,8 +385,10 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
             context = try renderManager.renderContext(for: screen)
         } catch {
             Log.rendering.error("Could not create a Metal context: \(error)")
-            resolveStartup(.failed("Could not initialize Metal: "
-                                   + error.localizedDescription))
+            let reason = "Could not initialize Metal: "
+                + error.localizedDescription
+            resolveStartup(.failed(reason))
+            presentError("Could Not Open an Editor Window", detail: reason)
             handleDisconnect()
             return
         }
@@ -681,7 +690,10 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         case .spawn:
             guard let nvimPath = NeovimBundle.executableURL?.path else {
                 Log.app.error("Bundled Neovim executable not found")
-                resolveStartup(.failed("Bundled Neovim executable not found."))
+                let reason = "The bundled Neovim executable is missing. "
+                    + "Reinstall Nvmm."
+                resolveStartup(.failed(reason))
+                presentError("Nvmm Is Incomplete or Damaged", detail: reason)
                 handleDisconnect()
                 return
             }
@@ -760,9 +772,12 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
                     return
                 }
                 if let address = self?.remoteAddress {
-                    self?.presentConnectionError(
+                    self?.presentError(
                         "Could not connect to a Neovim server at “\(address)”.",
                         detail: reason)
+                } else {
+                    self?.presentError(
+                        "Could Not Start Neovim", detail: reason)
                 }
                 self?.handleDisconnect()
                 return
@@ -776,9 +791,12 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
             guard result.status == .success else {
                 Log.rpc.error("Neovim UI attach failed: \(result.message)")
                 if let address = self?.remoteAddress {
-                    self?.presentConnectionError(
+                    self?.presentError(
                         "Connected to “\(address)”, but attaching a UI failed.",
                         detail: result.message)
+                } else {
+                    self?.presentError("Could Not Attach the Neovim UI",
+                                       detail: result.message)
                 }
                 self?.handleDisconnect()
                 return
@@ -839,13 +857,12 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
                 if let detail = exitDetail {
                     Log.rpc.error(
                         "Neovim exited unexpectedly: \(detail, privacy: .public)")
-                    self.presentConnectionError(
+                    self.presentError(
                         "Neovim Exited Unexpectedly",
                         detail: detail + " Any unsaved changes in that "
                             + "session may have been lost.")
                 } else if let detail = transportDetail {
-                    self.presentConnectionError(
-                        "Neovim Connection Ended", detail: detail)
+                    self.presentError("Neovim Connection Ended", detail: detail)
                 }
                 self.handleDisconnect()
             }
@@ -893,7 +910,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
                                    reason: String) {
         connectFallback = nil
         if let failedAddress = remoteAddress {
-            presentConnectionError(
+            presentError(
                 "Could not connect to a Neovim server at “\(failedAddress)”.",
                 detail: reason + "\n\nStaying attached to the current session.")
         }
@@ -953,14 +970,16 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     private func handleDisconnect() {
         guard !hasExited else { return }
         hasExited = true
-        window?.close()
+        if let window {
+            window.close()
+        } else {
+            coordinator?.deregister(self)
+        }
     }
 
-    /// Reports a failed connection to a remote Neovim, whose window never
-    /// opened. App-modal rather than a sheet, since there is no visible window
-    /// to attach to. Only the remote path calls this; a spawn failure is an
-    /// internal error (a missing bundle), logged but not surfaced.
-    private func presentConnectionError(_ message: String, detail: String) {
+    /// Reports a failure app-modally because the affected window may not be
+    /// visible or may be about to close.
+    private func presentError(_ message: String, detail: String) {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = message
