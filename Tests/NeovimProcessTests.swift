@@ -17,6 +17,21 @@ final class NeovimProcessTests: XCTestCase {
 
     private struct TestIOError: Error {}
 
+    func testTransportErrorDescriptions() {
+        XCTAssertEqual(
+            RPCTransportError.connectionClosed.description,
+            "connection closed")
+        XCTAssertEqual(
+            RPCTransportError.readFailed(errno: 5).description,
+            "read failed (errno 5)")
+        XCTAssertEqual(
+            RPCTransportError.writeFailed(errno: 32).description,
+            "write failed (errno 32)")
+        XCTAssertEqual(
+            RPCTransportError.protocolViolation.description,
+            "protocol violation")
+    }
+
     // MARK: Controlled-peer helpers
 
     /// A connected socket pair: the client end is handed to the process, the peer

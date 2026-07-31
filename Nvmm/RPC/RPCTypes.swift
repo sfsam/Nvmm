@@ -84,6 +84,17 @@ nonisolated enum RPCTransportError: Error, Sendable, Equatable {
     case protocolViolation
 }
 
+extension RPCTransportError: CustomStringConvertible {
+    var description: String {
+        switch self {
+        case .connectionClosed: "connection closed"
+        case .readFailed(let error): "read failed (errno \(error))"
+        case .writeFailed(let error): "write failed (errno \(error))"
+        case .protocolViolation: "protocol violation"
+        }
+    }
+}
+
 /// An error thrown by an asynchronous `request`.
 nonisolated enum RPCError: Error, Sendable {
     /// The request deadline elapsed before a response arrived.

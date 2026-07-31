@@ -19,6 +19,7 @@
 
 import Darwin
 import Foundation
+import os
 
 @MainActor
 final class CLIResponseChannel {
@@ -179,8 +180,10 @@ final class ControlServer {
                 // for this run rather than freeze the editor. Recovering it
                 // would cost more code than a process this sick is worth.
                 if errno == EMFILE || errno == ENFILE {
-                    NSLog("Nvmm: no descriptors for the control socket;"
-                          + " command-line requests are disabled")
+                    Log.control.error("""
+                        No descriptors for control socket; \
+                        CLI requests disabled
+                        """)
                     disableListener()
                 }
                 return

@@ -19,6 +19,7 @@
 
 import Cocoa
 import CoreText
+import os
 
 /// Whether a window reached its Neovim transport or failed before it could.
 ///
@@ -327,7 +328,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         do {
             context = try renderManager.renderContext(for: screen)
         } catch {
-            NSLog("Nvmm: no Metal render context: \(error)")
+            Log.rendering.error("Could not create a Metal context: \(error)")
             resolveStartup(.failed("Could not initialize Metal: "
                                    + error.localizedDescription))
             handleDisconnect()
@@ -630,7 +631,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         switch source {
         case .spawn:
             guard let nvimPath = NeovimBundle.executableURL?.path else {
-                NSLog("Nvmm: bundled nvim not found")
+                Log.app.error("Bundled Neovim executable not found")
                 resolveStartup(.failed("Bundled Neovim executable not found."))
                 handleDisconnect()
                 return
@@ -689,7 +690,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
                 }
                 self?.resolveStartup(.started)
             } catch {
-                NSLog("Nvmm: failed to start nvim: \(error)")
+                Log.rpc.error("Could not start Neovim: \(error)")
                 let code = (error as? NeovimSpawnError)?.code
                 if let kind = self?.lastHandoffKind, let code,
                    handoffConnectionErrorIsStale(kind, code) {
@@ -724,7 +725,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
                 width: columns, height: rows, options: options)
 
             guard result.status == .success else {
-                NSLog("Nvmm: UI attach failed: \(result.message)")
+                Log.rpc.error("Neovim UI attach failed: \(result.message)")
                 if let address = self?.remoteAddress {
                     self?.presentConnectionError(
                         "Connected to “\(address)”, but attaching a UI failed.",

@@ -29,8 +29,6 @@ func committedString(_ value: Any) -> String? {
     return nil
 }
 
-private let compositionLog = Logger(subsystem: "Nvmm", category: "textinput")
-
 /// Reads the current Carbon input source to classify a marked-text session as a
 /// dead-key keyboard layout or a full IME. Captured once per session.
 private func currentCompositionKind() -> CompositionKind {
@@ -296,15 +294,18 @@ private func logUnsupportedReplacementRange(_ range: NSRange) {
     if range.location == NSNotFound || range == NSRange(location: 0, length: 0) {
         return
     }
-    compositionLog.info("""
+    Log.textInput.info("""
         Committed text used unsupported replacement range - \
-        Location=\(range.location) Length=\(range.length)
+        Location=\(range.location, privacy: .public) \
+        Length=\(range.length, privacy: .public)
         """)
 }
 
 private func logInvalidMarkedReplacementRange(_ range: NSRange, markedLength: Int) {
-    compositionLog.info("""
-        Marked text used invalid replacement range - Location=\(range.location) \
-        Length=\(range.length) MarkedLength=\(markedLength)
+    Log.textInput.info("""
+        Marked text used invalid replacement range - \
+        Location=\(range.location, privacy: .public) \
+        Length=\(range.length, privacy: .public) \
+        MarkedLength=\(markedLength, privacy: .public)
         """)
 }

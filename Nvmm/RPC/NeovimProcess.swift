@@ -23,6 +23,7 @@
 
 import Darwin
 import Foundation
+import os
 
 // MARK: - Inbound events
 
@@ -793,6 +794,14 @@ actor NeovimProcess {
 
     private func finishDisconnect(_ error: RPCTransportError) {
         guard state != .closed else { return }
+        switch error {
+        case .connectionClosed:
+            Log.rpc.info(
+                "RPC transport closed: \(error.description, privacy: .public)")
+        case .readFailed, .writeFailed, .protocolViolation:
+            Log.rpc.error(
+                "RPC transport closed: \(error.description, privacy: .public)")
+        }
         state = .closed
 
         for (_, task) in timeouts { task.cancel() }
@@ -1007,10 +1016,11 @@ extension NeovimProcess {
         do {
             let response = try await request("nvim_exec_lua", [.string(lua), .array([])])
             if response.isError {
-                NSLog("Nvmm: clipboard provider setup failed: \(response.error)")
+                let detail = String(describing: response.error)
+                Log.rpc.error("Clipboard provider setup failed: \(detail)")
             }
         } catch {
-            NSLog("Nvmm: clipboard provider setup failed: \(error)")
+            Log.rpc.error("Clipboard provider setup failed: \(error)")
         }
     }
 

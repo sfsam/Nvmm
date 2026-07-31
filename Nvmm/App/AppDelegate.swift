@@ -4,6 +4,7 @@
 //
 
 import Cocoa
+import os
 
 @main
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -45,9 +46,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.handleCLIRequest(request, channel: channel)
             }
         } catch let error as CLIError {
-            NSLog("Nvmm: control server unavailable: \(error.message)")
+            Log.control.error("Control server unavailable: \(error.message)")
         } catch {
-            NSLog("Nvmm: control server unavailable: \(error)")
+            Log.control.error("Control server unavailable: \(error)")
         }
     }
 
@@ -394,14 +395,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func logUTF8ProcVersion() {
         // Calls into the vendored C library through the bridging header.
         let version = String(cString: utf8proc_version())
-        NSLog("Nvmm: utf8proc \(version)")
+        Log.app.info("utf8proc \(version, privacy: .public)")
     }
 
     private func logBundledNeovim() {
         if let path = NeovimBundle.executableURL?.path {
-            NSLog("Nvmm: bundled nvim at \(path)")
+            Log.app.info("Bundled Neovim at \(path)")
         } else {
-            NSLog("Nvmm: bundled nvim NOT found (run Scripts/download_nvim.sh)")
+            Log.app.error("Bundled Neovim not found; run Scripts/download_nvim.sh")
         }
     }
 
