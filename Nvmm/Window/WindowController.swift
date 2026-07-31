@@ -47,6 +47,38 @@ nonisolated func abnormalNeovimExitDescription(
     }
 }
 
+/// Describes a terminal transport event that needs a user-facing explanation.
+nonisolated func transportDisconnectDescription(
+    _ error: RPCTransportError?,
+    ownsServer: Bool,
+    expected: Bool
+) -> String? {
+    guard !expected, let error else { return nil }
+    if ownsServer {
+        switch error {
+        case .connectionClosed:
+            return nil
+        case .readFailed, .writeFailed:
+            return "Communication with Neovim failed: \(error.description). "
+                + "The embedded session ended. Unsaved changes may be "
+                + "recoverable from a swap file."
+        case .protocolViolation:
+            return "Nvmm closed the connection because RPC traffic could not "
+                + "be processed safely. The embedded session ended. "
+                + "Unsaved changes may be recoverable from a swap file."
+        }
+    }
+
+    switch error {
+    case .connectionClosed:
+        return "The connection to the remote Neovim server closed. "
+            + "The server may still be running."
+    case .readFailed, .writeFailed, .protocolViolation:
+        return "Communication with the remote Neovim server failed: "
+            + "\(error.description). The server may still be running."
+    }
+}
+
 final class WindowController: NSWindowController, NSWindowDelegate, QuitSession {
     // MARK: - State
 
@@ -65,7 +97,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     // Quit state for `QuitSession`. `hasExited` becomes true once Neovim has
     // disconnected and the window has closed.
     private(set) var hasExited = false
-    private var expectsProcessTermination = false
+    private var expectsDisconnect = false
 
     private var renderTask: Task<Void, Never>?
     private var inputTask: Task<Void, Never>?
@@ -796,17 +828,24 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
             if let handoff = await process.pendingHandoff() {
                 self.reconnect(handoff)
             } else {
-                let detail = self.ownsServer && !self.expectsProcessTermination
+                let exitDetail = self.ownsServer && !self.expectsDisconnect
                     ? abnormalNeovimExitDescription(
                         await process.childTermination())
                     : nil
-                if let detail {
+                let transportDetail = transportDisconnectDescription(
+                    await process.transportTermination(),
+                    ownsServer: self.ownsServer,
+                    expected: self.expectsDisconnect)
+                if let detail = exitDetail {
                     Log.rpc.error(
                         "Neovim exited unexpectedly: \(detail, privacy: .public)")
                     self.presentConnectionError(
                         "Neovim Exited Unexpectedly",
                         detail: detail + " Any unsaved changes in that "
                             + "session may have been lost.")
+                } else if let detail = transportDetail {
+                    self.presentConnectionError(
+                        "Neovim Connection Ended", detail: detail)
                 }
                 self.handleDisconnect()
             }
@@ -887,11 +926,11 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         // running.
         // Ending the transport ends the grid stream, which closes the window.
         if !ownsServer {
+            expectsDisconnect = true
             let process = self.process
             Task { await process?.disconnect() }
             return
         }
-        expectsProcessTermination = true
         enqueue(.quit(force: force))
     }
 
@@ -900,9 +939,10 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     func forceTerminate() async {
         guard !hasExited, let process else { return }
         if ownsServer {
-            expectsProcessTermination = true
+            expectsDisconnect = true
             _ = await process.terminateChild()
         } else {
+            expectsDisconnect = true
             await process.disconnect()
         }
     }

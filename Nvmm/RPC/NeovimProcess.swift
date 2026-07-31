@@ -229,6 +229,7 @@ actor NeovimProcess {
     private var childPID: pid_t?
     private var childWaitTask: Task<Spawn.Termination, Never>?
     private var childTerminationResult: Spawn.Termination?
+    private var terminalTransportError: RPCTransportError?
 
     private let limits: RPCResourceLimits
     private var writer = MessagePackWriter()
@@ -415,6 +416,11 @@ actor NeovimProcess {
     func disconnect() {
         guard state == .connected else { return }
         io?.shutdown(.connectionClosed)
+    }
+
+    /// The reason the transport ended, once its streams have finished.
+    func transportTermination() -> RPCTransportError? {
+        terminalTransportError
     }
 
     /// Waits for and returns the spawned child's termination status.
@@ -884,6 +890,7 @@ actor NeovimProcess {
 
     private func finishDisconnect(_ error: RPCTransportError) {
         guard state != .closed else { return }
+        terminalTransportError = error
         switch error {
         case .connectionClosed:
             Log.rpc.info(

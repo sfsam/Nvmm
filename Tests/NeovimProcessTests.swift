@@ -70,6 +70,46 @@ final class NeovimProcessTests: XCTestCase {
             "Nvmm could not determine how Neovim exited (errno \(ECHILD)).")
     }
 
+    func testTransportDisconnectDescriptions() {
+        XCTAssertNil(transportDisconnectDescription(
+            nil, ownsServer: true, expected: false))
+        XCTAssertNil(transportDisconnectDescription(
+            .connectionClosed, ownsServer: true, expected: false))
+        XCTAssertNil(transportDisconnectDescription(
+            .readFailed(errno: EIO), ownsServer: false, expected: true))
+        XCTAssertEqual(
+            transportDisconnectDescription(
+                .readFailed(errno: EIO),
+                ownsServer: true,
+                expected: false),
+            "Communication with Neovim failed: read failed (errno \(EIO)). "
+                + "The embedded session ended. Unsaved changes may be "
+                + "recoverable from a swap file.")
+        XCTAssertEqual(
+            transportDisconnectDescription(
+                .protocolViolation,
+                ownsServer: true,
+                expected: false),
+            "Nvmm closed the connection because RPC traffic could not be "
+                + "processed safely. The embedded session ended. Unsaved "
+                + "changes may be recoverable from a swap file.")
+        XCTAssertEqual(
+            transportDisconnectDescription(
+                .connectionClosed,
+                ownsServer: false,
+                expected: false),
+            "The connection to the remote Neovim server closed. "
+                + "The server may still be running.")
+        XCTAssertEqual(
+            transportDisconnectDescription(
+                .writeFailed(errno: EPIPE),
+                ownsServer: false,
+                expected: false),
+            "Communication with the remote Neovim server failed: "
+                + "write failed (errno \(EPIPE)). "
+                + "The server may still be running.")
+    }
+
     func testSpawnCapturesStandardError() async throws {
         let received = expectation(description: "stderr event")
         let sink = StandardErrorSink(expectation: received)
@@ -396,6 +436,8 @@ final class NeovimProcessTests: XCTestCase {
                 return XCTFail("expected .transport, got \(error)")
             }
         }
+        let termination = await process.transportTermination()
+        XCTAssertEqual(termination, .connectionClosed)
         await process.disconnect()
     }
 
@@ -489,6 +531,9 @@ final class NeovimProcessTests: XCTestCase {
         try writeAll(peer, [0xd9, 0x04])
         var byte: UInt8 = 0
         XCTAssertEqual(read(peer, &byte, 1), 0)
+        for await _ in process.grids {}
+        let termination = await process.transportTermination()
+        XCTAssertEqual(termination, .protocolViolation)
     }
 
     func testOutboundLimitClosesInsteadOfQueueingAResponse() async throws {
