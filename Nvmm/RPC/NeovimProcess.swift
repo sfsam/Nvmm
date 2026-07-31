@@ -226,6 +226,9 @@ actor NeovimProcess {
     private var io: TransportIO?
     private var consumer: Task<Void, Never>?
     private var standardErrorCapture: StandardErrorCapture?
+    private var childPID: pid_t?
+    private var childWaitTask: Task<Spawn.Termination, Never>?
+    private var childTerminationResult: Spawn.Termination?
 
     private let limits: RPCResourceLimits
     private var writer = MessagePackWriter()
@@ -357,6 +360,16 @@ actor NeovimProcess {
             throw NeovimSpawnError(code: result.error, operation: "spawn")
         }
 
+        childPID = result.pid
+        let waitTask = Task {
+            await Spawn.wait(forChild: result.pid)
+        }
+        childWaitTask = waitTask
+        Task { [weak self] in
+            let termination = await waitTask.value
+            await self?.recordChildTermination(
+                termination, pid: result.pid)
+        }
         standardErrorCapture = StandardErrorCapture(
             fileDescriptor: standardError.pipe.readEnd,
             handler: standardErrorHandler)
@@ -402,6 +415,27 @@ actor NeovimProcess {
     func disconnect() {
         guard state == .connected else { return }
         io?.shutdown(.connectionClosed)
+    }
+
+    /// Waits for and returns the spawned child's termination status.
+    ///
+    /// A socket connection has no child owned by Nvmm and returns `nil`.
+    func childTermination() async -> Spawn.Termination? {
+        if let childTerminationResult {
+            return childTerminationResult
+        }
+        guard let childWaitTask else { return nil }
+        return await childWaitTask.value
+    }
+
+    private func recordChildTermination(
+        _ termination: Spawn.Termination,
+        pid: pid_t
+    ) {
+        guard childPID == pid else { return }
+        childTerminationResult = termination
+        childWaitTask = nil
+        childPID = nil
     }
 
     // MARK: Requests

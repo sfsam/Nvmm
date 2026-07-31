@@ -77,6 +77,30 @@ final class NeovimProcessTests: XCTestCase {
         await process.disconnect()
     }
 
+    func testSpawnReapsChildExitStatus() async throws {
+        let process = NeovimProcess()
+        try await process.spawn(
+            path: "/bin/sh",
+            argv: ["/bin/sh", "-c", "exit 7"])
+
+        let termination = await process.childTermination()
+
+        XCTAssertEqual(termination, .exited(status: 7))
+        await process.disconnect()
+    }
+
+    func testSpawnReapsChildSignal() async throws {
+        let process = NeovimProcess()
+        try await process.spawn(
+            path: "/bin/sh",
+            argv: ["/bin/sh", "-c", "kill -KILL $$"])
+
+        let termination = await process.childTermination()
+
+        XCTAssertEqual(termination, .signaled(signal: SIGKILL))
+        await process.disconnect()
+    }
+
     // MARK: Controlled-peer helpers
 
     /// A connected socket pair: the client end is handed to the process, the peer

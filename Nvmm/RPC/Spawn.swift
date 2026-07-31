@@ -11,6 +11,7 @@
 //
 
 import Darwin
+import Dispatch
 import Foundation
 
 /// Quotes one argument for a `/bin/sh` command line.
@@ -54,6 +55,13 @@ nonisolated enum Spawn {
     struct Result {
         var pid: pid_t
         var error: Int32
+    }
+
+    /// How a spawned child finished, or why its status could not be collected.
+    enum Termination: Sendable, Equatable {
+        case exited(status: Int32)
+        case signaled(signal: Int32)
+        case waitFailed(errno: Int32)
     }
 
     /// Opens a pipe with the close-on-exec flag set on both descriptors.
@@ -111,6 +119,37 @@ nonisolated enum Spawn {
         var pid: pid_t = 0
         let code = posix_spawn(&pid, path, &actions, nil, argvC, envC)
         return Result(pid: pid, error: code)
+    }
+
+    /// Reaps one exact child without blocking a Swift concurrency executor.
+    static func wait(forChild pid: pid_t) async -> Termination {
+        precondition(pid > 0)
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                var status: Int32 = 0
+                while true {
+                    let waited = Darwin.waitpid(pid, &status, 0)
+                    if waited == pid {
+                        let signal = status & 0x7f
+                        if signal == 0 {
+                            continuation.resume(returning: .exited(
+                                status: (status >> 8) & 0xff))
+                        } else {
+                            continuation.resume(
+                                returning: .signaled(signal: signal))
+                        }
+                        return
+                    }
+
+                    let failure = errno
+                    if waited == -1 && failure == EINTR {
+                        continue
+                    }
+                    continuation.resume(returning: .waitFailed(errno: failure))
+                    return
+                }
+            }
+        }
     }
 
     /// Connects a new stream socket to a Unix domain socket address.
