@@ -17,6 +17,30 @@ final class NeovimProcessTests: XCTestCase {
 
     private struct TestIOError: Error {}
 
+    private nonisolated final class StandardErrorSink:
+        @unchecked Sendable {
+        private let lock = NSLock()
+        private var output: StandardErrorCapture.Output?
+        let expectation: XCTestExpectation
+
+        init(expectation: XCTestExpectation) {
+            self.expectation = expectation
+        }
+
+        func receive(_ output: StandardErrorCapture.Output) {
+            lock.lock()
+            self.output = output
+            lock.unlock()
+            expectation.fulfill()
+        }
+
+        func received() -> StandardErrorCapture.Output? {
+            lock.lock()
+            defer { lock.unlock() }
+            return output
+        }
+    }
+
     func testTransportErrorDescriptions() {
         XCTAssertEqual(
             RPCTransportError.connectionClosed.description,
@@ -30,6 +54,27 @@ final class NeovimProcessTests: XCTestCase {
         XCTAssertEqual(
             RPCTransportError.protocolViolation.description,
             "protocol violation")
+    }
+
+    func testSpawnCapturesStandardError() async throws {
+        let received = expectation(description: "stderr event")
+        let sink = StandardErrorSink(expectation: received)
+        let process = NeovimProcess { event in
+            StandardErrorCapture.log(event)
+            sink.receive(event)
+        }
+
+        try await process.spawn(
+            path: "/bin/sh",
+            argv: [
+                "/bin/sh", "-c",
+                "printf 'shell failure\\n' >&2",
+            ])
+        await fulfillment(of: [received], timeout: 2)
+        XCTAssertEqual(
+            sink.received(),
+            .init(text: "shell failure", isTruncated: false))
+        await process.disconnect()
     }
 
     // MARK: Controlled-peer helpers

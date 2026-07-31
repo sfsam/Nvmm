@@ -225,6 +225,7 @@ actor NeovimProcess {
     private var timeouts: [UInt64: Task<Void, Never>] = [:]
     private var io: TransportIO?
     private var consumer: Task<Void, Never>?
+    private var standardErrorCapture: StandardErrorCapture?
 
     private let limits: RPCResourceLimits
     private var writer = MessagePackWriter()
@@ -232,6 +233,7 @@ actor NeovimProcess {
     private var streamedRedrawGrid: Grid?
     private var activeReverseRequests = 0
 
+    private let standardErrorHandler: StandardErrorCapture.Handler
     private let inbound: AsyncStream<Inbound>
     private let inboundContinuation: AsyncStream<Inbound>.Continuation
 
@@ -267,8 +269,13 @@ actor NeovimProcess {
     nonisolated let progressUpdates: AsyncStream<ProgressUpdate>
     private let progressUpdatesContinuation: AsyncStream<ProgressUpdate>.Continuation
 
-    init(limits: RPCResourceLimits = .production) {
+    init(
+        limits: RPCResourceLimits = .production,
+        standardErrorHandler: @escaping StandardErrorCapture.Handler =
+            StandardErrorCapture.log
+    ) {
         self.limits = limits
+        self.standardErrorHandler = standardErrorHandler
         unpacker = MessagePackUnpacker(limits: limits)
 
         let inboundPair = AsyncStream.makeStream(of: Inbound.self)
@@ -320,23 +327,39 @@ actor NeovimProcess {
             close(read.pipe.writeEnd)
             throw NeovimSpawnError(code: write.error, operation: "pipe")
         }
+        let standardError = Spawn.openPipe()
+        if standardError.error != 0 {
+            close(read.pipe.readEnd)
+            close(read.pipe.writeEnd)
+            close(write.pipe.readEnd)
+            close(write.pipe.writeEnd)
+            throw NeovimSpawnError(code: standardError.error, operation: "pipe")
+        }
 
         // The child reads its stdin from the write pipe and writes its stdout
-        // to the read pipe; the parent keeps the opposite ends.
-        let streams = Spawn.Streams(input: write.pipe.readEnd, output: read.pipe.writeEnd)
+        // and stderr to their read pipes; the parent keeps the opposite ends.
+        let streams = Spawn.Streams(input: write.pipe.readEnd,
+                                    output: read.pipe.writeEnd,
+                                    error: standardError.pipe.writeEnd)
         let result = Spawn.spawn(path: path, argv: argv, env: env,
-                                 workingDirectory: workingDirectory, streams: streams)
+                                 workingDirectory: workingDirectory,
+                                 streams: streams)
 
         // Close the descriptors the child duplicated, whether or not it spawned.
         close(write.pipe.readEnd)
         close(read.pipe.writeEnd)
+        close(standardError.pipe.writeEnd)
 
         if result.error != 0 {
             close(read.pipe.readEnd)
             close(write.pipe.writeEnd)
+            close(standardError.pipe.readEnd)
             throw NeovimSpawnError(code: result.error, operation: "spawn")
         }
 
+        standardErrorCapture = StandardErrorCapture(
+            fileDescriptor: standardError.pipe.readEnd,
+            handler: standardErrorHandler)
         attach(readFD: read.pipe.readEnd, writeFD: write.pipe.writeEnd)
     }
 
