@@ -223,6 +223,8 @@ nonisolated struct Grid: Sendable {
     /// view's composition width policy matches Neovim without a live query.
     var ambiguousWidthDouble = false
     var emojiWidthDouble = true
+    /// Whether Neovim accepts passive mouse movement as `<MouseMove>` input.
+    var mouseMoveEvent = false
     /// The `guifont` option string (`option_set`), carried on the snapshot so
     /// the window can rebuild its font without a live query.
     var guifont = ""

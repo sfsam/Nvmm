@@ -56,6 +56,31 @@ private enum CellGraphicKind: UInt32 {
     }
 }
 
+/// Suppresses passive mouse movement that does not change Neovim's input.
+nonisolated struct MouseMoveTracker {
+    private var lastLocation: GridPoint?
+    private var lastModifiers = ""
+
+    mutating func shouldSend(location: GridPoint?, modifiers: String,
+                             enabled: Bool) -> Bool {
+        guard enabled, let location else {
+            reset()
+            return false
+        }
+        guard location != lastLocation || modifiers != lastModifiers else {
+            return false
+        }
+        lastLocation = location
+        lastModifiers = modifiers
+        return true
+    }
+
+    mutating func reset() {
+        lastLocation = nil
+        lastModifiers = ""
+    }
+}
+
 final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                       TextInputCoordinatorDelegate, NSUserInterfaceValidations {
     private var metalLayer: CAMetalLayer!
@@ -141,6 +166,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         var modifiers = ""
     }
     private var mouseState: [MousePress] = [MousePress(), MousePress(), MousePress()]
+    private var mouseMoveTracker = MouseMoveTracker()
 
     /// Resends the active drags at a fixed rate. A drag held past the grid edge
     /// keeps scrolling Neovim even while the pointer is stationary, so the drag
@@ -343,6 +369,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         let previousGrid = grid
         let previousSize = grid?.size
         grid = newGrid
+        if !newGrid.mouseMoveEvent { mouseMoveTracker.reset() }
         cursorVisible = true
         // A new grid means any commit we were holding the final preedit frame
         // for has now landed.
@@ -1529,9 +1556,21 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
 
     override func mouseMoved(with event: NSEvent) {
         updateMouseCursor(event.locationInWindow)
+        guard let grid else {
+            mouseMoveTracker.reset()
+            return
+        }
+        let location = cellLocation(event.locationInWindow)
+        let inGrid = pointInGrid(location, grid.size) ? location : nil
+        let modifiers = mouseModifiers(event.modifierFlags)
+        guard mouseMoveTracker.shouldSend(
+                  location: inGrid, modifiers: modifiers,
+                  enabled: grid.mouseMoveEvent) else { return }
+        sendMouse?("move", "", modifiers, location.row, location.column)
     }
 
     override func mouseExited(with event: NSEvent) {
+        mouseMoveTracker.reset()
         NSCursor.arrow.set()
     }
 

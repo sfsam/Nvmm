@@ -134,16 +134,25 @@ final class UIControllerTests: XCTestCase {
     func testMouseMoveEventOptionIsTracked() {
         let controller = UIController()
         XCTAssertFalse(controller.mousemoveevent)
+        XCTAssertFalse(controller.globalGrid.mouseMoveEvent)
 
         _ = controller.redraw([["option_set", ["mousemoveevent", true]]])
         XCTAssertTrue(controller.mousemoveevent)
+        XCTAssertFalse(controller.globalGrid.mouseMoveEvent)
+
+        _ = controller.redraw([["flush", []]])
+        XCTAssertTrue(controller.globalGrid.mouseMoveEvent)
 
         // A non-boolean payload leaves the option unchanged.
         _ = controller.redraw([["option_set", ["mousemoveevent", 0]]])
         XCTAssertTrue(controller.mousemoveevent)
 
-        _ = controller.redraw([["option_set", ["mousemoveevent", false]]])
+        _ = controller.redraw([
+            ["option_set", ["mousemoveevent", false]],
+            ["flush", []],
+        ])
         XCTAssertFalse(controller.mousemoveevent)
+        XCTAssertFalse(controller.globalGrid.mouseMoveEvent)
     }
 
     // MARK: Grids

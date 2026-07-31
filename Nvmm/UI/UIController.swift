@@ -601,6 +601,7 @@ nonisolated final class UIController {
         writing.defaultBackground = defaultBackgroundColor
         writing.ambiguousWidthDouble = ambiguousWidthDouble
         writing.emojiWidthDouble = emojiWidthDouble
+        writing.mouseMoveEvent = mousemoveevent
         writing.guifont = guifont
         writing.viewport = viewport
         writing.startupComplete = vimentered
