@@ -331,20 +331,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controlServer?.stop()
     }
 
-    /// Quits every window, prompting first (app-modal) if any have unsaved
-    /// buffers. Returns whether they all exited: a clean quit drains
-    /// non-forced; unsaved buffers ask the user, and a confirmation drains
-    /// forced (discarding) while Cancel returns false so the app stays running.
+    /// Quits every window, confirming discarded changes first and confirming
+    /// process termination separately if an orderly quit times out.
     private func drainForQuit() async -> Bool {
-        if await terminationCoordinator.anyUnsavedBuffers() {
-            guard confirmDiscard(
+        await terminationCoordinator.requestApplicationQuit {
+            confirmDiscard(
                 message: "Quit without saving?",
                 informative: "There are modified buffers. "
                     + "If you quit now all changes will be lost.",
-                confirmTitle: "Quit") else { return false }
-            return await terminationCoordinator.requestQuitAll(force: true)
+                confirmTitle: "Quit")
+        } confirmForceTermination: {
+            confirmForceTermination()
         }
-        return await terminationCoordinator.requestQuitAll(force: false)
     }
 
     // MARK: - Settings
@@ -378,12 +376,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Shows an app-modal warning alert with a destructive confirm button and
     /// a Cancel button. Returns true if the user chose to proceed.
     private func confirmDiscard(message: String, informative: String,
-                               confirmTitle: String) -> Bool {
+                                confirmTitle: String) -> Bool {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = message
         alert.informativeText = informative
         alert.addButton(withTitle: confirmTitle)
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// Warns before terminating Neovim processes that did not quit normally.
+    private func confirmForceTermination() -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Neovim Is Not Responding"
+        alert.informativeText = "Force Quit will end the remaining editor "
+            + "sessions. Any unsaved changes will be lost."
+        alert.addButton(withTitle: "Force Quit")
         alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn
     }

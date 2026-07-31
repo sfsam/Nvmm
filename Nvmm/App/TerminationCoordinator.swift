@@ -26,6 +26,10 @@ import Foundation
     /// immediately; the outcome is observed through `hasExited`.
     func beginQuit(force: Bool)
 
+    /// Ends a session that did not respond to `beginQuit`. An owned child is
+    /// terminated; a borrowed Neovim is only disconnected.
+    func forceTerminate() async
+
     /// True once the session's Neovim has exited and its window has closed.
     var hasExited: Bool { get }
 }
@@ -89,5 +93,40 @@ import Foundation
             try? await Task.sleep(for: .milliseconds(25))
         }
         return draining.allSatisfy { $0.hasExited }
+    }
+
+    /// Drives the complete application-quit policy. Modified buffers require
+    /// confirmation before an orderly forced quit. A timed-out orderly quit
+    /// requires a second confirmation before terminating remaining sessions.
+    func requestApplicationQuit(
+        timeout: Duration = .seconds(3),
+        confirmDiscard: () -> Bool,
+        confirmForceTermination: () -> Bool
+    ) async -> Bool {
+        let force: Bool
+        if await anyUnsavedBuffers() {
+            guard confirmDiscard() else { return false }
+            force = true
+        } else {
+            force = false
+        }
+
+        if await requestQuitAll(force: force, timeout: timeout) {
+            return true
+        }
+        guard confirmForceTermination() else { return false }
+        await forceTerminateRemaining()
+        return true
+    }
+
+    /// Terminates sessions still present after an orderly-quit timeout.
+    private func forceTerminateRemaining() async {
+        let remaining = sessions.filter { !$0.hasExited }
+        let tasks = remaining.map { session in
+            Task { await session.forceTerminate() }
+        }
+        for task in tasks {
+            await task.value
+        }
     }
 }

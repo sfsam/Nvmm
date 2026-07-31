@@ -25,12 +25,17 @@ final class TerminationCoordinatorTests: XCTestCase {
         let unsaved: Bool
         /// Whether a forced quit makes it exit.
         let exitsOnForce: Bool
+        /// Whether an orderly quit request receives any response.
+        let respondsToQuit: Bool
+        var forceTerminateCount = 0
 
         /// A clean session (`unsaved: false`) exits on any quit; an unsaved one
         /// exits only when forced (unless `exitsOnForce` is overridden).
-        init(unsaved: Bool, exitsOnForce: Bool = true) {
+        init(unsaved: Bool, exitsOnForce: Bool = true,
+             respondsToQuit: Bool = true) {
             self.unsaved = unsaved
             self.exitsOnForce = exitsOnForce
+            self.respondsToQuit = respondsToQuit
         }
 
         func hasUnsavedBuffers() async -> Bool { unsaved }
@@ -38,9 +43,14 @@ final class TerminationCoordinatorTests: XCTestCase {
         func beginQuit(force: Bool) {
             quitCount += 1
             lastForce = force
-            if force ? exitsOnForce : !unsaved {
+            if respondsToQuit && (force ? exitsOnForce : !unsaved) {
                 hasExited = true
             }
+        }
+
+        func forceTerminate() async {
+            forceTerminateCount += 1
+            hasExited = true
         }
     }
 
@@ -105,6 +115,50 @@ final class TerminationCoordinatorTests: XCTestCase {
         let exited = await coordinator.requestQuitAll(force: true)
         XCTAssertTrue(exited)
         XCTAssertTrue(dirty.lastForce)
+    }
+
+    func testTimedOutApplicationQuitCanBeCancelled() async {
+        let coordinator = TerminationCoordinator()
+        let hung = FakeSession(unsaved: false, respondsToQuit: false)
+        coordinator.register(hung)
+        var forceConfirmationCount = 0
+
+        let exited = await coordinator.requestApplicationQuit(
+            timeout: .milliseconds(25),
+            confirmDiscard: {
+                XCTFail("clean session must not ask to discard")
+                return false
+            },
+            confirmForceTermination: {
+                forceConfirmationCount += 1
+                return false
+            })
+
+        XCTAssertFalse(exited)
+        XCTAssertEqual(forceConfirmationCount, 1)
+        XCTAssertEqual(hung.forceTerminateCount, 0)
+        XCTAssertFalse(hung.hasExited)
+    }
+
+    func testTimedOutApplicationQuitCanForceTermination() async {
+        let coordinator = TerminationCoordinator()
+        let exitedNormally = FakeSession(unsaved: false)
+        let hung = FakeSession(unsaved: false, respondsToQuit: false)
+        coordinator.register(exitedNormally)
+        coordinator.register(hung)
+
+        let exited = await coordinator.requestApplicationQuit(
+            timeout: .milliseconds(25),
+            confirmDiscard: {
+                XCTFail("clean session must not ask to discard")
+                return false
+            },
+            confirmForceTermination: { true })
+
+        XCTAssertTrue(exited)
+        XCTAssertEqual(exitedNormally.forceTerminateCount, 0)
+        XCTAssertEqual(hung.forceTerminateCount, 1)
+        XCTAssertTrue(hung.hasExited)
     }
 
     func testDeregisterRemovesSession() async {

@@ -865,6 +865,17 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         enqueue(.quit(force: force))
     }
 
+    /// Ends a session that did not respond to its Neovim quit command. A
+    /// borrowed server is detached rather than signalled.
+    func forceTerminate() async {
+        guard !hasExited, let process else { return }
+        if ownsServer {
+            _ = await process.terminateChild()
+        } else {
+            await process.disconnect()
+        }
+    }
+
     /// Closes the window in response to Neovim disconnecting. Idempotent; the
     /// close runs the `windowWillClose` teardown. `window?.close()` does not
     /// route through `windowShouldClose`, so this does not re-trigger a quit.
