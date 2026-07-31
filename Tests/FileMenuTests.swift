@@ -104,3 +104,49 @@ final class ModifiedBufferTests: XCTestCase {
             ModifiedBuffer(bufnr: 2, name: "/tmp/a", changedtick: 7)))
     }
 }
+
+final class WriteOutcomeTests: XCTestCase {
+
+    func testSuccessfulWrite() {
+        let response = RPCResponse(error: .null, result: .null)
+        XCTAssertEqual(classifyWriteResponse(response), .written)
+    }
+
+    func testUnnamedBufferNeedsFilename() {
+        let response = RPCResponse(
+            error: .array([
+                .int(0),
+                .string("Vim(write):E32: No file name"),
+            ]),
+            result: .null)
+        XCTAssertEqual(classifyWriteResponse(response), .needsFilename)
+    }
+
+    func testWriteFailurePreservesNeovimMessage() {
+        let message = "Vim(write):E212: Can't open file for writing"
+        let response = RPCResponse(
+            error: .array([.int(0), .string(message)]),
+            result: .null)
+        XCTAssertEqual(classifyWriteResponse(response), .failed(message))
+    }
+
+    func testExplicitPathTreatsE32AsFailure() {
+        let message = "Vim(write):E32: No file name"
+        let response = RPCResponse(
+            error: .array([.int(0), .string(message)]),
+            result: .null)
+        XCTAssertEqual(
+            classifyWriteResponse(
+                response, recognizesUnnamedBuffer: false),
+            .failed(message))
+    }
+
+    func testMalformedAndMissingResponsesUseFallback() {
+        let fallback = WriteOutcome.failed(
+            "Neovim did not complete the save.")
+        let malformed = RPCResponse(error: .string("bad"), result: .null)
+
+        XCTAssertEqual(classifyWriteResponse(malformed), fallback)
+        XCTAssertEqual(classifyWriteResponse(nil), fallback)
+    }
+}

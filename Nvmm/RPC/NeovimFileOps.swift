@@ -43,8 +43,26 @@ nonisolated enum WriteOutcome: Sendable, Equatable {
     case written
     /// The buffer has no name; the caller must ask for one (E32).
     case needsFilename
-    /// The write failed, or the connection did.
-    case failed
+    /// The write failed with the reason that should be shown to the user.
+    case failed(String)
+}
+
+/// Classifies a write response while preserving Neovim's error message.
+nonisolated func classifyWriteResponse(
+    _ response: RPCResponse?,
+    recognizesUnnamedBuffer: Bool = true
+) -> WriteOutcome {
+    let fallback = "Neovim did not complete the save."
+    guard let response else { return .failed(fallback) }
+    guard response.isError else { return .written }
+    guard let fields = response.error.arrayValue, fields.count == 2,
+          let message = fields[1].stringValue else {
+        return .failed(fallback)
+    }
+    if recognizesUnnamedBuffer && message.contains("E32:") {
+        return .needsFilename
+    }
+    return .failed(message)
 }
 
 // MARK: - Mode-gated commands
@@ -230,13 +248,14 @@ extension NeovimProcess {
         // still reach this response either way.
         let command =
             "if exists('#nvim.ui2#OptionSet') | silent write | else | write | endif"
-        return writeOutcome(for: await normalCommandResponse(command))
+        return classifyWriteResponse(await normalCommandResponse(command))
     }
 
     /// Switches to a buffer and writes it. Used by the save prompts, which name
     /// the buffer they asked about rather than trusting the current one.
     func writeBuffer(_ bufnr: Int) async -> WriteOutcome {
-        writeOutcome(for: await normalCommandResponse("buffer \(bufnr) | write"))
+        classifyWriteResponse(
+            await normalCommandResponse("buffer \(bufnr) | write"))
     }
 
     /// Switches to a buffer without writing it, so a save panel names the
@@ -249,35 +268,18 @@ extension NeovimProcess {
     }
 
     /// Force-writes the current buffer to a literal path.
-    func writeAs(_ path: String) async -> Bool {
+    func writeAs(_ path: String) async -> WriteOutcome {
         let lua = "_G.nvmm.write_as(...)"
-        guard let response = try? await request(
-                  "nvim_exec_lua", [.string(lua), .array([.string(path)])])
-        else { return false }
-        return !response.isError
+        let response = try? await request(
+            "nvim_exec_lua", [.string(lua), .array([.string(path)])])
+        return classifyWriteResponse(
+            response, recognizesUnnamedBuffer: false)
     }
 
     /// Deletes a buffer, discarding its changes when `force` is set.
     @discardableResult
     func deleteBuffer(_ bufnr: Int, force: Bool) async -> Bool {
         await normalCommand("bdelete\(force ? "!" : "") \(bufnr)")
-    }
-
-    /// Classifies a write response. Neovim reports an unnamed buffer as E32,
-    /// which is a request for a filename rather than a failure.
-    private func writeOutcome(for response: RPCResponse?) -> WriteOutcome {
-        guard let response else { return .failed }
-        guard response.isError else { return .written }
-        return isErrorCode(response.error, "E32") ? .needsFilename : .failed
-    }
-
-    /// Whether an RPC error carries the given Vim error code. Neovim sends
-    /// `[type, message]`, with the message reading like
-    /// `Vim(write):E32: No file name`.
-    private func isErrorCode(_ error: MPValue, _ code: String) -> Bool {
-        guard let fields = error.arrayValue, fields.count == 2,
-              let message = fields[1].stringValue else { return false }
-        return message.contains("\(code):")
     }
 }
 

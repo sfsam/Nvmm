@@ -16,6 +16,7 @@
 //
 
 import Cocoa
+import os
 
 extension WindowController {
 
@@ -79,7 +80,7 @@ extension WindowController {
             switch await process.writeCurrentBuffer() {
             case .written: break
             case .needsFilename: _ = await showSavePanelAndWrite()
-            case .failed: NSSound.beep()
+            case .failed(let detail): await presentSaveError(detail)
             }
         }
     }
@@ -105,7 +106,31 @@ extension WindowController {
             NSSound.beep()
             return .failed
         }
-        return await process.writeAs(path) ? .saved : .failed
+        switch await process.writeAs(path) {
+        case .written:
+            return .saved
+        case .needsFilename:
+            await presentSaveError("Neovim did not complete the save.")
+            return .failed
+        case .failed(let detail):
+            await presentSaveError(detail)
+            return .failed
+        }
+    }
+
+    /// Reports a failed write as a sheet on the document that remains unsaved.
+    private func presentSaveError(_ detail: String) async {
+        Log.app.error("Could not save document: \(detail)")
+        guard let window else {
+            NSSound.beep()
+            return
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Could Not Save Document"
+        alert.informativeText = detail
+        alert.addButton(withTitle: "OK")
+        await alert.beginSheetModal(for: window)
     }
 }
 
@@ -205,7 +230,7 @@ extension WindowController {
                 case .saved: continue
                 case .discarded: discarded.append(buffer)
                 case .cancelled: return
-                case .failed: return NSSound.beep()
+                case .failed: return
                 }
             }
 
@@ -249,7 +274,9 @@ extension WindowController {
 
         switch await process.writeBuffer(buffer.bufnr) {
         case .written: return .saved
-        case .failed: return .failed
+        case .failed(let detail):
+            await presentSaveError(detail)
+            return .failed
         case .needsFilename:
             // An unnamed buffer needs a filename before it can be written, and
             // it is the current buffer now that it has been switched to.
@@ -282,8 +309,14 @@ extension WindowController {
             guard await process.switchToBuffer(info.bufnr) else { return NSSound.beep() }
             guard await showSavePanelAndWrite() == .saved else { return }
         } else {
-            guard await process.writeBuffer(info.bufnr) == .written else {
-                return NSSound.beep()
+            switch await process.writeBuffer(info.bufnr) {
+            case .written:
+                break
+            case .needsFilename:
+                guard await showSavePanelAndWrite() == .saved else { return }
+            case .failed(let detail):
+                await presentSaveError(detail)
+                return
             }
         }
         await process.deleteBuffer(info.bufnr, force: false)

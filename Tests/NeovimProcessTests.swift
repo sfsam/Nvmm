@@ -646,6 +646,28 @@ final class NeovimProcessTests: XCTestCase {
         }
     }
 
+    func testWriteFailurePreservesNeovimMessage() async throws {
+        try await withNvim { process in
+            let path = "/private/tmp/nvmm-\(UUID().uuidString)/file"
+            let changed = try await process.request(
+                "nvim_buf_set_lines",
+                [.int(0), .int(0), .int(-1), .bool(true),
+                 .array([.string("unsaved")])])
+            XCTAssertFalse(changed.isError)
+            let named = try await process.request(
+                "nvim_buf_set_name", [.int(0), .string(path)])
+            XCTAssertFalse(named.isError)
+
+            let outcome = await process.writeCurrentBuffer()
+            guard case .failed(let detail) = outcome else {
+                return XCTFail("expected write failure, got \(outcome)")
+            }
+            XCTAssertTrue(detail.contains("E212:"), detail)
+            XCTAssertTrue(
+                detail.contains("Can't open file for writing"), detail)
+        }
+    }
+
     func testRequestSyncReturnsResponse() async throws {
         try await withNvim { process in
             let result = await callSync(process, "nvim_eval", [.string("2 * 3")], timeout: .seconds(5))
