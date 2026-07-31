@@ -498,7 +498,10 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         // Pad for per-region alignment overallocation.
         let total = (256 * 5) + uniformSize + backgroundSize + glyphSize
                     + cellGraphicSize + lineSize
-        frame.create(device: context.device, size: total)
+        guard frame.create(device: context.device, size: total) else {
+            frame.unlock()
+            return
+        }
 
         let uniformRegion = frame.allocate(uniformSize)
         let backgroundRegion = frame.allocate(backgroundSize)

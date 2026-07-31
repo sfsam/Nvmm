@@ -17,6 +17,9 @@ import Metal
 import Synchronization
 
 final class MetalFrameBuffer: @unchecked Sendable {
+    typealias BufferFactory =
+        (MTLDevice, Int, MTLResourceOptions) -> MTLBuffer?
+
     /// A sub-range of the buffer handed out by `allocate`.
     struct Region {
         let ptr: UnsafeMutableRawPointer
@@ -29,6 +32,10 @@ final class MetalFrameBuffer: @unchecked Sendable {
     private var length = 0
     private var capacity = 0
     private let inUse = Atomic<Bool>(false)
+
+    // Nonisolated so teardown skips the isolated-deinit executor hop that trips
+    // a libmalloc double-free under XCTest's post-test memory checker.
+    nonisolated deinit {}
 
     /// Attempts to claim the buffer. Returns false if it is still in use.
     func tryLock() -> Bool {
@@ -43,22 +50,34 @@ final class MetalFrameBuffer: @unchecked Sendable {
 
     /// Ensures the underlying buffer is on `device` and at least `size` bytes,
     /// reallocating if needed. Invalidates previously allocated regions.
-    func create(device: MTLDevice, size: Int) {
+    @discardableResult
+    func create(
+        device: MTLDevice,
+        size: Int,
+        makeBuffer: BufferFactory = {
+            $0.makeBuffer(length: $1, options: $2)
+        }
+    ) -> Bool {
         length = 0
         var size = size
 
         if !isSameDevice(device) {
-            self.device = device
             size = max(1_048_576, Self.alignUp(size, 8))
         } else if size <= capacity {
-            return
+            return true
         }
 
-        buffer = device.makeBuffer(
-            length: size,
-            options: [.storageModeManaged, .cpuCacheModeWriteCombined])
-        basePointer = buffer?.contents()
+        let options: MTLResourceOptions =
+            [.storageModeManaged, .cpuCacheModeWriteCombined]
+        guard let buffer = makeBuffer(device, size, options) else {
+            return false
+        }
+
+        self.device = device
+        self.buffer = buffer
+        basePointer = buffer.contents()
         capacity = size
+        return true
     }
 
     /// Allocates a 256-byte-aligned region. Assumes sufficient capacity.

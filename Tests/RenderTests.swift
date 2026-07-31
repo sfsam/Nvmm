@@ -49,6 +49,61 @@ final class RenderTests: XCTestCase {
         XCTAssertGreaterThan(family.width, 0)
     }
 
+    func testFrameBufferRetriesAfterAllocationFailure() throws {
+        try requireDevice()
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        var attempts = 0
+        var requestedLengths: [Int] = []
+        let makeBuffer: MetalFrameBuffer.BufferFactory = {
+            device, length, options in
+            attempts += 1
+            requestedLengths.append(length)
+            guard attempts > 1 else { return nil }
+            return device.makeBuffer(length: length, options: options)
+        }
+        let frame = MetalFrameBuffer()
+
+        XCTAssertFalse(frame.create(
+            device: device, size: 4_096, makeBuffer: makeBuffer))
+        XCTAssertNil(frame.metalBuffer)
+        XCTAssertTrue(frame.create(
+            device: device, size: 4_096, makeBuffer: makeBuffer))
+        XCTAssertNotNil(frame.metalBuffer)
+        XCTAssertEqual(attempts, 2)
+        XCTAssertEqual(requestedLengths, [1_048_576, 1_048_576])
+
+        let region = frame.allocate(32)
+        region.ptr.storeBytes(of: UInt32(42), as: UInt32.self)
+        XCTAssertTrue(frame.create(
+            device: device, size: 4_096, makeBuffer: makeBuffer))
+        XCTAssertEqual(attempts, 2)
+    }
+
+    func testFrameBufferKeepsUsableBufferWhenGrowthFails() throws {
+        try requireDevice()
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        var attempts = 0
+        let makeBuffer: MetalFrameBuffer.BufferFactory = {
+            device, length, options in
+            attempts += 1
+            guard attempts != 2 else { return nil }
+            return device.makeBuffer(length: length, options: options)
+        }
+        let frame = MetalFrameBuffer()
+
+        XCTAssertTrue(frame.create(
+            device: device, size: 4_096, makeBuffer: makeBuffer))
+        let original = try XCTUnwrap(frame.metalBuffer)
+        XCTAssertFalse(frame.create(
+            device: device, size: 2_097_152, makeBuffer: makeBuffer))
+        XCTAssertTrue(frame.metalBuffer === original)
+
+        XCTAssertTrue(frame.create(
+            device: device, size: 2_097_152, makeBuffer: makeBuffer))
+        XCTAssertFalse(frame.metalBuffer === original)
+        XCTAssertEqual(attempts, 3)
+    }
+
     func testResizedFontFamilyPreservesFacesAndChangesSize() {
         let manager = FontManager()
         let family = manager.family(
