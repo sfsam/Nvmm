@@ -93,6 +93,25 @@ nonisolated enum Spawn {
         posix_spawn_file_actions_init(&actions)
         defer { posix_spawn_file_actions_destroy(&actions) }
 
+        var attributes: posix_spawnattr_t?
+        posix_spawnattr_init(&attributes)
+        defer { posix_spawnattr_destroy(&attributes) }
+
+        // The child must be able to handle Nvmm's orderly shutdown signal even
+        // if the parent process ignored or blocked it.
+        var defaultSignals = sigset_t()
+        sigemptyset(&defaultSignals)
+        sigaddset(&defaultSignals, SIGTERM)
+        posix_spawnattr_setsigdefault(&attributes, &defaultSignals)
+
+        var signalMask = sigset_t()
+        pthread_sigmask(SIG_SETMASK, nil, &signalMask)
+        sigdelset(&signalMask, SIGTERM)
+        posix_spawnattr_setsigmask(&attributes, &signalMask)
+        posix_spawnattr_setflags(
+            &attributes,
+            Int16(POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK))
+
         if let directory = workingDirectory, !directory.isEmpty {
             let code = posix_spawn_file_actions_addchdir_np(&actions, directory)
             if code != 0 { return Result(pid: 0, error: code) }
@@ -117,7 +136,7 @@ nonisolated enum Spawn {
         }
 
         var pid: pid_t = 0
-        let code = posix_spawn(&pid, path, &actions, nil, argvC, envC)
+        let code = posix_spawn(&pid, path, &actions, &attributes, argvC, envC)
         return Result(pid: pid, error: code)
     }
 

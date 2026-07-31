@@ -101,7 +101,90 @@ final class NeovimProcessTests: XCTestCase {
         await process.disconnect()
     }
 
+    func testTerminateChildAllowsGracefulExit() async throws {
+        let marker = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: marker) }
+        let process = NeovimProcess()
+        let command = "trap 'exit 23' TERM; : > "
+            + spawnShellQuoteArg(marker.path)
+            + "; while :; do :; done"
+        try await process.spawn(
+            path: "/bin/sh",
+            argv: ["/bin/sh", "-c", command])
+        let ready = await waitForFile(marker)
+        XCTAssertTrue(ready)
+
+        let termination = await process.terminateChild()
+
+        XCTAssertEqual(termination, .exited(status: 23))
+        await process.disconnect()
+    }
+
+    func testTerminateChildEscalatesToKill() async throws {
+        let marker = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: marker) }
+        let process = NeovimProcess()
+        let command = "trap '' TERM; : > "
+            + spawnShellQuoteArg(marker.path)
+            + "; while :; do :; done"
+        try await process.spawn(
+            path: "/bin/sh",
+            argv: ["/bin/sh", "-c", command])
+        let ready = await waitForFile(marker)
+        XCTAssertTrue(ready)
+
+        let termination = await process.terminateChild(
+            gracePeriod: .milliseconds(50))
+
+        XCTAssertEqual(termination, .signaled(signal: SIGKILL))
+        await process.disconnect()
+    }
+
+    func testTerminateChildReturnsRecordedExit() async throws {
+        let process = NeovimProcess()
+        try await process.spawn(
+            path: "/bin/sh",
+            argv: ["/bin/sh", "-c", "exit 9"])
+        let recorded = await process.childTermination()
+
+        let termination = await process.terminateChild()
+
+        XCTAssertEqual(recorded, .exited(status: 9))
+        XCTAssertEqual(termination, recorded)
+        await process.disconnect()
+    }
+
+    func testTerminateChildDoesNotAffectRemoteConnection() async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+
+        let termination = await process.terminateChild(
+            gracePeriod: .milliseconds(1))
+
+        XCTAssertNil(termination)
+        await process.disconnect()
+    }
+
     // MARK: Controlled-peer helpers
+
+    private func waitForFile(
+        _ url: URL,
+        timeout: Duration = .seconds(2)
+    ) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
+            if FileManager.default.fileExists(atPath: url.path) {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return false
+    }
 
     /// A connected socket pair: the client end is handed to the process, the peer
     /// end is driven by the test. The peer has a receive timeout so a missing

@@ -428,6 +428,39 @@ actor NeovimProcess {
         return await childWaitTask.value
     }
 
+    /// Terminates the locally spawned child, escalating from `SIGTERM` to
+    /// `SIGKILL` if it does not exit during `gracePeriod`.
+    ///
+    /// A socket connection has no child owned by Nvmm and returns `nil`.
+    /// Calling this after the child exited returns its recorded status.
+    func terminateChild(
+        gracePeriod: Duration = .seconds(1)
+    ) async -> Spawn.Termination? {
+        if let childTerminationResult {
+            return childTerminationResult
+        }
+        guard let pid = childPID, let waitTask = childWaitTask else {
+            return nil
+        }
+
+        _ = Darwin.kill(pid, SIGTERM)
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: gracePeriod)
+        while clock.now < deadline {
+            if let childTerminationResult {
+                return childTerminationResult
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        // The actor clears `childPID` when the exact-PID waiter completes.
+        // Escalate only while this is still the child originally requested.
+        if childPID == pid {
+            _ = Darwin.kill(pid, SIGKILL)
+        }
+        return await waitTask.value
+    }
+
     private func recordChildTermination(
         _ termination: Spawn.Termination,
         pid: pid_t
