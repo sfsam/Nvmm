@@ -103,6 +103,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     private var inputTask: Task<Void, Never>?
     private var modifiedTask: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
+    private var bellTask: Task<Void, Never>?
     private var settingsTask: Task<Void, Never>?
 
     // The ordered channel from main-actor input handlers to the process actor.
@@ -737,6 +738,15 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         progressTask = Task { [weak self] in
             for await update in process.progressUpdates {
                 self?.applyProgress(update)
+            }
+        }
+
+        bellTask = Task { [weak self] in
+            for await bell in process.bells {
+                switch bell {
+                case .audible: NSSound.beep()
+                case .visual: self?.gridView.showVisualBell()
+                }
             }
         }
 
@@ -1379,6 +1389,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         inputTask?.cancel()
         modifiedTask?.cancel()
         progressTask?.cancel()
+        bellTask?.cancel()
         progressHoldTask?.cancel()
         settingsTask?.cancel()
         startupTimeoutTask?.cancel()

@@ -24,6 +24,12 @@ nonisolated struct UIHandoff: Sendable, Equatable {
     var address: String
 }
 
+/// A transient alert Neovim asked the UI to present.
+nonisolated enum UIBell: Sendable, Equatable {
+    case audible
+    case visual
+}
+
 /// What one `Progress` event means for the progress bar.
 nonisolated enum ProgressOutcome: Sendable, Equatable {
     /// Nothing to show: the event named no task, or reported a status the UI
@@ -55,6 +61,7 @@ nonisolated final class UIController {
     private static let maxHighlightID = 1 << 16
 
     private let limits: RPCResourceLimits
+    private let onBell: (UIBell) -> Void
     // Highlight state.
     private var hlTable: [CellAttributes] = [.defaultGroup]
     private var modeTable: [ModeState] = []
@@ -92,8 +99,10 @@ nonisolated final class UIController {
     private var progressEntries: [String: ProgressEntry] = [:]
     private var progressSequence: UInt64 = 0
 
-    init(limits: RPCResourceLimits = .production) {
+    init(limits: RPCResourceLimits = .production,
+         onBell: @escaping (UIBell) -> Void = { _ in }) {
         self.limits = limits
+        self.onBell = onBell
     }
 
     /// The default background color, tagged as a default color.
@@ -138,6 +147,8 @@ nonisolated final class UIController {
         case "option_set": forEachTuple(args, setOption)
         case "restart": applyHandoff(args, .restart)
         case "connect": applyHandoff(args, .connect)
+        case "bell": onBell(.audible)
+        case "visual_bell": onBell(.visual)
         default: break // mouse_on / mouse_off / set_icon / unknown: ignored.
         }
         return nil

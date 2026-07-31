@@ -75,6 +75,16 @@ final class UIControllerTests: XCTestCase {
 
     // MARK: Modes through redraw
 
+    func testBellEventsArePublishedWithoutFlush() {
+        var bells: [UIBell] = []
+        let controller = UIController(onBell: { bells.append($0) })
+
+        XCTAssertNil(controller.applyRedrawEvent(["bell", []]))
+        XCTAssertNil(controller.applyRedrawEvent(["visual_bell", []]))
+
+        XCTAssertEqual(bells, [.audible, .visual])
+    }
+
     func testModeInfoFallsBackToShortNameForTextEntryEligibility() {
         let controller = UIController()
         let modeInfo: MPValue = ["mode_info_set",

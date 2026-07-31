@@ -263,6 +263,11 @@ actor NeovimProcess {
     nonisolated let grids: AsyncStream<Grid>
     private let gridsContinuation: AsyncStream<Grid>.Continuation
 
+    /// Transient audible and visual bell requests. Unlike complete grid
+    /// snapshots, each retained request remains meaningful to the window.
+    nonisolated let bells: AsyncStream<UIBell>
+    private let bellsContinuation: AsyncStream<UIBell>.Continuation
+
     /// The current buffer's `modified` state, published on each transition so
     /// the window can show a document-edited dot. Finishes on disconnect.
     nonisolated let modifiedStates: AsyncStream<Bool>
@@ -299,6 +304,13 @@ actor NeovimProcess {
             of: Grid.self, bufferingPolicy: .bufferingNewest(1))
         grids = gridsPair.stream
         gridsContinuation = gridsPair.continuation
+
+        let bellsPair = AsyncStream.makeStream(
+            of: UIBell.self,
+            bufferingPolicy: .bufferingNewest(
+                limits.maximumRetainedNotifications))
+        bells = bellsPair.stream
+        bellsContinuation = bellsPair.continuation
 
         let modifiedPair = AsyncStream.makeStream(
             of: Bool.self, bufferingPolicy: .bufferingNewest(1))
@@ -912,6 +924,7 @@ actor NeovimProcess {
 
         notificationsContinuation.finish()
         gridsContinuation.finish()
+        bellsContinuation.finish()
         modifiedStatesContinuation.finish()
         progressUpdatesContinuation.finish()
         inboundContinuation.finish()
@@ -983,7 +996,11 @@ extension NeovimProcess {
     /// published on `grids`.
     func uiAttach(width: Int, height: Int, options: UIOptions,
                   timeout: Duration = .seconds(5)) async -> UIAttachResult {
-        let controller = ui ?? UIController(limits: limits)
+        let controller = ui ?? UIController(
+            limits: limits,
+            onBell: { [bellsContinuation] bell in
+                bellsContinuation.yield(bell)
+            })
         ui = controller
 
         let deadline = ContinuousClock.now.advanced(by: timeout)

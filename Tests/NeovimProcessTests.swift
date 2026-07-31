@@ -701,6 +701,35 @@ final class NeovimProcessTests: XCTestCase {
         }
     }
 
+    func testNeovimBellEventsReachTheUIStream() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            let audible = expectation(description: "audible bell")
+            let visual = expectation(description: "visual bell")
+            let collector = Task {
+                var iterator = process.bells.makeAsyncIterator()
+                if await iterator.next() == .audible {
+                    audible.fulfill()
+                }
+                if await iterator.next() == .visual {
+                    visual.fulfill()
+                }
+            }
+            defer { collector.cancel() }
+
+            _ = try await process.request(
+                "nvim_command",
+                [.string("set belloff= novisualbell")])
+            await process.perform(.input("<Esc>"))
+            await fulfillment(of: [audible], timeout: 2)
+
+            _ = try await process.request(
+                "nvim_command", [.string("set visualbell")])
+            await process.perform(.input("<Esc>"))
+            await fulfillment(of: [visual], timeout: 2)
+        }
+    }
+
     func testUndoRedoIsUnavailableWithoutAConnection() async {
         let process = NeovimProcess()
         let outcome = await process.performUndoRedo(.undo)

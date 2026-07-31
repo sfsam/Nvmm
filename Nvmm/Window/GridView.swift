@@ -84,6 +84,7 @@ nonisolated struct MouseMoveTracker {
 final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                       TextInputCoordinatorDelegate, NSUserInterfaceValidations {
     private var metalLayer: CAMetalLayer!
+    private let visualBellLayer = CALayer()
 
     private var renderContext: RenderContext?
     private(set) var fontFamily: FontFamily?
@@ -243,6 +244,12 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         // Force the backing layer so metalLayer is ready before any geometry or
         // configuration call touches it.
         _ = layer
+        visualBellLayer.frame = metalLayer.bounds
+        visualBellLayer.autoresizingMask = [
+            .layerWidthSizable, .layerHeightSizable,
+        ]
+        visualBellLayer.opacity = 0
+        metalLayer.addSublayer(visualBellLayer)
         textInputCoordinator = TextInputCoordinator(delegate: self)
     }
 
@@ -271,6 +278,25 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         renderContext = context
         metalLayer.device = context.device
         needsDisplay = true
+    }
+
+    /// Briefly flashes the grid in response to Neovim's visual bell.
+    func showVisualBell() {
+        let background = grid?.defaultBackground ?? RGBColor()
+        let r = Double(background.red)
+        let g = Double(background.green)
+        let b = Double(background.blue)
+        let lightness =
+            (0.299 * r * r + 0.587 * g * g + 0.114 * b * b).squareRoot()
+        visualBellLayer.backgroundColor =
+            (lightness > 127.5 ? NSColor.black : NSColor.white).cgColor
+
+        visualBellLayer.removeAnimation(forKey: "visualBell")
+        let animation = CABasicAnimation(keyPath: "opacity")
+        animation.fromValue = 0.45
+        animation.toValue = 0
+        animation.duration = 0.16
+        visualBellLayer.add(animation, forKey: "visualBell")
     }
 
     /// Sets the font and recomputes cell and line-decoration metrics.
