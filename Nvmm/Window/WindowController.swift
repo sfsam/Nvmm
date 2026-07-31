@@ -31,6 +31,22 @@ nonisolated enum WindowStartupOutcome: Sendable, Equatable {
     case failed(String)
 }
 
+/// Describes only child exits that should be surfaced to the user.
+nonisolated func abnormalNeovimExitDescription(
+    _ termination: Spawn.Termination?
+) -> String? {
+    switch termination {
+    case .exited(status: 0), nil:
+        return nil
+    case .exited(let status):
+        return "Neovim exited with status \(status)."
+    case .signaled(let signal):
+        return "Neovim was terminated by signal \(signal)."
+    case .waitFailed(let error):
+        return "Nvmm could not determine how Neovim exited (errno \(error))."
+    }
+}
+
 final class WindowController: NSWindowController, NSWindowDelegate, QuitSession {
     // MARK: - State
 
@@ -49,6 +65,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     // Quit state for `QuitSession`. `hasExited` becomes true once Neovim has
     // disconnected and the window has closed.
     private(set) var hasExited = false
+    private var expectsProcessTermination = false
 
     private var renderTask: Task<Void, Never>?
     private var inputTask: Task<Void, Never>?
@@ -779,6 +796,18 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
             if let handoff = await process.pendingHandoff() {
                 self.reconnect(handoff)
             } else {
+                let detail = self.ownsServer && !self.expectsProcessTermination
+                    ? abnormalNeovimExitDescription(
+                        await process.childTermination())
+                    : nil
+                if let detail {
+                    Log.rpc.error(
+                        "Neovim exited unexpectedly: \(detail, privacy: .public)")
+                    self.presentConnectionError(
+                        "Neovim Exited Unexpectedly",
+                        detail: detail + " Any unsaved changes in that "
+                            + "session may have been lost.")
+                }
                 self.handleDisconnect()
             }
         }
@@ -862,6 +891,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
             Task { await process?.disconnect() }
             return
         }
+        expectsProcessTermination = true
         enqueue(.quit(force: force))
     }
 
@@ -870,6 +900,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     func forceTerminate() async {
         guard !hasExited, let process else { return }
         if ownsServer {
+            expectsProcessTermination = true
             _ = await process.terminateChild()
         } else {
             await process.disconnect()

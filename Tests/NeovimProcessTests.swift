@@ -56,6 +56,20 @@ final class NeovimProcessTests: XCTestCase {
             "protocol violation")
     }
 
+    func testAbnormalNeovimExitDescriptions() {
+        XCTAssertNil(abnormalNeovimExitDescription(nil))
+        XCTAssertNil(abnormalNeovimExitDescription(.exited(status: 0)))
+        XCTAssertEqual(
+            abnormalNeovimExitDescription(.exited(status: 7)),
+            "Neovim exited with status 7.")
+        XCTAssertEqual(
+            abnormalNeovimExitDescription(.signaled(signal: SIGKILL)),
+            "Neovim was terminated by signal 9.")
+        XCTAssertEqual(
+            abnormalNeovimExitDescription(.waitFailed(errno: ECHILD)),
+            "Nvmm could not determine how Neovim exited (errno \(ECHILD)).")
+    }
+
     func testSpawnCapturesStandardError() async throws {
         let received = expectation(description: "stderr event")
         let sink = StandardErrorSink(expectation: received)
