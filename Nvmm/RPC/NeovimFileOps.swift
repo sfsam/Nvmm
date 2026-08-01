@@ -84,14 +84,13 @@ extension NeovimProcess {
     /// Issues a request bounded by a deadline, cancelling it if the deadline
     /// passes first.
     func requestBounded(_ method: String, _ arguments: [MPValue],
-                        timeout: Duration) async -> RPCSyncResult {
-        await withTaskGroup(of: RPCSyncResult.self) { group in
+                        timeout: Duration) async -> RPCRequestResult {
+        await withTaskGroup(of: RPCRequestResult.self) { group in
             group.addTask {
                 do {
                     return .response(try await self.request(method, arguments))
                 } catch let error as RPCError {
                     switch error {
-                    case .timedOut: return .timedOut
                     case .transport(let transport): return .transport(transport)
                     }
                 } catch {

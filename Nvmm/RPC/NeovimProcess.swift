@@ -15,10 +15,8 @@
 //  life of the connection; the write source runs only while bytes are queued.
 //
 //  Requests are `async`: a checked continuation is stored under the message id
-//  and resumed when the response arrives, on timeout, or on disconnect. The one
-//  synchronous escape hatch, `requestSync`, blocks the calling thread on a
-//  semaphore the actor signals; it exists for AppKit entry points that cannot
-//  await, and never runs on the actor's own executor.
+//  and resumed when the response arrives, is cancelled, or the transport
+//  disconnects.
 //
 
 import Darwin
@@ -33,50 +31,6 @@ import os
 private nonisolated enum Inbound: Sendable {
     case data([UInt8])
     case disconnected(RPCTransportError)
-}
-
-// MARK: - Synchronous waiter
-
-/// Backs one `requestSync` call: the actor stores the outcome and signals the
-/// semaphore exactly once, unblocking the calling thread. Safe to share because
-/// the semaphore orders the actor's write before the caller's read.
-private nonisolated final class SyncWaiter: @unchecked Sendable {
-    let semaphore = DispatchSemaphore(value: 0)
-    private var outcome: RPCSyncResult = .transport(.connectionClosed)
-    private var signalled = false
-
-    /// Records the outcome and wakes the caller. Only the first call has effect.
-    func finish(_ result: RPCSyncResult) {
-        guard !signalled else { return }
-        signalled = true
-        outcome = result
-        semaphore.signal()
-    }
-
-    /// The recorded outcome. Read only after `semaphore.wait()` returns.
-    func take() -> RPCSyncResult { outcome }
-}
-
-// MARK: - Pending request
-
-/// One outstanding request, keyed by message id until it completes.
-private nonisolated enum Pending {
-    case async(CheckedContinuation<RPCResponse, any Error>)
-    case sync(SyncWaiter)
-
-    /// Delivers the outcome to whoever is waiting.
-    func complete(_ result: RPCSyncResult) {
-        switch self {
-        case .async(let continuation):
-            switch result {
-            case .response(let response): continuation.resume(returning: response)
-            case .timedOut: continuation.resume(throwing: RPCError.timedOut)
-            case .transport(let error): continuation.resume(throwing: RPCError.transport(error))
-            }
-        case .sync(let waiter):
-            waiter.finish(result)
-        }
-    }
 }
 
 // MARK: - Composition geometry
@@ -221,8 +175,8 @@ actor NeovimProcess {
 
     private var state: State = .idle
     private var nextID: UInt64 = 0
-    private var pending: [UInt64: Pending] = [:]
-    private var timeouts: [UInt64: Task<Void, Never>] = [:]
+    private var pending:
+        [UInt64: CheckedContinuation<RPCResponse, any Error>] = [:]
     private var io: TransportIO?
     private var consumer: Task<Void, Never>?
     private var standardErrorCapture: StandardErrorCapture?
@@ -244,14 +198,6 @@ actor NeovimProcess {
     // Handlers for inbound RPC requests, keyed by method name. Populated after
     // attach (e.g. the clipboard provider); an unknown method is rejected.
     private var requestHandlers: [String: RequestHandler] = [:]
-
-    /// Notifications Neovim sends the client, in wire order. Once a UI is
-    /// attached, the controller consumes `redraw`, `vimenter`, `progress`, and
-    /// `modified`, so those no longer appear here. Bounded to the most recent
-    /// few, so an unconsumed or slow reader cannot grow it without limit. The
-    /// stream finishes when the connection closes.
-    nonisolated let notifications: AsyncStream<RPCNotification>
-    private let notificationsContinuation: AsyncStream<RPCNotification>.Continuation
 
     /// UI model, present once `uiAttach` has run. Redraw notifications feed it.
     private var ui: UIController?
@@ -291,13 +237,6 @@ actor NeovimProcess {
         inbound = inboundPair.stream
         inboundContinuation = inboundPair.continuation
 
-        let notificationPair = AsyncStream.makeStream(
-            of: RPCNotification.self,
-            bufferingPolicy: .bufferingNewest(
-                limits.maximumRetainedNotifications))
-        notifications = notificationPair.stream
-        notificationsContinuation = notificationPair.continuation
-
         // Each grid is a complete snapshot, so a consumer that falls behind
         // wants the latest frame, not a backlog: keep only the newest.
         let gridsPair = AsyncStream.makeStream(
@@ -308,7 +247,7 @@ actor NeovimProcess {
         let bellsPair = AsyncStream.makeStream(
             of: UIBell.self,
             bufferingPolicy: .bufferingNewest(
-                limits.maximumRetainedNotifications))
+                limits.maximumRetainedBells))
         bells = bellsPair.stream
         bellsContinuation = bellsPair.continuation
 
@@ -515,27 +454,12 @@ actor NeovimProcess {
                     continuation.resume(throwing: RPCError.transport(.connectionClosed))
                     return
                 }
-                pending[id] = .async(continuation)
+                pending[id] = continuation
                 send { $0.encodeRequest(id: id, method: method, arguments: arguments) }
             }
         } onCancel: {
             Task { await self.cancel(id: id) }
         }
-    }
-
-    /// Issues a request and blocks the calling thread until it completes or the
-    /// timeout elapses.
-    ///
-    /// This is the sole synchronous path, for AppKit entry points that cannot
-    /// await. It must never be called on the actor's executor: it blocks a thread
-    /// while the actor runs elsewhere to deliver the result.
-    nonisolated func requestSync(_ method: String, _ arguments: [MPValue] = [],
-                                 timeout: Duration) -> RPCSyncResult {
-        let waiter = SyncWaiter()
-        Task { await self.startSync(method: method, arguments: arguments,
-                                    timeout: timeout, waiter: waiter) }
-        waiter.semaphore.wait()
-        return waiter.take()
     }
 
     /// Sends a fire-and-forget notification. No response is expected.
@@ -696,40 +620,9 @@ actor NeovimProcess {
         return parseVisualSelection(response.result)
     }
 
-    private func startSync(method: String, arguments: [MPValue],
-                           timeout: Duration, waiter: SyncWaiter) {
-        guard state == .connected else {
-            waiter.finish(.transport(.connectionClosed))
-            return
-        }
-        let id = nextID
-        nextID &+= 1
-        pending[id] = .sync(waiter)
-        send { $0.encodeRequest(id: id, method: method, arguments: arguments) }
-        armTimeout(id: id, timeout: timeout)
-    }
-
-    private func armTimeout(id: UInt64, timeout: Duration) {
-        timeouts[id] = Task { [weak self] in
-            try? await Task.sleep(for: timeout)
-            if Task.isCancelled { return }
-            await self?.fireTimeout(id: id)
-        }
-    }
-
-    private func fireTimeout(id: UInt64) {
-        timeouts.removeValue(forKey: id)
-        guard let entry = pending.removeValue(forKey: id) else { return }
-        entry.complete(.timedOut)
-    }
-
     private func cancel(id: UInt64) {
-        timeouts.removeValue(forKey: id)?.cancel()
-        guard let entry = pending.removeValue(forKey: id) else { return }
-        switch entry {
-        case .async(let continuation): continuation.resume(throwing: CancellationError())
-        case .sync(let waiter): waiter.finish(.transport(.connectionClosed))
-        }
+        guard let continuation = pending.removeValue(forKey: id) else { return }
+        continuation.resume(throwing: CancellationError())
     }
 
     /// Encodes one framed message into the shared writer and hands the bytes to
@@ -794,17 +687,18 @@ actor NeovimProcess {
 
     private func handleResponse(_ message: [MPValue]) {
         guard let id = message[1].integer?.unsigned else { return }
-        timeouts.removeValue(forKey: id)?.cancel()
-        guard let entry = pending.removeValue(forKey: id) else { return } // stale
-        entry.complete(.response(RPCResponse(error: message[2], result: message[3])))
+        guard let continuation = pending.removeValue(forKey: id) else {
+            return
+        }
+        continuation.resume(
+            returning: RPCResponse(error: message[2], result: message[3]))
     }
 
     private func handleNotification(_ message: [MPValue]) {
         guard let method = message[1].stringValue,
               let arguments = message[2].arrayValue else { return }
 
-        // An attached UI absorbs its own notification channels; the rest flow
-        // to the public stream. Without a UI, every notif flows to the stream.
+        // An attached UI absorbs the notification channels it supports.
         if let ui {
             switch method {
             case "redraw":
@@ -847,7 +741,7 @@ actor NeovimProcess {
                 break
             }
         }
-        notificationsContinuation.yield(RPCNotification(method: method, arguments: arguments))
+        // Other notifications are not part of Nvmm's UI protocol.
     }
 
     private func handleRequest(_ message: [MPValue]) {
@@ -913,16 +807,12 @@ actor NeovimProcess {
         }
         state = .closed
 
-        for (_, task) in timeouts { task.cancel() }
-        timeouts.removeAll()
-
         let outstanding = pending
         pending.removeAll()
-        for (_, entry) in outstanding {
-            entry.complete(.transport(error))
+        for (_, continuation) in outstanding {
+            continuation.resume(throwing: RPCError.transport(error))
         }
 
-        notificationsContinuation.finish()
         gridsContinuation.finish()
         bellsContinuation.finish()
         modifiedStatesContinuation.finish()
@@ -1154,7 +1044,6 @@ extension NeovimProcess {
                     return .response(try await self.request(method, arguments))
                 } catch let error as RPCError {
                     switch error {
-                    case .timedOut: return .timedOut
                     case .transport(let transport): return .transport(transport)
                     }
                 } catch {

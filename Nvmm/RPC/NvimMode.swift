@@ -124,7 +124,7 @@ nonisolated func parseNvimMode(_ response: RPCResponse) -> NvimMode {
 }
 
 /// Maps a bounded RPC result to the mode behavior menu actions consume.
-nonisolated func parseNvimMode(_ result: RPCSyncResult) -> NvimMode {
+nonisolated func parseNvimMode(_ result: RPCRequestResult) -> NvimMode {
     switch result {
     case .response(let response): parseNvimMode(response)
     case .timedOut: .timedOut

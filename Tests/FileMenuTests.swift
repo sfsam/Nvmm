@@ -68,10 +68,10 @@ final class NvimModeTests: XCTestCase {
             error: .null,
             result: .map([(.string("mode"), .string("i"))]))
 
-        XCTAssertEqual(parseNvimMode(RPCSyncResult.response(reply)), .insert)
-        XCTAssertEqual(parseNvimMode(RPCSyncResult.timedOut), .timedOut)
+        XCTAssertEqual(parseNvimMode(RPCRequestResult.response(reply)), .insert)
+        XCTAssertEqual(parseNvimMode(RPCRequestResult.timedOut), .timedOut)
         XCTAssertEqual(
-            parseNvimMode(RPCSyncResult.transport(.connectionClosed)),
+            parseNvimMode(RPCRequestResult.transport(.connectionClosed)),
             .cancelled)
     }
 

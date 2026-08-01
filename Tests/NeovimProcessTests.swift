@@ -360,17 +360,6 @@ final class NeovimProcessTests: XCTestCase {
         try writeResponse(fd, id: id)
     }
 
-    /// Runs `requestSync` off the Swift cooperative pool, as an AppKit caller
-    /// would, so blocking the caller cannot starve the actor's executor.
-    private func callSync(_ process: NeovimProcess, _ method: String,
-                          _ arguments: [MPValue] = [], timeout: Duration) async -> RPCSyncResult {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global().async {
-                continuation.resume(returning: process.requestSync(method, arguments, timeout: timeout))
-            }
-        }
-    }
-
     private func bufferedProgressUpdate(
         _ updates: [ProgressUpdate]
     ) async -> ProgressUpdate? {
@@ -540,19 +529,6 @@ final class NeovimProcessTests: XCTestCase {
         XCTAssertEqual(phases.first, 1)
         XCTAssertEqual(phases.last, 3)
         XCTAssertTrue(phases.dropFirst().dropLast().allSatisfy { $0 == 2 })
-        await process.disconnect()
-    }
-
-    func testRequestSyncTimesOut() async throws {
-        let (client, peer) = try makeSocketPair()
-        defer { close(peer) }
-        let process = NeovimProcess()
-        await process.attach(readFD: client, writeFD: client)
-
-        let result = await callSync(process, "nvim_get_mode", timeout: .milliseconds(100))
-        guard case .timedOut = result else {
-            return XCTFail("expected .timedOut, got \(result)")
-        }
         await process.disconnect()
     }
 
@@ -827,16 +803,6 @@ final class NeovimProcessTests: XCTestCase {
             XCTAssertTrue(detail.contains("E212:"), detail)
             XCTAssertTrue(
                 detail.contains("Can't open file for writing"), detail)
-        }
-    }
-
-    func testRequestSyncReturnsResponse() async throws {
-        try await withNvim { process in
-            let result = await callSync(process, "nvim_eval", [.string("2 * 3")], timeout: .seconds(5))
-            guard case .response(let response) = result else {
-                return XCTFail("expected .response, got \(result)")
-            }
-            XCTAssertEqual(response.result, .int(6))
         }
     }
 

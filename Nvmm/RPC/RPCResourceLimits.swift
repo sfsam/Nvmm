@@ -25,7 +25,7 @@ nonisolated struct RPCResourceLimits: Sendable {
     var maximumGridHeight = Int(Int16.max)
     var maximumCellTextBytes = 24
     var maximumReverseRequests = 8
-    var maximumRetainedNotifications = 16
+    var maximumRetainedBells = 16
     var maximumProgressEntries = 1_024
     var maximumHighlightGroupMappings = 64
     var maximumGuifontBytes = 4_096

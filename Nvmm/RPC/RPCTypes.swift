@@ -97,27 +97,18 @@ extension RPCTransportError: CustomStringConvertible {
 
 /// An error thrown by an asynchronous `request`.
 nonisolated enum RPCError: Error, Sendable {
-    /// The request deadline elapsed before a response arrived.
-    case timedOut
     /// The connection failed; the request will never be answered.
     case transport(RPCTransportError)
 }
 
-/// The outcome of a synchronous `requestSync`. Unlike `request`, no case is
-/// thrown; the caller inspects it.
-nonisolated enum RPCSyncResult: Sendable {
+/// The outcome of an asynchronous request bounded by a caller-side deadline.
+nonisolated enum RPCRequestResult: Sendable {
     /// Neovim replied; inspect `error` and `result`.
     case response(RPCResponse)
     /// The request deadline elapsed before a response arrived.
     case timedOut
     /// The connection failed before a response arrived.
     case transport(RPCTransportError)
-}
-
-/// An inbound MessagePack-RPC notification: a method name and its arguments.
-nonisolated struct RPCNotification: Sendable, Equatable {
-    var method: String
-    var arguments: [MPValue]
 }
 
 /// The outcome of an inbound RPC request handler: a result value returned to
