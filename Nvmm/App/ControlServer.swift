@@ -64,27 +64,62 @@ final class CLIResponseChannel {
 }
 
 @MainActor
+struct ControlServerLimits {
+    var maximumPendingConnections = 8
+    var preRequestIdleTimeout: TimeInterval = 5
+    var descriptorRetryInterval: TimeInterval = 1
+}
+
+@MainActor
 final class ControlServer {
     typealias Handler = @MainActor (CLIRequest, CLIResponseChannel) -> Void
+    typealias AcceptClient = @MainActor (Int32) -> Int32
+
+    private enum AcceptState {
+        case running
+        case pausedForDescriptors
+        case cancelled
+    }
 
     private let path: String
+    private let limits: ControlServerLimits
     private let handler: Handler
+    private let acceptClient: AcceptClient
     private var descriptor: Int32 = -1
-    // Only ever running or cancelled, never suspended: releasing a suspended
-    // dispatch source traps in libdispatch.
     private var source: DispatchSourceRead?
+    private var acceptState = AcceptState.cancelled
+    private var descriptorRetryTimer: DispatchSourceTimer?
+    private var descriptorExhaustionActive = false
     private var connections: [ObjectIdentifier: ControlConnection] = [:]
+    private var pendingConnections: Set<ObjectIdentifier> = []
 
-    init(path: String = CLIProtocol.endpointPath(),
-         handler: @escaping Handler) throws {
+    init(
+        path: String = CLIProtocol.endpointPath(),
+        limits: ControlServerLimits = ControlServerLimits(),
+        acceptClient: @escaping AcceptClient = { descriptor in
+            Darwin.accept(descriptor, nil, nil)
+        },
+        handler: @escaping Handler
+    ) throws {
+        precondition(limits.maximumPendingConnections > 0)
+        precondition(limits.preRequestIdleTimeout > 0)
+        precondition(limits.descriptorRetryInterval > 0)
         self.path = path
+        self.limits = limits
+        self.acceptClient = acceptClient
         self.handler = handler
         try start()
     }
 
     deinit {
+        descriptorRetryTimer?.cancel()
+        if case .pausedForDescriptors = acceptState { source?.resume() }
+        source?.cancel()
         if descriptor != -1 { close(descriptor) }
     }
+
+    var pendingConnectionCount: Int { pendingConnections.count }
+    var acceptIsPaused: Bool { acceptState == .pausedForDescriptors }
 
     func stop() {
         disableListener()
@@ -94,6 +129,10 @@ final class ControlServer {
     }
 
     private func disableListener() {
+        descriptorRetryTimer?.cancel()
+        descriptorRetryTimer = nil
+        if acceptState == .pausedForDescriptors { source?.resume() }
+        acceptState = .cancelled
         source?.cancel()
         source = nil
         if descriptor != -1 {
@@ -133,6 +172,7 @@ final class ControlServer {
             fileDescriptor: socket, queue: .main)
         source.setEventHandler { [weak self] in self?.acceptClients() }
         self.source = source
+        acceptState = .running
         source.resume()
     }
 
@@ -169,24 +209,18 @@ final class ControlServer {
     }
 
     private func acceptClients() {
-        while true {
-            let client = accept(descriptor, nil, nil)
+        while acceptState == .running {
+            let client = acceptClient(descriptor)
             if client == -1 {
                 if errno == EINTR { continue }
-                // Out of file descriptors: the connection stays queued and the
-                // listener stays readable, so returning would re-enter at once
-                // and starve the main queue — measured at roughly half a
-                // million handler calls a second. Give up the control channel
-                // for this run rather than freeze the editor. Recovering it
-                // would cost more code than a process this sick is worth.
                 if errno == EMFILE || errno == ENFILE {
-                    Log.control.error("""
-                        No descriptors for control socket; \
-                        CLI requests disabled
-                        """)
-                    disableListener()
+                    pauseForDescriptorExhaustion()
                 }
                 return
+            }
+            if descriptorExhaustionActive {
+                descriptorExhaustionActive = false
+                Log.control.info("Control socket descriptor pressure recovered")
             }
             _ = fcntl(client, F_SETFD, FD_CLOEXEC)
             _ = fcntl(client, F_SETFL,
@@ -201,19 +235,82 @@ final class ControlServer {
                 close(client)
                 continue
             }
+            guard pendingConnections.count
+                    < limits.maximumPendingConnections else {
+                sendTerminalError(
+                    "Too many pending control connections.", to: client)
+                continue
+            }
 
             let connection = ControlConnection(
                 descriptor: client,
+                preRequestIdleTimeout: limits.preRequestIdleTimeout,
                 receive: { [weak self] request, channel in
                     self?.receive(request, channel)
                 },
+                requestComplete: { [weak self] connection in
+                    self?.releasePending(connection)
+                },
                 finish: { [weak self] connection in
-                    self?.connections.removeValue(
-                        forKey: ObjectIdentifier(connection))
+                    self?.connectionFinished(connection)
                 })
-            connections[ObjectIdentifier(connection)] = connection
+            let identifier = ObjectIdentifier(connection)
+            connections[identifier] = connection
+            pendingConnections.insert(identifier)
             connection.start()
         }
+    }
+
+    private func sendTerminalError(_ message: String, to client: Int32) {
+        guard var data = try? JSONEncoder().encode(
+            CLIResponse.error(message)) else {
+            close(client)
+            return
+        }
+        data.append(0x0a)
+        _ = data.withUnsafeBytes { bytes in
+            Darwin.write(client, bytes.baseAddress, bytes.count)
+        }
+        close(client)
+    }
+
+    private func releasePending(_ connection: ControlConnection) {
+        let identifier = ObjectIdentifier(connection)
+        guard pendingConnections.remove(identifier) != nil else { return }
+        resumeAcceptingIfPaused()
+    }
+
+    private func connectionFinished(_ connection: ControlConnection) {
+        let identifier = ObjectIdentifier(connection)
+        connections.removeValue(forKey: identifier)
+        _ = pendingConnections.remove(identifier)
+        resumeAcceptingIfPaused()
+    }
+
+    private func pauseForDescriptorExhaustion() {
+        guard acceptState == .running, let source else { return }
+        acceptState = .pausedForDescriptors
+        source.suspend()
+        if !descriptorExhaustionActive {
+            descriptorExhaustionActive = true
+            Log.control.error(
+                "Control socket paused by descriptor exhaustion")
+        }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + limits.descriptorRetryInterval)
+        timer.setEventHandler { [weak self] in
+            self?.resumeAcceptingIfPaused()
+        }
+        descriptorRetryTimer = timer
+        timer.resume()
+    }
+
+    private func resumeAcceptingIfPaused() {
+        guard acceptState == .pausedForDescriptors, let source else { return }
+        acceptState = .running
+        descriptorRetryTimer?.cancel()
+        descriptorRetryTimer = nil
+        source.resume()
     }
 
     private func receive(_ request: CLIRequest,
@@ -234,19 +331,27 @@ private final class ControlConnection {
     let descriptor: Int32
     private let receive:
         @MainActor (CLIRequest, CLIResponseChannel) -> Void
+    private let preRequestIdleTimeout: TimeInterval
+    private let didCompleteRequest: @MainActor (ControlConnection) -> Void
     private let didFinish: @MainActor (ControlConnection) -> Void
     private var source: DispatchSourceRead?
+    private var deadline: DispatchSourceTimer?
     private var input = Data()
+    private var awaitingRequest = true
     private var finished = false
     private lazy var channel = CLIResponseChannel(self)
 
     init(
         descriptor: Int32,
+        preRequestIdleTimeout: TimeInterval,
         receive: @escaping @MainActor (CLIRequest, CLIResponseChannel) -> Void,
+        requestComplete: @escaping @MainActor (ControlConnection) -> Void,
         finish: @escaping @MainActor (ControlConnection) -> Void
     ) {
         self.descriptor = descriptor
+        self.preRequestIdleTimeout = preRequestIdleTimeout
         self.receive = receive
+        didCompleteRequest = requestComplete
         didFinish = finish
     }
 
@@ -258,6 +363,15 @@ private final class ControlConnection {
         source.setEventHandler { [weak self] in self?.readRequest() }
         self.source = source
         source.resume()
+
+        let deadline = DispatchSource.makeTimerSource(queue: .main)
+        deadline.schedule(deadline: .now() + preRequestIdleTimeout)
+        deadline.setEventHandler { [weak self] in
+            guard let self, self.awaitingRequest else { return }
+            self.finish()
+        }
+        self.deadline = deadline
+        deadline.resume()
     }
 
     func send(_ response: CLIResponse, close shouldClose: Bool = false) {
@@ -281,10 +395,24 @@ private final class ControlConnection {
     func finish() {
         guard !finished else { return }
         finished = true
+        deadline?.cancel()
+        deadline = nil
         source?.cancel()
         source = nil
         close(descriptor)
+        if awaitingRequest {
+            awaitingRequest = false
+            didCompleteRequest(self)
+        }
         didFinish(self)
+    }
+
+    private func completeRequest() {
+        guard awaitingRequest else { return }
+        awaitingRequest = false
+        deadline?.cancel()
+        deadline = nil
+        didCompleteRequest(self)
     }
 
     private func readRequest() {
@@ -307,8 +435,12 @@ private final class ControlConnection {
                 source?.cancel()
                 source = nil
                 do {
-                    receive(try JSONDecoder().decode(
-                        CLIRequest.self, from: input[..<newline]), channel)
+                    let request = try JSONDecoder().decode(
+                        CLIRequest.self, from: input[..<newline])
+                    // Handlers enqueue asynchronous application work and
+                    // return promptly before this releases the pending slot.
+                    defer { completeRequest() }
+                    receive(request, channel)
                 } catch {
                     channel.error("Control request is not valid JSON.")
                 }
