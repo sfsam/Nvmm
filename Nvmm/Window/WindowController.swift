@@ -822,16 +822,15 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
 
             // Remember this server's address so a later `:connect` that fails
             // can fall back to it rather than orphaning it.
-            let servername = try? await process.request(
-                "nvim_eval", [.string("v:servername")])
-            let address = servername?.result.stringValue
+            let address = await process.serverAddress()
 
             guard let self else { return }
             self.isReady = true
             // The connection is up, so a later drop is a real disconnect, not a
             // handoff that failed to connect.
             self.lastHandoffKind = nil
-            if let address, !address.isEmpty { self.currentServerAddress = address }
+            self.connectFallback = nil
+            self.currentServerAddress = address
             self.startStartupTimeout()
 
             for await grid in process.grids {

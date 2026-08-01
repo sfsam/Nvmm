@@ -294,6 +294,7 @@ final class NeovimProcessTests: XCTestCase {
 
     private func readRequest(
         _ fd: Int32, method: String,
+        arguments expectedArguments: [MPValue]? = nil,
         unpacker: inout MessagePackUnpacker
     ) throws -> UInt64 {
         let message = try readMessage(fd, unpacker: &unpacker)
@@ -301,8 +302,12 @@ final class NeovimProcessTests: XCTestCase {
               values[0].integer?.unsigned == 0,
               let id = values[1].integer?.unsigned,
               values[2].stringValue == method,
-              values[3].arrayValue != nil else {
+              let arguments = values[3].arrayValue else {
             XCTFail("expected request for \(method), got \(message)")
+            throw TestIOError()
+        }
+        if let expectedArguments, arguments != expectedArguments {
+            XCTFail("unexpected arguments for \(method): \(arguments)")
             throw TestIOError()
         }
         return id
@@ -375,6 +380,61 @@ final class NeovimProcessTests: XCTestCase {
     }
 
     // MARK: Controlled-peer cases
+
+    func testServerAddressReturnsNilForEmptyAddress() async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+
+        let address = Task { await process.serverAddress() }
+        var unpacker = MessagePackUnpacker()
+        let id = try readRequest(
+            pair.peer, method: "nvim_eval",
+            arguments: [.string("v:servername")], unpacker: &unpacker)
+        try writeResponse(pair.peer, id: id, result: .string(""))
+
+        let result = await address.value
+        XCTAssertNil(result)
+        await process.disconnect()
+    }
+
+    func testServerAddressReturnsNilForErrorResponse() async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+
+        let address = Task { await process.serverAddress() }
+        var unpacker = MessagePackUnpacker()
+        let id = try readRequest(
+            pair.peer, method: "nvim_eval",
+            arguments: [.string("v:servername")], unpacker: &unpacker)
+        try writeResponse(
+            pair.peer, id: id,
+            error: .array([.int(0), .string("evaluation failed")]))
+
+        let result = await address.value
+        XCTAssertNil(result)
+        await process.disconnect()
+    }
+
+    func testServerAddressReturnsNilWhenConnectionDrops() async throws {
+        let pair = try makeSocketPair()
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+
+        let address = Task { await process.serverAddress() }
+        var unpacker = MessagePackUnpacker()
+        _ = try readRequest(
+            pair.peer, method: "nvim_eval",
+            arguments: [.string("v:servername")], unpacker: &unpacker)
+        close(pair.peer)
+
+        let result = await address.value
+        XCTAssertNil(result)
+        await process.disconnect()
+    }
 
     func testUIAttachReportsPostAttachLuaError() async throws {
         let pair = try makeSocketPair()

@@ -462,6 +462,33 @@ actor NeovimProcess {
         }
     }
 
+    /// The attached Neovim's RPC address (`v:servername`), or nil when it has
+    /// none. `server_start` can fail, and Neovim then reports an empty address.
+    func serverAddress(timeout: Duration = .seconds(5)) async -> String? {
+        switch await requestBounded(
+            "nvim_eval", [.string("v:servername")], timeout: timeout
+        ) {
+        case .response(let response):
+            guard !response.isError else {
+                let detail = String(describing: response.error)
+                Log.rpc.error("Could not read v:servername: \(detail)")
+                return nil
+            }
+            guard let address = response.result.stringValue,
+                  !address.isEmpty else {
+                Log.rpc.error("Neovim reported no RPC server address")
+                return nil
+            }
+            return address
+        case .timedOut:
+            Log.rpc.error("Timed out reading v:servername")
+            return nil
+        case .transport(let error):
+            Log.rpc.error("Could not read v:servername: \(error)")
+            return nil
+        }
+    }
+
     /// Sends a fire-and-forget notification. No response is expected.
     func notify(_ method: String, _ arguments: [MPValue] = []) {
         guard state == .connected else { return }

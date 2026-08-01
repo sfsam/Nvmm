@@ -1,6 +1,9 @@
 # Build artifacts (includes bundled Neovim from download_nvim.sh)
 /build/
 
+# Neovim may write this when sandboxed tests deny its normal state paths
+/nvim.log
+
 # Xcode
 xcuserdata/
 *.xcuserstate
