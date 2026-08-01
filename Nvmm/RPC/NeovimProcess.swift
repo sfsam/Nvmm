@@ -991,9 +991,9 @@ extension NeovimProcess {
     ///
     /// Runs the startup transaction under one shared deadline:
     /// `nvim_get_api_info` → validate → `nvim_set_client_info` →
-    /// `nvim_ui_attach`, attaching only the options Neovim supports. On
-    /// success, redraw notifications feed the UI model and flushed grids are
-    /// published on `grids`.
+    /// `nvim_ui_attach` → post-attach Lua setup, attaching only the options
+    /// Neovim supports. On success, redraw notifications feed the UI model and
+    /// flushed grids are published on `grids`.
     func uiAttach(width: Int, height: Int, options: UIOptions,
                   timeout: Duration = .seconds(5)) async -> UIAttachResult {
         let controller = ui ?? UIController(
@@ -1043,9 +1043,19 @@ extension NeovimProcess {
             return attachFailure(attachOutcome, "UI attachment")
         }
 
-        installModifiedAutocmd()
-        installProgressAutocmd()
-        installFileHelpers()
+        let setupScripts = [
+            ("Modified-state setup", Self.modifiedAutocmdLua),
+            ("Progress setup", Self.progressAutocmdLua),
+            ("File-menu setup", Self.fileHelpersLua),
+        ]
+        for (operation, lua) in setupScripts {
+            let outcome = await requestWaiting(
+                "nvim_exec_lua", [.string(lua), .array([])], until: deadline)
+            guard case .response(let response) = outcome,
+                  !response.isError else {
+                return attachFailure(outcome, operation)
+            }
+        }
 
         var result = validation
         result.status = .success
@@ -1058,37 +1068,30 @@ extension NeovimProcess {
     /// `BufEnter`/`WinEnter` cover the buffer changing without the flag itself
     /// changing; `OptionSet pattern=modified` covers `:set (no)modified`, which
     /// `BufModifiedSet` does not fire for. The trailing `notify()` seeds the
-    /// initial state. Fire-and-forget, matching the post-attach convention.
-    private func installModifiedAutocmd() {
-        let lua = """
-            local group = vim.api.nvim_create_augroup('NvmmModified', {clear=true})
-            local function notify()
-              vim.rpcnotify(0, 'modified', vim.bo.modified)
-            end
-            vim.api.nvim_create_autocmd({'BufModifiedSet', 'BufEnter', 'WinEnter'},
-              {group=group, callback=notify})
-            vim.api.nvim_create_autocmd('OptionSet',
-              {group=group, pattern='modified', callback=notify})
-            notify()
-            """
-        notify("nvim_exec_lua", [.string(lua), .array([])])
-    }
+    /// initial state.
+    private static let modifiedAutocmdLua = """
+        local group = vim.api.nvim_create_augroup('NvmmModified', {clear=true})
+        local function notify()
+          vim.rpcnotify(0, 'modified', vim.bo.modified)
+        end
+        vim.api.nvim_create_autocmd({'BufModifiedSet', 'BufEnter', 'WinEnter'},
+          {group=group, callback=notify})
+        vim.api.nvim_create_autocmd('OptionSet',
+          {group=group, pattern='modified', callback=notify})
+        notify()
+        """
 
     /// Installs the autocmd that forwards Neovim's `Progress` events over RPC
     /// (consumed on `progressUpdates`), for the window's progress bar. The
     /// event carries the task's id, status, and percentage in `ev.data`, which
     /// is passed through unchanged. Guarded on the event existing, so an older
-    /// Neovim without it simply reports no progress. Fire-and-forget, matching
-    /// the post-attach convention.
-    private func installProgressAutocmd() {
-        let lua = """
-            if vim.fn.exists('##Progress') ~= 1 then return end
-            local group = vim.api.nvim_create_augroup('NvmmProgress', {clear=true})
-            vim.api.nvim_create_autocmd('Progress', {group=group,
-              callback=function(ev) vim.rpcnotify(0, 'progress', ev.data) end})
-            """
-        notify("nvim_exec_lua", [.string(lua), .array([])])
-    }
+    /// Neovim without it simply reports no progress.
+    private static let progressAutocmdLua = """
+        if vim.fn.exists('##Progress') ~= 1 then return end
+        local group = vim.api.nvim_create_augroup('NvmmProgress', {clear=true})
+        vim.api.nvim_create_autocmd('Progress', {group=group,
+          callback=function(ev) vim.rpcnotify(0, 'progress', ev.data) end})
+        """
 
     /// Points Neovim's `g:clipboard` provider at this UI, so the `+`/`*`
     /// registers route through the `clipboard_get`/`clipboard_set` request

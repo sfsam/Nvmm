@@ -263,17 +263,101 @@ final class NeovimProcessTests: XCTestCase {
         }
     }
 
+    private func writeResponse(
+        _ fd: Int32, id: UInt64, error: MPValue = .null,
+        result: MPValue = .null
+    ) throws {
+        var writer = MessagePackWriter()
+        writer.encodeResponse(id: id, error: error, result: result)
+        try writeAll(fd, writer.bytes)
+    }
+
     /// Reads one complete MessagePack value from a blocking descriptor.
     private func readMessage(_ fd: Int32) throws -> MPValue {
         var unpacker = MessagePackUnpacker()
+        return try readMessage(fd, unpacker: &unpacker)
+    }
+
+    /// Reads one value while retaining any later values from the same read.
+    private func readMessage(
+        _ fd: Int32, unpacker: inout MessagePackUnpacker
+    ) throws -> MPValue {
         var buffer = [UInt8](repeating: 0, count: 4096)
         for _ in 0..<1_024 {
+            if let value = unpacker.unpack() { return value }
             let count = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
             if count <= 0 { break }
             unpacker.feed(buffer[0..<count])
-            if let value = unpacker.unpack() { return value }
         }
         throw TestIOError()
+    }
+
+    private func readRequest(
+        _ fd: Int32, method: String,
+        unpacker: inout MessagePackUnpacker
+    ) throws -> UInt64 {
+        let message = try readMessage(fd, unpacker: &unpacker)
+        guard let values = message.arrayValue, values.count == 4,
+              values[0].integer?.unsigned == 0,
+              let id = values[1].integer?.unsigned,
+              values[2].stringValue == method,
+              values[3].arrayValue != nil else {
+            XCTFail("expected request for \(method), got \(message)")
+            throw TestIOError()
+        }
+        return id
+    }
+
+    private func readNotification(
+        _ fd: Int32, method: String,
+        unpacker: inout MessagePackUnpacker
+    ) throws {
+        let message = try readMessage(fd, unpacker: &unpacker)
+        guard let values = message.arrayValue, values.count == 3,
+              values[0].integer?.unsigned == 2,
+              values[1].stringValue == method,
+              values[2].arrayValue != nil else {
+            XCTFail("expected notification for \(method), got \(message)")
+            throw TestIOError()
+        }
+    }
+
+    private func compatibleAPIMetadata() -> MPValue {
+        let functions = [
+            "nvim_set_client_info", "nvim_ui_attach", "nvim_exec_lua",
+            "nvim_call_function",
+        ].map { MPValue.map([(.string("name"), .string($0))]) }
+        let version: MPValue = .map([
+            (.string("major"), .int(0)),
+            (.string("minor"), .int(12)),
+            (.string("patch"), .int(0)),
+        ])
+        let info: MPValue = .map([
+            (.string("version"), version),
+            (.string("functions"), .array(functions)),
+            (.string("ui_options"), .array([.string("ext_linegrid")])),
+        ])
+        return .array([.int(1), info])
+    }
+
+    private func answerAttachPreamble(
+        _ fd: Int32, unpacker: inout MessagePackUnpacker
+    ) throws {
+        var id = try readRequest(
+            fd, method: "nvim_get_api_info", unpacker: &unpacker)
+        try writeResponse(fd, id: id, result: compatibleAPIMetadata())
+
+        id = try readRequest(
+            fd, method: "nvim_set_client_info", unpacker: &unpacker)
+        try writeResponse(fd, id: id)
+        try readNotification(
+            fd, method: "nvim_command", unpacker: &unpacker)
+        try readNotification(
+            fd, method: "nvim_command", unpacker: &unpacker)
+
+        id = try readRequest(
+            fd, method: "nvim_ui_attach", unpacker: &unpacker)
+        try writeResponse(fd, id: id)
     }
 
     /// Runs `requestSync` off the Swift cooperative pool, as an AppKit caller
@@ -302,6 +386,59 @@ final class NeovimProcessTests: XCTestCase {
     }
 
     // MARK: Controlled-peer cases
+
+    func testUIAttachReportsPostAttachLuaError() async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+        var options = UIOptions()
+        options.extLinegrid = true
+
+        let attach = Task {
+            await process.uiAttach(width: 80, height: 24, options: options)
+        }
+        var unpacker = MessagePackUnpacker()
+        try answerAttachPreamble(pair.peer, unpacker: &unpacker)
+
+        var id = try readRequest(
+            pair.peer, method: "nvim_exec_lua", unpacker: &unpacker)
+        try writeResponse(pair.peer, id: id)
+        id = try readRequest(
+            pair.peer, method: "nvim_exec_lua", unpacker: &unpacker)
+        let setupError = MPValue.string("setup failed")
+        try writeResponse(pair.peer, id: id, error: setupError)
+
+        let result = await attach.value
+        XCTAssertEqual(result.status, .rpcError)
+        XCTAssertEqual(result.message, "Progress setup was rejected by Neovim")
+        XCTAssertEqual(result.rpcError, setupError)
+        await process.disconnect()
+    }
+
+    func testUIAttachTimesOutDuringPostAttachLua() async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+        var options = UIOptions()
+        options.extLinegrid = true
+
+        let attach = Task {
+            await process.uiAttach(
+                width: 80, height: 24, options: options,
+                timeout: .seconds(1))
+        }
+        var unpacker = MessagePackUnpacker()
+        try answerAttachPreamble(pair.peer, unpacker: &unpacker)
+        _ = try readRequest(
+            pair.peer, method: "nvim_exec_lua", unpacker: &unpacker)
+
+        let result = await attach.value
+        XCTAssertEqual(result.status, .timedOut)
+        XCTAssertEqual(result.message, "Modified-state setup timed out")
+        await process.disconnect()
+    }
 
     func testProgressCompletionSurvivesLaterStateUpdate() async {
         let completion = ProgressUpdate(percent: 100, isCompletion: true)
@@ -598,6 +735,31 @@ final class NeovimProcessTests: XCTestCase {
         let result = await process.uiAttach(
             width: 80, height: 24, options: options)
         guard result.status == .success else { throw TestIOError() }
+    }
+
+    func testUIAttachCompletesRequiredLuaSetup() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            let lua = """
+                local helpers = type(_G.nvmm) == 'table'
+                  and type(_G.nvmm.open_tabs) == 'function'
+                  and type(_G.nvmm.open_buffers) == 'function'
+                  and type(_G.nvmm.open_count) == 'function'
+                  and type(_G.nvmm.write_as) == 'function'
+                  and type(_G.nvmm.drop_text) == 'function'
+                local modified = #vim.api.nvim_get_autocmds(
+                  {group='NvmmModified'}) > 0
+                local progress = vim.fn.exists('##Progress') ~= 1
+                  or #vim.api.nvim_get_autocmds({group='NvmmProgress'}) > 0
+                return {helpers, modified, progress}
+                """
+            let response = try await process.request(
+                "nvim_exec_lua", [.string(lua), .array([])])
+
+            XCTAssertFalse(response.isError)
+            XCTAssertEqual(response.result.arrayValue,
+                           [.bool(true), .bool(true), .bool(true)])
+        }
     }
 
     private func waitForEditorState(

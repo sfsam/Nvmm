@@ -52,7 +52,7 @@ nonisolated struct APIVersion: Sendable, Equatable, Comparable {
 
 /// The outcome category of a UI attachment attempt.
 nonisolated enum UIAttachStatus: Sendable, Equatable {
-    case success          // Negotiation and nvim_ui_attach completed.
+    case success          // Attachment and required Lua setup completed.
     case incompatible     // Version, metadata, method, or capability mismatch.
     case rpcError         // Neovim rejected a setup request; inspect rpcError.
     case timedOut         // The shared setup deadline expired.

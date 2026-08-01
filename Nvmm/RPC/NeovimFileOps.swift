@@ -11,8 +11,8 @@
 //  Performing both inside one actor call orders them by construction, without
 //  routing through the input stream.
 //
-//  Every command that names a file goes through helpers installed by
-//  `installFileHelpers`, which use `nvim_cmd` with file and bar magic disabled
+//  Every command that names a file goes through helpers installed at UI attach,
+//  which use `nvim_cmd` with file and bar magic disabled
 //  so `%`, `#`, `|`, and spaces in a path are taken literally.
 //
 
@@ -332,17 +332,15 @@ extension NeovimProcess {
 // MARK: - Helper installation
 
 extension NeovimProcess {
-    /// Installs the Lua helpers the File menu calls into. They live in a global
-    /// table so each call is a short `nvim_exec_lua` rather than a resend of
-    /// the source, and so they are reachable by name after a reconnect
-    /// reinstalls them.
+    /// Lua helpers the File menu calls into. They live in a global table so
+    /// each call is a short `nvim_exec_lua` rather than a resend of the source,
+    /// and so they are reachable by name after a reconnect reinstalls them.
     ///
     /// `open_tabs` follows the behavior of a document-based editor rather than
     /// opening a tab per path unconditionally: a pristine untitled window edits
     /// the first path in place, a path already showing in a window is revealed
     /// by switching to it, and anything else opens a new tab.
-    func installFileHelpers() {
-        let lua = """
+    static let fileHelpersLua = """
             _G.nvmm = _G.nvmm or {}
 
             -- Runs a file command with the path taken literally: no wildcard
@@ -425,7 +423,5 @@ extension NeovimProcess {
               vim.fn.setpos("'>", vim.fn.getpos('.'))
               vim.cmd('normal! gv')
             end
-            """
-        notify("nvim_exec_lua", [.string(lua), .array([])])
-    }
+        """
 }
