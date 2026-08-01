@@ -225,15 +225,18 @@ nonisolated struct Grid: Sendable {
     var emojiWidthDouble = true
     /// Whether Neovim accepts passive mouse movement as `<MouseMove>` input.
     var mouseMoveEvent = false
-    /// The `guifont` option string (`option_set`), carried on the snapshot so
-    /// the window can rebuild its font without a live query.
+    /// Font options carried from `option_set` so the window can rebuild its
+    /// primary and double-width faces without a live query.
     var guifont = ""
+    var guifontwide = ""
+    /// Extra backing-pixel rows between text lines.
+    var linespace = 0
     /// The visible line range and buffer length Neovim last reported
     /// (`win_viewport`), carried on the snapshot so the window's scrollbar
     /// tracks the viewport in flush order.
     var viewport = ViewportState()
     /// True once Neovim has fired `VimEnter`, so startup config (including the
-    /// final `guifont`) has been applied. The window holds its first paint
+    /// final font options) has been applied. The window holds its first paint
     /// until a snapshot with this set, so it never shows an interim font.
     var startupComplete = false
 

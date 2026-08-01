@@ -300,7 +300,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     }
 
     /// Sets the font and recomputes cell and line-decoration metrics.
-    func setFont(_ font: FontFamily) {
+    func setFont(_ font: FontFamily, lineSpace: Int = 0) {
         clearCursorTrails()
         fontFamily = font
 
@@ -318,7 +318,10 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         // size integral and the drawable exactly grid-sized. The extra pixels
         // fall below the descent as padding.
         let scale = max(1, Int(font.scaleFactor.rounded()))
-        let cellHeight = roundUp(leading + descent + ascent, toMultipleOf: scale)
+        let naturalHeight = leading + descent + ascent
+        let spacedHeight = max(CGFloat(scale),
+                               naturalHeight + CGFloat(lineSpace))
+        let cellHeight = roundUp(spacedHeight, toMultipleOf: scale)
         let cellWidth = roundUp(width, toMultipleOf: scale)
 
         cellSizePixels = SIMD2<Float>(Float(cellWidth), Float(cellHeight))

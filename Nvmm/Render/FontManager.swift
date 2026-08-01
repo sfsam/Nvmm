@@ -19,29 +19,36 @@ struct FontFamily {
     /// Faces indexed by `FontAttributes` raw order: none, bold, italic,
     /// bold italic.
     private var fonts: [CTFont]
+    private var wideFonts: [CTFont]?
 
     /// The size before applying `scaleFactor`, in points.
     let unscaledSize: CGFloat
+    fileprivate let wideUnscaledSize: CGFloat?
 
     /// The backing-scale multiplier applied to `unscaledSize`.
     let scaleFactor: CGFloat
 
-    fileprivate init(fonts: [CTFont], unscaledSize: CGFloat, scaleFactor: CGFloat) {
+    fileprivate init(fonts: [CTFont], wideFonts: [CTFont]?,
+                     unscaledSize: CGFloat, wideUnscaledSize: CGFloat?,
+                     scaleFactor: CGFloat) {
         self.fonts = fonts
+        self.wideFonts = wideFonts
         self.unscaledSize = unscaledSize
+        self.wideUnscaledSize = wideUnscaledSize
         self.scaleFactor = scaleFactor
     }
 
     /// The regular face.
     var regular: CTFont { fonts[0] }
 
-    /// The face matching the given cell attributes.
-    func font(_ attributes: FontAttributes) -> CTFont {
+    /// The face matching the given cell attributes and display width.
+    func font(_ attributes: FontAttributes, wide: Bool = false) -> CTFont {
+        let faces = wide ? wideFonts ?? fonts : fonts
         switch attributes {
-        case .none: return fonts[0]
-        case .bold: return fonts[1]
-        case .italic: return fonts[2]
-        case .boldItalic: return fonts[3]
+        case .none: return faces[0]
+        case .bold: return faces[1]
+        case .italic: return faces[2]
+        case .boldItalic: return faces[3]
         }
     }
 
@@ -73,11 +80,13 @@ struct FontFamily {
 
 /// Creates and caches `CTFont` objects so equivalent fonts share one instance.
 ///
-/// Fonts are retained for the manager's lifetime, so a font's address uniquely
-/// identifies it for hashing and equality. This keeps fonts cheap to compare
-/// and lets glyph caches key on font identity.
+/// Recently used fonts are retained in a bounded cache so equivalent requests
+/// normally share one object. Glyph-cache keys retain their fonts
+/// independently, so an address remains unique for as long as identity is used.
 final class FontManager {
-    private static let maximumCachedFonts = 64
+    // Covers every integer zoom size from 6 through 72 with four primary and
+    // four optional wide faces, plus room for the initial family.
+    private static let maximumCachedFonts = 576
 
     private struct Entry {
         let font: CTFont
@@ -125,39 +134,64 @@ final class FontManager {
         return font
     }
 
-    /// A family built from a descriptor at the given unscaled size.
+    /// A family built from primary and optional double-width descriptors.
     func family(descriptor: CTFontDescriptor, size: CGFloat,
-                scaleFactor: CGFloat) -> FontFamily {
-        let scaledSize = size * scaleFactor
-        let mask: CTFontSymbolicTraits = [.traitBold, .traitItalic]
+                scaleFactor: CGFloat,
+                wideDescriptor: CTFontDescriptor? = nil,
+                wideSize: CGFloat? = nil) -> FontFamily {
+        let fonts = faces(for: descriptor, size: size * scaleFactor)
+        let resolvedWideSize = wideDescriptor.map { _ in wideSize ?? size }
+        let wideFonts: [CTFont]?
+        if let wideDescriptor, let resolvedWideSize {
+            wideFonts = faces(
+                for: wideDescriptor, size: resolvedWideSize * scaleFactor)
+        } else {
+            wideFonts = nil
+        }
+        return FontFamily(fonts: fonts, wideFonts: wideFonts,
+                          unscaledSize: size,
+                          wideUnscaledSize: resolvedWideSize,
+                          scaleFactor: scaleFactor)
+    }
 
+    /// A copy of `family` at a new unscaled size, otherwise equivalent.
+    func resized(_ family: FontFamily, size: CGFloat,
+                 scaleFactor: CGFloat) -> FontFamily {
+        let faces: [FontAttributes] = [.none, .bold, .italic, .boldItalic]
+        let fonts = faces.map {
+            font(for: CTFontCopyFontDescriptor(family.font($0)),
+                 size: size * scaleFactor)
+        }
+        let wideSize = family.wideUnscaledSize.map {
+            max(1, $0 + size - family.unscaledSize)
+        }
+        let wideFonts = wideSize.map { wideSize in
+            faces.map {
+                font(for: CTFontCopyFontDescriptor(
+                    family.font($0, wide: true)),
+                     size: wideSize * scaleFactor)
+            }
+        }
+        return FontFamily(fonts: fonts, wideFonts: wideFonts,
+                          unscaledSize: size, wideUnscaledSize: wideSize,
+                          scaleFactor: scaleFactor)
+    }
+
+    private func faces(for descriptor: CTFontDescriptor,
+                       size: CGFloat) -> [CTFont] {
+        let mask: CTFontSymbolicTraits = [.traitBold, .traitItalic]
         let boldDescriptor = CTFontDescriptorCreateCopyWithSymbolicTraits(
             descriptor, .traitBold, mask)
         let italicDescriptor = CTFontDescriptorCreateCopyWithSymbolicTraits(
             descriptor, .traitItalic, mask)
         let boldItalicDescriptor = CTFontDescriptorCreateCopyWithSymbolicTraits(
             descriptor, mask, mask)
-
-        let regular = font(for: descriptor, size: scaledSize)
-        let bold = boldDescriptor.map { font(for: $0, size: scaledSize) } ?? regular
-        let italic = italicDescriptor.map { font(for: $0, size: scaledSize) } ?? regular
+        let regular = font(for: descriptor, size: size)
+        let bold = boldDescriptor.map { font(for: $0, size: size) } ?? regular
+        let italic = italicDescriptor.map { font(for: $0, size: size) } ?? regular
         let boldItalic = boldItalicDescriptor.map {
-            font(for: $0, size: scaledSize)
+            font(for: $0, size: size)
         } ?? regular
-
-        return FontFamily(fonts: [regular, bold, italic, boldItalic],
-                          unscaledSize: size, scaleFactor: scaleFactor)
-    }
-
-    /// A copy of `family` at a new unscaled size, otherwise equivalent.
-    func resized(_ family: FontFamily, size: CGFloat,
-                 scaleFactor: CGFloat) -> FontFamily {
-        let scaledSize = size * scaleFactor
-        let faces: [FontAttributes] = [.none, .bold, .italic, .boldItalic]
-        let fonts = faces.map { face -> CTFont in
-            let descriptor = CTFontCopyFontDescriptor(family.font(face))
-            return font(for: descriptor, size: scaledSize)
-        }
-        return FontFamily(fonts: fonts, unscaledSize: size, scaleFactor: scaleFactor)
+        return [regular, bold, italic, boldItalic]
     }
 }

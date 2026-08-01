@@ -86,7 +86,7 @@ final class GlyphManager {
 
     /// A cached glyph for a cell, using the cell's own font face and colors.
     func glyph(family: FontFamily, cell: Cell) -> glyph_rect {
-        let font = family.font(cell.fontAttributes)
+        let font = family.font(cell.fontAttributes, wide: cell.width == 2)
         return glyph(font: font, text: cell.text,
                      background: cell.background, foreground: cell.foreground)
     }
@@ -94,7 +94,7 @@ final class GlyphManager {
     /// A cached glyph for a cell rendered with explicit colors.
     func glyph(family: FontFamily, cell: Cell, background: RGBColor,
                foreground: RGBColor) -> glyph_rect {
-        let font = family.font(cell.fontAttributes)
+        let font = family.font(cell.fontAttributes, wide: cell.width == 2)
         return glyph(font: font, text: cell.text,
                      background: background, foreground: foreground)
     }

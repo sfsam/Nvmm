@@ -91,6 +91,8 @@ nonisolated final class UIController {
     private(set) var modified = false
     private(set) var title = "NVIM"
     private(set) var guifont = ""
+    private(set) var guifontwide = ""
+    private(set) var linespace = 0
     // Set once Neovim fires `VimEnter`; stamped onto each flushed snapshot.
     private(set) var vimentered = false
     private(set) var uiOptions = UIOptions()
@@ -597,6 +599,16 @@ nonisolated final class UIController {
                font.utf8.count <= limits.maximumGuifontBytes {
                 guifont = font
             }
+        case "guifontwide":
+            if let font = value.stringValue,
+               font.utf8.count <= limits.maximumGuifontBytes {
+                guifontwide = font
+            }
+        case "linespace":
+            let bound = limits.maximumLineSpacePixels
+            if let spacing = asInt(value), (-bound...bound).contains(spacing) {
+                linespace = spacing
+            }
         case "mousemoveevent":
             if let on = value.boolValue { mousemoveevent = on }
         case "ambiwidth":
@@ -639,6 +651,8 @@ nonisolated final class UIController {
         writing.emojiWidthDouble = emojiWidthDouble
         writing.mouseMoveEvent = mousemoveevent
         writing.guifont = guifont
+        writing.guifontwide = guifontwide
+        writing.linespace = linespace
         writing.viewport = viewport
         writing.startupComplete = vimentered
         globalGrid = writing

@@ -184,9 +184,10 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     // entry that omits a `:h<size>` suffix.
     private let defaultFontSize: CGFloat = 15
 
-    // The `guifont` option last applied, so the font is only rebuilt on a
-    // change (an empty string is the default: the monospaced system font).
+    // Font options last applied, so metrics are rebuilt only on a change.
     private var currentGuifont = ""
+    private var currentGuifontwide = ""
+    private var currentLinespace = 0
 
     // Constraints kept so they can be adjusted without rebuilding the layout:
     // the min-size pair on a font change, the trailing inset as the scrollbar
@@ -834,7 +835,10 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
             self.startStartupTimeout()
 
             for await grid in process.grids {
-                self.applyGuifont(grid.guifont)
+                self.applyFontOptions(
+                    guifont: grid.guifont,
+                    guifontwide: grid.guifontwide,
+                    linespace: grid.linespace)
                 self.applyBackground(grid.defaultBackground)
                 self.gridView.setGrid(grid)
                 self.scroller.update(topline: grid.viewport.topline,
@@ -1227,18 +1231,38 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         window?.appearance = NSAppearance(named: appearance)
     }
 
-    /// Rebuilds the grid view's font from a `guifont` option string. Only acts
-    /// on a change; the empty default keeps the monospaced system font set at
-    /// launch, so no work is done until the user sets `guifont`.
-    private func applyGuifont(_ guifont: String) {
-        guard guifont != currentGuifont else { return }
+    /// Rebuilds font and row metrics when a Neovim font option changes.
+    private func applyFontOptions(guifont: String, guifontwide: String,
+                                  linespace: Int) {
+        let primaryChanged = guifont != currentGuifont
+        let wideChanged = guifontwide != currentGuifontwide
+        let spacingChanged = linespace != currentLinespace
+        guard primaryChanged || wideChanged || spacingChanged else { return }
+
         currentGuifont = guifont
+        currentGuifontwide = guifontwide
+        currentLinespace = linespace
+
+        if !primaryChanged, !wideChanged,
+           let font = gridView.fontFamily {
+            setFont(font)
+            return
+        }
         guard let screen = window?.screen ?? NSScreen.main else { return }
 
-        let (descriptor, size) = resolveFont(guifont)
+        let descriptor: CTFontDescriptor
+        let size: CGFloat
+        if !primaryChanged, let current = gridView.fontFamily {
+            descriptor = CTFontCopyFontDescriptor(current.regular)
+            size = current.unscaledSize
+        } else {
+            (descriptor, size) = resolveFont(guifont)
+        }
+        let wide = resolveWideFont(guifontwide, defaultSize: size)
         let font = renderManager.fontManager.family(
             descriptor: descriptor, size: size,
-            scaleFactor: screen.backingScaleFactor)
+            scaleFactor: screen.backingScaleFactor,
+            wideDescriptor: wide?.0, wideSize: wide?.1)
         setFont(font)
     }
 
@@ -1259,11 +1283,29 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         return (FontManager.defaultDescriptor(), defaultFontSize)
     }
 
+    /// Resolves the optional double-width font. An empty value retains
+    /// CoreText's automatic fallback from the primary face.
+    private func resolveWideFont(
+        _ guifontwide: String, defaultSize: CGFloat
+    ) -> (CTFontDescriptor, CGFloat)? {
+        let fonts = parseGuifont(guifontwide, defaultSize: defaultSize)
+        for entry in fonts {
+            if let descriptor = FontManager.makeDescriptor(entry.name) {
+                return (descriptor, entry.size)
+            }
+        }
+        if !fonts.isEmpty {
+            enqueue(.errorWriteln(
+                "Error: Invalid font(s): guifontwide=\(guifontwide)"))
+        }
+        return nil
+    }
+
     /// Applies a new font: the grid keeps its size in cells while the window's
     /// pixel size, resize increment, and minimum-size constraints are recomputed
     /// from the new cell size.
     private func setFont(_ font: FontFamily) {
-        gridView.setFont(font)
+        gridView.setFont(font, lineSpace: currentLinespace)
         let cell = gridView.cellSize
         window?.resizeIncrements = cell
         gridMinWidthConstraint?.constant = cell.width * CGFloat(minGridColumns)

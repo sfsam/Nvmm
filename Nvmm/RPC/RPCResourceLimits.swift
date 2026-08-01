@@ -29,6 +29,7 @@ nonisolated struct RPCResourceLimits: Sendable {
     var maximumProgressEntries = 1_024
     var maximumHighlightGroupMappings = 64
     var maximumGuifontBytes = 4_096
+    var maximumLineSpacePixels = 20
 
     static let production = RPCResourceLimits()
 }

@@ -104,11 +104,13 @@ final class RenderTests: XCTestCase {
         XCTAssertEqual(attempts, 3)
     }
 
-    func testResizedFontFamilyPreservesFacesAndChangesSize() {
+    func testResizedFontFamilyPreservesFacesAndChangesSize() throws {
         let manager = FontManager()
+        let wideDescriptor = try XCTUnwrap(
+            FontManager.makeDescriptor("Helvetica"))
         let family = manager.family(
             descriptor: FontManager.defaultDescriptor(), size: 15,
-            scaleFactor: 1)
+            scaleFactor: 1, wideDescriptor: wideDescriptor, wideSize: 14)
         let resized = manager.resized(family, size: 16, scaleFactor: 2)
         let faces: [FontAttributes] = [.none, .bold, .italic, .boldItalic]
 
@@ -118,7 +120,33 @@ final class RenderTests: XCTestCase {
         for face in faces {
             XCTAssertEqual(CTFontCopyPostScriptName(resized.font(face)),
                            CTFontCopyPostScriptName(family.font(face)))
+            XCTAssertEqual(
+                CTFontCopyPostScriptName(resized.font(face, wide: true)),
+                CTFontCopyPostScriptName(family.font(face, wide: true)))
         }
+        XCTAssertNotEqual(CTFontCopyPostScriptName(family.font(.none)),
+                          CTFontCopyPostScriptName(
+                            family.font(.none, wide: true)))
+        XCTAssertEqual(CTFontGetSize(resized.font(.none, wide: true)), 30)
+    }
+
+    func testLineSpaceChangesAndClampsCellHeight() {
+        let manager = FontManager()
+        let family = manager.family(
+            descriptor: FontManager.defaultDescriptor(), size: 15,
+            scaleFactor: 2)
+        XCTAssertEqual(
+            CTFontCopyPostScriptName(family.font(.none, wide: true)),
+            CTFontCopyPostScriptName(family.font(.none)))
+        let view = GridView(frame: .zero)
+
+        view.setFont(family)
+        let naturalHeight = view.convertToBacking(view.cellSize).height
+        view.setFont(family, lineSpace: 4)
+        XCTAssertEqual(view.convertToBacking(view.cellSize).height,
+                       naturalHeight + 4)
+        view.setFont(family, lineSpace: -10_000)
+        XCTAssertEqual(view.convertToBacking(view.cellSize).height, 2)
     }
 
     func testGlyphManagerRasterizesAndCaches() throws {

@@ -181,6 +181,37 @@ final class UIControllerTests: XCTestCase {
 
     // MARK: Options
 
+    func testFontLayoutOptionsAreTracked() {
+        var limits = RPCResourceLimits.production
+        limits.maximumGuifontBytes = 8
+        limits.maximumLineSpacePixels = 8
+        let controller = UIController(limits: limits)
+
+        _ = controller.redraw([
+            ["option_set", ["guifontwide", "Wide:h15"]],
+            ["option_set", ["linespace", 3]],
+            ["flush", []],
+        ])
+        XCTAssertEqual(controller.guifontwide, "Wide:h15")
+        XCTAssertEqual(controller.linespace, 3)
+        XCTAssertEqual(controller.globalGrid.guifontwide, "Wide:h15")
+        XCTAssertEqual(controller.globalGrid.linespace, 3)
+
+        _ = controller.redraw([
+            ["option_set", ["guifontwide", "TooLong:h15"]],
+            ["option_set", ["linespace", 9]],
+            ["flush", []],
+        ])
+        XCTAssertEqual(controller.guifontwide, "Wide:h15")
+        XCTAssertEqual(controller.globalGrid.linespace, 3)
+
+        _ = controller.redraw([
+            ["option_set", ["linespace", -2]],
+            ["flush", []],
+        ])
+        XCTAssertEqual(controller.globalGrid.linespace, -2)
+    }
+
     func testMouseMoveEventOptionIsTracked() {
         let controller = UIController()
         XCTAssertFalse(controller.mousemoveevent)
