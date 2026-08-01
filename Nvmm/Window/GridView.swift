@@ -711,25 +711,36 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                             length: lineCount * lineStride)
         }
 
-        guard let metalDrawable = metalLayer.nextDrawable(),
-              let metalBuffer = frame.metalBuffer else {
+        guard let metalBuffer = frame.metalBuffer else {
+            // Successful frame creation guarantees a buffer. Retrying this
+            // invariant failure like a transient drawable loss would spin.
             frame.unlock()
             return
         }
+        guard let metalDrawable = metalLayer.nextDrawable() else {
+            retryFrame(frame)
+            return
+        }
 
-        encode(context: context, drawable: metalDrawable, buffer: metalBuffer,
-               frame: frame, index: index, gridSize: gridSize,
-               uniformOffset: uniformRegion.offset,
-               backgroundOffset: backgroundRegion.offset,
-               glyphOffset: glyphRegion.offset, gridGlyphCount: gridGlyphCount,
-               compositionGlyphCount: glyphCount - gridGlyphCount,
-               cellGraphicOffset: cellGraphicRegion.offset,
-               gridCellGraphicCount: gridCellGraphicCount,
-               compositionCellGraphicCount: cellGraphicCount - gridCellGraphicCount,
-               lineOffset: lineRegion.offset, gridLineCount: gridLineCount,
-               compositionLineCount: lineCount - gridLineCount,
-               cursorShape: drawnShape,
-               clearColor: clearColor(for: grid.defaultBackground))
+        guard encode(
+            context: context, drawable: metalDrawable, buffer: metalBuffer,
+            frame: frame, index: index, gridSize: gridSize,
+            uniformOffset: uniformRegion.offset,
+            backgroundOffset: backgroundRegion.offset,
+            glyphOffset: glyphRegion.offset,
+            gridGlyphCount: gridGlyphCount,
+            compositionGlyphCount: glyphCount - gridGlyphCount,
+            cellGraphicOffset: cellGraphicRegion.offset,
+            gridCellGraphicCount: gridCellGraphicCount,
+            compositionCellGraphicCount: cellGraphicCount - gridCellGraphicCount,
+            lineOffset: lineRegion.offset, gridLineCount: gridLineCount,
+            compositionLineCount: lineCount - gridLineCount,
+            cursorShape: drawnShape,
+            clearColor: clearColor(for: grid.defaultBackground)
+        ) else {
+            retryFrame(frame)
+            return
+        }
     }
 
     /// Appends the preedit's synthetic cells after the grid's: full-block cell
@@ -825,6 +836,11 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                              blue: linear(background.blue), alpha: 1)
     }
 
+    private func retryFrame(_ frame: MetalFrameBuffer) {
+        frame.unlock()
+        needsDisplay = true
+    }
+
     private func encode(context: RenderContext, drawable: CAMetalDrawable,
                         buffer: MTLBuffer, frame: MetalFrameBuffer, index: Int,
                         gridSize: Int, uniformOffset: Int, backgroundOffset: Int,
@@ -835,7 +851,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                         lineOffset: Int, gridLineCount: Int,
                         compositionLineCount: Int,
                         cursorShape: CursorShape?,
-                        clearColor: MTLClearColor) {
+                        clearColor: MTLClearColor) -> Bool {
         let glyphStride = MemoryLayout<glyph_data>.stride
         let lineStride = MemoryLayout<line_data>.stride
         let cellGraphicStride = MemoryLayout<cell_graphic_data>.stride
@@ -846,9 +862,11 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         descriptor.colorAttachments[0].loadAction = .clear
         descriptor.colorAttachments[0].storeAction = .store
 
-        let commandBuffer = context.commandQueue.makeCommandBuffer()!
-        let encoder = commandBuffer.makeRenderCommandEncoder(
-            descriptor: descriptor)!
+        guard let commandBuffer = context.commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeRenderCommandEncoder(
+                descriptor: descriptor) else {
+            return false
+        }
 
         encoder.setRenderPipelineState(context.backgroundPipeline)
         encoder.setVertexBuffer(buffer, offset: uniformOffset, index: 0)
@@ -932,6 +950,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         drawable.present()
 
         context.glyphManager.evict()
+        return true
     }
 
     /// The cursor shape to draw this frame, or nil to draw no cursor. Inactive

@@ -103,17 +103,19 @@ final class GlyphManager {
     /// eviction threshold.
     func evict() {
         if needsEviction || textureCache.pagesCapacity > evictThreshold {
-            performEviction()
-            needsEviction = false
+            needsEviction = !performEviction()
         }
     }
 
-    private func performEviction() {
-        let evicted = textureCache.evict(preserve: evictPreserve)
+    private func performEviction() -> Bool {
+        guard let evicted = textureCache.evict(
+            preserve: evictPreserve) else {
+            return false
+        }
 
         if evicted == 0 {
             if evictPreserve == 0 { map.removeAll() }
-            return
+            return true
         }
 
         let shift = Int16(evicted)
@@ -125,5 +127,6 @@ final class GlyphManager {
             newMap[key] = shifted
         }
         map = newMap
+        return true
     }
 }

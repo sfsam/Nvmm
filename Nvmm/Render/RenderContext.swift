@@ -70,13 +70,15 @@ final class RenderContext {
             vertex: "line_render", fragment: "line_fill",
             label: "Line render pipeline")
 
-        let textureCache = GlyphTextureCache(
+        guard let textureCache = GlyphTextureCache(
             queue: queue,
             pageWidth: options.cachePageWidth,
             pageHeight: options.cachePageHeight,
             initialCapacity: options.cacheInitialCapacity,
             growthFactor: options.cacheGrowthFactor,
-            maximumPages: options.cacheEvictionThreshold)
+            maximumPages: options.cacheEvictionThreshold) else {
+            throw RenderContextError.glyphTextureUnavailable
+        }
 
         glyphManager = GlyphManager(
             rasterizer: rasterizer, textureCache: textureCache,
@@ -116,6 +118,7 @@ final class RenderContext {
 
 enum RenderContextError: Error {
     case commandQueueUnavailable
+    case glyphTextureUnavailable
     case metalUnavailable
 }
 

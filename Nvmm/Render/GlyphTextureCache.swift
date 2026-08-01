@@ -15,8 +15,12 @@ import Metal
 import simd
 
 final class GlyphTextureCache {
+    typealias TextureFactory = @MainActor
+        (MTLDevice, MTLTextureDescriptor) -> MTLTexture?
+
     private let device: MTLDevice
     private let queue: MTLCommandQueue
+    private let makeTexture: TextureFactory
     private(set) var texture: MTLTexture
     private let growthFactor: Double
     private let maximumPages: Int
@@ -29,12 +33,21 @@ final class GlyphTextureCache {
     private var yUsed: Int
     private var rowHeight: Int
 
-    init(queue: MTLCommandQueue, pageWidth: Int, pageHeight: Int,
-         initialCapacity: Int, growthFactor: Double,
-         maximumPages: Int = 64) {
+    init?(queue: MTLCommandQueue, pageWidth: Int, pageHeight: Int,
+          initialCapacity: Int, growthFactor: Double,
+          maximumPages: Int = 64,
+          makeTexture: @escaping TextureFactory = defaultTextureFactory) {
         precondition(maximumPages > 0)
-        self.device = queue.device
+        let device = queue.device
+        let pageCount = min(maximumPages, max(1, initialCapacity))
+        guard let texture = Self.allocTexture(
+            device: device, width: pageWidth, height: pageHeight,
+            length: pageCount, makeTexture: makeTexture) else {
+            return nil
+        }
+        self.device = device
         self.queue = queue
+        self.makeTexture = makeTexture
         self.growthFactor = growthFactor
         self.maximumPages = maximumPages
         xUsed = 0
@@ -43,9 +56,8 @@ final class GlyphTextureCache {
         ySize = pageHeight
         rowHeight = 0
         pageIndex = 0
-        pageCount = min(maximumPages, max(1, initialCapacity))
-        texture = Self.allocTexture(device: device, width: pageWidth,
-                                    height: pageHeight, length: pageCount)
+        self.pageCount = pageCount
+        self.texture = texture
     }
 
     // Nonisolated so teardown skips the isolated-deinit executor hop that trips
@@ -58,8 +70,10 @@ final class GlyphTextureCache {
     /// The number of cache pages in use.
     var pagesSize: Int { pageIndex }
 
-    private static func allocTexture(device: MTLDevice, width: Int, height: Int,
-                                     length: Int) -> MTLTexture {
+    private static func allocTexture(
+        device: MTLDevice, width: Int, height: Int, length: Int,
+        makeTexture: TextureFactory
+    ) -> MTLTexture? {
         let descriptor = MTLTextureDescriptor()
         descriptor.textureType = .type2DArray
         descriptor.arrayLength = length
@@ -67,23 +81,33 @@ final class GlyphTextureCache {
         descriptor.width = width
         descriptor.height = height
         descriptor.mipmapLevelCount = 1
-        return device.makeTexture(descriptor: descriptor)!
+        return makeTexture(device, descriptor)
+    }
+
+    private static func defaultTextureFactory(
+        device: MTLDevice, descriptor: MTLTextureDescriptor
+    ) -> MTLTexture? {
+        device.makeTexture(descriptor: descriptor)
     }
 
     /// Copies pages `[begin, begin + count)` into a freshly sized texture.
-    private func reallocate(newPageCount: Int, begin: Int, count: Int) {
-        let newTexture = Self.allocTexture(device: device, width: xSize,
-                                           height: ySize, length: newPageCount)
-        let commandBuffer = queue.makeCommandBuffer()!
-        let blit = commandBuffer.makeBlitCommandEncoder()!
+    private func reallocate(newPageCount: Int, begin: Int,
+                            count: Int) -> Bool {
+        guard let newTexture = Self.allocTexture(
+            device: device, width: xSize, height: ySize,
+            length: newPageCount, makeTexture: makeTexture),
+              let commandBuffer = queue.makeCommandBuffer(),
+              let blit = commandBuffer.makeBlitCommandEncoder() else {
+            return false
+        }
         blit.copy(from: texture, sourceSlice: begin, sourceLevel: 0,
                   to: newTexture, destinationSlice: 0, destinationLevel: 0,
                   sliceCount: count, levelCount: 1)
         blit.endEncoding()
         commandBuffer.commit()
-
         texture = newTexture
         pageCount = newPageCount
+        return true
     }
 
     private func replace(region: MTLRegion, slice: Int, bitmap: GlyphBitmap) {
@@ -96,14 +120,16 @@ final class GlyphTextureCache {
     private func addNewPage(_ bitmap: GlyphBitmap) -> simd_short3? {
         let nextPage = pageIndex + 1
         guard nextPage < maximumPages else { return nil }
-        pageIndex = nextPage
 
-        if pageIndex >= pageCount {
+        if nextPage >= pageCount {
             let grown = Int((Double(pageCount) * growthFactor).rounded(.up))
-            let newCount = min(maximumPages,
-                               max(pageIndex + 1, grown))
-            reallocate(newPageCount: newCount, begin: 0, count: pageCount)
+            let newCount = min(maximumPages, max(nextPage + 1, grown))
+            guard reallocate(newPageCount: newCount, begin: 0,
+                             count: pageCount) else {
+                return nil
+            }
         }
+        pageIndex = nextPage
 
         xUsed = min(Int(bitmap.width) + 1, xSize)
         yUsed = min(Int(bitmap.height), ySize)
@@ -151,11 +177,16 @@ final class GlyphTextureCache {
 
     /// Evicts all but the newest `preserve` pages by copying them into a
     /// smaller texture. Returns the number of used pages that were evicted (the
-    /// glyph manager uses to shift cached page indices), or 0 if none were.
-    func evict(preserve: Int) -> Int {
+    /// glyph manager uses to shift cached page indices), 0 if none were, or nil
+    /// when allocation or command encoding fails.
+    func evict(preserve: Int) -> Int? {
         if preserve == 0 {
-            texture = Self.allocTexture(device: device, width: xSize,
-                                        height: ySize, length: 1)
+            guard let newTexture = Self.allocTexture(
+                device: device, width: xSize, height: ySize, length: 1,
+                makeTexture: makeTexture) else {
+                return nil
+            }
+            texture = newTexture
             pageCount = 1
             pageIndex = 0
             xUsed = 0
@@ -165,13 +196,20 @@ final class GlyphTextureCache {
 
         if preserve < pageIndex {
             let begin = pageIndex - preserve + 1
-            reallocate(newPageCount: preserve, begin: begin, count: preserve)
+            guard reallocate(newPageCount: preserve, begin: begin,
+                             count: preserve) else {
+                return nil
+            }
             pageIndex = preserve - 1
             return begin
         }
 
         if preserve > pageIndex {
-            reallocate(newPageCount: pageIndex, begin: 0, count: pageIndex)
+            guard pageIndex > 0 else { return 0 }
+            guard reallocate(newPageCount: pageIndex, begin: 0,
+                             count: pageIndex) else {
+                return nil
+            }
             return 0
         }
 

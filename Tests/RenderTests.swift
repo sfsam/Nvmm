@@ -155,8 +155,9 @@ final class RenderTests: XCTestCase {
         }
 
         // A tiny page forces each added bitmap onto a fresh page.
-        let cache = GlyphTextureCache(queue: queue, pageWidth: 8, pageHeight: 8,
-                                      initialCapacity: 1, growthFactor: 2)
+        let cache = try XCTUnwrap(GlyphTextureCache(
+            queue: queue, pageWidth: 8, pageHeight: 8,
+            initialCapacity: 1, growthFactor: 2))
         let rasterizer = GlyphRasterizer(width: 64, height: 64)
         let family = FontManager().family(
             descriptor: FontManager.defaultDescriptor(), size: 15, scaleFactor: 1)
@@ -184,13 +185,65 @@ final class RenderTests: XCTestCase {
         let bitmap = rasterizer.rasterize(
             font: family.regular, background: RGBColor(neovim: 0),
             foreground: RGBColor(neovim: 0xFFFFFF), text: "W")
-        let cache = GlyphTextureCache(
+        let cache = try XCTUnwrap(GlyphTextureCache(
             queue: queue, pageWidth: Int(bitmap.width) + 1,
             pageHeight: Int(bitmap.height), initialCapacity: 1,
-            growthFactor: 2, maximumPages: 1)
+            growthFactor: 2, maximumPages: 1))
 
         XCTAssertNotNil(cache.add(bitmap))
         XCTAssertNil(cache.add(bitmap))
         XCTAssertEqual(cache.pagesCapacity, 1)
+    }
+
+    func testTextureCacheReportsInitialAllocationFailure() throws {
+        try requireDevice()
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let queue = device.makeCommandQueue() else {
+            throw XCTSkip("No Metal command queue")
+        }
+        let cache = GlyphTextureCache(
+            queue: queue, pageWidth: 8, pageHeight: 8,
+            initialCapacity: 1, growthFactor: 2,
+            makeTexture: { _, _ in nil })
+
+        XCTAssertNil(cache)
+    }
+
+    func testTextureCacheRetriesFailedGrowth() throws {
+        try requireDevice()
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let queue = device.makeCommandQueue() else {
+            throw XCTSkip("No Metal command queue")
+        }
+        let rasterizer = GlyphRasterizer(width: 64, height: 64)
+        let family = FontManager().family(
+            descriptor: FontManager.defaultDescriptor(), size: 15,
+            scaleFactor: 1)
+        let bitmap = rasterizer.rasterize(
+            font: family.regular, background: RGBColor(neovim: 0),
+            foreground: RGBColor(neovim: 0xFFFFFF), text: "W")
+        var attempts = 0
+        let cache = try XCTUnwrap(GlyphTextureCache(
+            queue: queue, pageWidth: Int(bitmap.width) + 1,
+            pageHeight: Int(bitmap.height), initialCapacity: 1,
+            growthFactor: 2,
+            makeTexture: { device, descriptor in
+                attempts += 1
+                guard attempts != 2 else { return nil }
+                return device.makeTexture(descriptor: descriptor)
+            }))
+        let original = cache.texture
+
+        XCTAssertNotNil(cache.add(bitmap))
+        XCTAssertNil(cache.add(bitmap))
+        XCTAssertTrue(cache.texture === original)
+        XCTAssertEqual(cache.pagesCapacity, 1)
+        XCTAssertEqual(cache.pagesSize, 0)
+        XCTAssertEqual(cache.evict(preserve: 2), 0)
+        XCTAssertEqual(attempts, 2)
+        XCTAssertNotNil(cache.add(bitmap))
+        XCTAssertFalse(cache.texture === original)
+        XCTAssertEqual(cache.pagesSize, 1)
+        XCTAssertEqual(attempts, 3)
     }
 }
