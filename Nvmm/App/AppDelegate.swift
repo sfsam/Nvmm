@@ -398,8 +398,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return alert.runModal() == .alertFirstButtonReturn
     }
 
+    /// Nvmm does not participate in AppKit state restoration, so it does not
+    /// claim that restored application state is securely decoded.
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
-        true
+        false
     }
 
     private func logUTF8ProcVersion() {

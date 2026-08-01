@@ -117,7 +117,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
 
     // The window is shown only once the first grid is ready, so its first paint
     // is the Neovim intro rather than a blank frame. `shouldCenter` is set when
-    // there is no saved frame to place the window at.
+    // there is no last-used geometry to place the window at.
     private var hasShownWindow = false
     private var shouldCenter = false
 
@@ -158,9 +158,9 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     // background and title-bar appearance are only updated when it changes.
     private var lastBackground = RGBColor()
 
-    // Persisted as the window's top-left point plus its grid size (not its pixel
-    // size, which is recomputed from the grid and cell size), so a restore is
-    // robust across font and display-scale changes.
+    // The most recently saved window geometry: its top-left point and grid
+    // size, not its pixel size. Recomputing pixels from the grid makes the next
+    // first window robust across font and display-scale changes.
     private static let savedFrameKey = "NvmmWindowFrame"
 
     // Live resizes nest in principle (a second can begin before the first
@@ -227,7 +227,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
 
     // The window this one was opened from, if any. A window opened while
     // another is on screen adopts that window's grid size and cascades from it,
-    // rather than restoring the saved frame on top of it.
+    // rather than applying the last-used geometry on top of it.
     private weak var cascadeSource: WindowController?
 
     // The files and allowlisted Neovim options this window opens with, and the
@@ -550,9 +550,9 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     }
 
     /// Positions the window and picks the grid size it opens at: cascaded from
-    /// the window it was opened from, if there is one, otherwise restored from
-    /// the saved frame. Cascading keeps a second window from landing exactly on
-    /// top of the first, which restoring the one saved frame would do.
+    /// the window it was opened from, if there is one, otherwise based on the
+    /// last-used geometry. Cascading keeps a second window from landing exactly
+    /// on top of the first.
     private func placeWindow(_ window: NSWindow) {
         guard let source = cascadeSource, let sourceWindow = source.window else {
             loadSavedFrame(in: window)
@@ -564,10 +564,10 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         window.setFrameTopLeftPoint(sourceWindow.cascadeTopLeft(from: topLeft))
     }
 
-    /// Restores the saved grid size and window position, or falls back to the
-    /// starting grid centered on screen when there is nothing saved. The saved
-    /// pixel size is deliberately not restored; `resizeWindow` recomputes it
-    /// from the grid and current cell size.
+    /// Applies the last-used grid size and window position, or falls back to
+    /// the starting grid centered on screen when there is nothing saved. Pixel
+    /// size is not persisted; `resizeWindow` recomputes it from the grid and
+    /// current cell size.
     private func loadSavedFrame(in window: NSWindow) {
         if let string = UserDefaults.standard.string(forKey: Self.savedFrameKey) {
             let saved = NSRectFromString(string)
@@ -581,9 +581,9 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         }
     }
 
-    /// Persists the window's top-left point and current grid size for the next
-    /// launch. No-op until the window is on screen so a half-built frame is
-    /// never saved.
+    /// Persists this window as the last-used geometry for the next launch.
+    /// No-op until the window is on screen, so incomplete geometry is not
+    /// saved.
     private func saveFrame() {
         guard hasShownWindow, let window else { return }
         var rect = window.frame
