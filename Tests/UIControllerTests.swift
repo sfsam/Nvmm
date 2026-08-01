@@ -85,6 +85,46 @@ final class UIControllerTests: XCTestCase {
         XCTAssertEqual(bells, [.audible, .visual])
     }
 
+    func testUnknownRedrawEventsAreReported() {
+        var names: [String] = []
+        let controller = UIController(
+            onUnhandledRedraw: { names.append($0) })
+        let longName = String(repeating: "x", count: 127) + "é"
+
+        XCTAssertNil(controller.applyRedrawEvent(
+            ["future_protocol_event", ["private value"]]))
+        XCTAssertNil(controller.applyRedrawEvent(
+            .array([.string(longName), .array([])])))
+
+        XCTAssertEqual(names, ["future_protocol_event",
+                               String(repeating: "x", count: 127)])
+    }
+
+    func testDocumentedNoOpRedrawEventsAreNotReported() {
+        var names: [String] = []
+        let controller = UIController(
+            onUnhandledRedraw: { names.append($0) })
+
+        for name in ["chdir", "mouse_on", "mouse_off", "set_icon",
+                     "suspend", "update_menu"] {
+            XCTAssertNil(controller.applyRedrawEvent(
+                .array([.string(name), .array([])])))
+        }
+
+        XCTAssertTrue(names.isEmpty)
+    }
+
+    func testMalformedRedrawEventsAreNotReportedAsUnknown() {
+        var names: [String] = []
+        let controller = UIController(
+            onUnhandledRedraw: { names.append($0) })
+
+        XCTAssertNil(controller.applyRedrawEvent(.string("not an event")))
+        XCTAssertNil(controller.applyRedrawEvent([42, []]))
+
+        XCTAssertTrue(names.isEmpty)
+    }
+
     func testModeInfoFallsBackToShortNameForTextEntryEligibility() {
         let controller = UIController()
         let modeInfo: MPValue = ["mode_info_set",

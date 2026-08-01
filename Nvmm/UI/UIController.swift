@@ -16,6 +16,7 @@
 //
 
 import Foundation
+import os
 
 /// A pending reconnection Neovim asked the UI to perform.
 nonisolated struct UIHandoff: Sendable, Equatable {
@@ -59,9 +60,11 @@ nonisolated final class UIController {
     // keeps a sparse or malformed definition from growing the tables without
     // bound; a definition at or past the cap is dropped.
     private static let maxHighlightID = 1 << 16
+    private static let maximumDiagnosticNameBytes = 128
 
     private let limits: RPCResourceLimits
     private let onBell: (UIBell) -> Void
+    private let onUnhandledRedraw: (String) -> Void
     // Highlight state.
     private var hlTable: [CellAttributes] = [.defaultGroup]
     private var modeTable: [ModeState] = []
@@ -100,9 +103,13 @@ nonisolated final class UIController {
     private var progressSequence: UInt64 = 0
 
     init(limits: RPCResourceLimits = .production,
-         onBell: @escaping (UIBell) -> Void = { _ in }) {
+         onBell: @escaping (UIBell) -> Void = { _ in },
+         onUnhandledRedraw: @escaping (String) -> Void = { name in
+             Log.rpc.info("Unhandled redraw event: \(name, privacy: .public)")
+         }) {
         self.limits = limits
         self.onBell = onBell
+        self.onUnhandledRedraw = onUnhandledRedraw
     }
 
     /// The default background color, tagged as a default color.
@@ -149,9 +156,27 @@ nonisolated final class UIController {
         case "connect": applyHandoff(args, .connect)
         case "bell": onBell(.audible)
         case "visual_bell": onBell(.visual)
-        default: break // mouse_on / mouse_off / set_icon / unknown: ignored.
+        case "chdir", "mouse_on", "mouse_off", "set_icon", "suspend",
+             "update_menu":
+            break
+        default: onUnhandledRedraw(Self.diagnosticName(name))
         }
         return nil
+    }
+
+    /// A valid UTF-8 prefix suitable for diagnostic output.
+    private static func diagnosticName(_ name: String) -> String {
+        guard name.utf8.count > maximumDiagnosticNameBytes else { return name }
+        var byteCount = 0
+        let scalars = name.unicodeScalars.prefix { scalar in
+            let width = scalar.utf8.count
+            guard byteCount + width <= maximumDiagnosticNameBytes else {
+                return false
+            }
+            byteCount += width
+            return true
+        }
+        return String(scalars)
     }
 
     /// Invokes `body` once per argument tuple, skipping non-array tuples.
