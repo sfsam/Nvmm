@@ -99,7 +99,6 @@ enum Settings {
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [contextSensitiveCursorKey: true,
                                                   progressBarKey: true,
-                                                  cursorTrailEnabledKey: false,
                                                   cursorTrailLengthFractionKey: 0.55,
                                                   cursorTrailOpacityKey: 0.55])
     }
