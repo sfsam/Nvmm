@@ -12,8 +12,9 @@
 //  make it approximate — hence the note beside its settings checkbox.
 //
 //  `ScrollerModel` holds that math with no AppKit dependency so it can be
-//  tested directly; `Scroller` is the `NSScroller` that draws it and turns
-//  clicks and drags into a target line.
+//  tested directly; `ScrollerController` connects it to an unmodified system
+//  `NSScroller`, which lets AppKit supply the native appearance on each macOS
+//  release.
 //
 
 import Cocoa
@@ -124,17 +125,19 @@ nonisolated struct ScrollerModel: Sendable, Equatable {
     }
 }
 
-/// The vertical scrollbar down the trailing edge of the window.
+/// Connects Neovim's line-based scrolling to a native vertical scrollbar.
 ///
-/// It is a bare `NSScroller` rather than a scroll view's: the grid is drawn by
-/// Metal at whole-cell positions and Neovim owns what is on screen, so there is
-/// no scrollable document for AppKit to move. The legacy style is what makes it
-/// permanently visible, which is the point of the setting — an overlay scroller
-/// would only appear during a scroll it is not driving.
-final class Scroller: NSScroller {
+/// The scroller is bare rather than a scroll view's: the grid is drawn by Metal
+/// at whole-cell positions and Neovim owns what is on screen, so there is no
+/// scrollable document for AppKit to move. It remains an exact `NSScroller`,
+/// rather than a subclass, so AppKit can use the native rendering for the
+/// current macOS release. The legacy style keeps the enabled scrollbar present.
+final class ScrollerController: NSObject {
 
     /// Called with the one-based line to bring to the top of the window.
     var onScroll: ((Int) -> Void)?
+
+    let view: NSScroller
 
     private var model = ScrollerModel()
 
@@ -143,39 +146,32 @@ final class Scroller: NSScroller {
         NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
     }
 
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        scrollerStyle = .legacy
-        target = self
-        action = #selector(scrollerAction)
-        isEnabled = true
-        knobProportion = 1
-        doubleValue = 0
+    override init() {
+        view = NSScroller(frame: .zero)
+        super.init()
+
+        view.controlSize = .regular
+        view.scrollerStyle = .legacy
+        view.target = self
+        view.action = #selector(scrollerAction)
+        view.isEnabled = true
+        view.knobProportion = 1
+        view.doubleValue = 0
     }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) is not supported")
-    }
-
-    // The window's other view classes take the same one-liner; it skips the
-    // executor hop an isolated deinit would make without changing isolation.
-    nonisolated deinit {}
-
-    /// The scroller stays put whatever the enclosing scroll view's style is;
-    /// there is no scroll view, and the legacy style is deliberate.
-    override class var isCompatibleWithOverlayScrollers: Bool { false }
 
     /// Applies one viewport report from Neovim.
     func update(topline: Int, botline: Int, lineCount: Int) {
         let knob = model.update(topline: topline, botline: botline,
                                 lineCount: lineCount)
-        knobProportion = CGFloat(knob.proportion)
-        doubleValue = knob.position
-        isEnabled = knob.enabled
+        view.knobProportion = CGFloat(knob.proportion)
+        view.doubleValue = knob.position
+        view.isEnabled = knob.enabled
     }
 
     @objc private func scrollerAction() {
-        onScroll?(model.targetLine(part: Self.part(hitPart), position: doubleValue))
+        let line = model.targetLine(part: Self.part(view.hitPart),
+                                    position: view.doubleValue)
+        onScroll?(line)
     }
 
     private static func part(_ hitPart: NSScroller.Part) -> ScrollerPart {

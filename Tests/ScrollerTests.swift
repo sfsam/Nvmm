@@ -8,8 +8,23 @@
 
 import XCTest
 @testable import Nvmm
+import AppKit
 
 final class ScrollerTests: XCTestCase {
+
+    /// The exact system class keeps all drawing in AppKit and avoids the
+    /// compatibility rendering that AppKit applies to scroller subclasses.
+    @MainActor
+    func testControllerUsesAnUnmodifiedSystemScroller() {
+        let controller = ScrollerController()
+
+        XCTAssertTrue(type(of: controller.view) == NSScroller.self)
+        XCTAssertEqual(controller.view.controlSize, .regular)
+        XCTAssertEqual(controller.view.scrollerStyle, .legacy)
+        XCTAssertEqual(ScrollerController.width,
+                       NSScroller.scrollerWidth(
+                        for: .regular, scrollerStyle: .legacy))
+    }
 
     /// Before any viewport arrives, and for a report that says nothing (an
     /// empty buffer, or a window with no lines in it), the track is empty.

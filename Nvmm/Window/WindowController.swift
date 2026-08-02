@@ -83,7 +83,8 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     // MARK: - State
 
     private let gridView = GridView(frame: .zero)
-    private let scroller = Scroller(frame: .zero)
+    private let scrollerController = ScrollerController()
+    private var scroller: NSScroller { scrollerController.view }
     private let progressIndicator = ProgressIndicator(frame: .zero)
     private var renderManager: RenderContextManager!
     // The Neovim this window drives. Readable by the File menu actions, which
@@ -436,7 +437,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         gridView.fetchVisualSelection = { [weak self] in
             await self?.process?.getVisualSelection() ?? nil
         }
-        scroller.onScroll = { [weak self] line in
+        scrollerController.onScroll = { [weak self] line in
             self?.scrollToLine(line)
         }
 
@@ -481,7 +482,8 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
             scroller.topAnchor.constraint(equalTo: safeArea.topAnchor),
             scroller.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
             scroller.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            scroller.widthAnchor.constraint(equalToConstant: Scroller.width),
+            scroller.widthAnchor.constraint(
+                equalToConstant: ScrollerController.width),
 
             // The progress bar rides the top edge of the grid, spanning it and
             // its margins, so it reads as part of the window's edge rather than
@@ -502,7 +504,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     /// The inset between the grid view's trailing edge and the window's: the
     /// margin, plus the scrollbar's width while it is shown.
     private var trailingInset: CGFloat {
-        gridMargin + (isScrollbarVisible ? Scroller.width : 0)
+        gridMargin + (isScrollbarVisible ? ScrollerController.width : 0)
     }
 
     /// The insets between the window frame and the grid view: the leading and
@@ -840,9 +842,10 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
                     linespace: grid.linespace)
                 self.applyBackground(grid.defaultBackground)
                 self.gridView.setGrid(grid)
-                self.scroller.update(topline: grid.viewport.topline,
-                                     botline: grid.viewport.botline,
-                                     lineCount: grid.viewport.lineCount)
+                self.scrollerController.update(
+                    topline: grid.viewport.topline,
+                    botline: grid.viewport.botline,
+                    lineCount: grid.viewport.lineCount)
                 self.hasReceivedGrid = true
                 if !self.hasShownWindow, grid.startupComplete || self.startupRelaxed {
                     self.showInitialWindow()
