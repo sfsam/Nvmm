@@ -110,7 +110,8 @@ extension WindowController {
         case .written:
             return .saved
         case .needsFilename:
-            await presentSaveError("Neovim did not complete the save.")
+            await presentSaveError(String(localized:
+                "Neovim did not complete the save."))
             return .failed
         case .failed(let detail):
             await presentSaveError(detail)
@@ -127,9 +128,9 @@ extension WindowController {
         }
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Could Not Save Document"
+        alert.messageText = String(localized: "Could Not Save Document")
         alert.informativeText = detail
-        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: String(localized: "OK"))
         await alert.beginSheetModal(for: window)
     }
 }
@@ -325,26 +326,24 @@ extension WindowController {
     /// Runs the standard unsaved-changes sheet for a buffer. An unnamed buffer
     /// offers "Save…", since saving it has to ask for a filename first.
     private static func runSavePrompt(
-        for name: String, in window: NSWindow) async -> NSApplication.ModalResponse {
+        for name: String, in window: NSWindow
+    ) async -> NSApplication.ModalResponse {
         let displayName = name.isEmpty
-            ? NSLocalizedString("Untitled", comment: "An unnamed buffer")
-            : (name as NSString).lastPathComponent
+        ? String(localized: "Untitled", comment: "An unnamed buffer")
+        : (name as NSString).lastPathComponent
 
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = String(
-            format: NSLocalizedString(
-                "Do you want to save changes you made in the document “%@”?",
-                comment: "Unsaved changes sheet title, given a document name"),
-            displayName)
-        alert.informativeText = NSLocalizedString(
-            "Your changes will be lost if you don’t save them.",
-            comment: "Unsaved changes sheet message")
+            localized: "Do you want to save changes you made in the document “\(displayName)”?"
+        )
+        alert.informativeText = String(
+            localized: "Your changes will be lost if you don’t save them.")
         alert.addButton(withTitle: name.isEmpty
-            ? NSLocalizedString("Save…", comment: "Save, asking for a filename")
-            : NSLocalizedString("Save", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Don’t Save", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+                        ? String(localized: "Save…")
+                        : String(localized: "Save"))
+        alert.addButton(withTitle: String(localized: "Don’t Save"))
+        alert.addButton(withTitle: String(localized: "Cancel"))
         return await alert.beginSheetModal(for: window)
     }
 }

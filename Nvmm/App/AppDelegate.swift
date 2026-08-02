@@ -132,11 +132,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// user cancelled or left it empty.
     private func promptForServerAddress() -> String? {
         let alert = NSAlert()
-        alert.messageText = "Connect to Running Neovim"
-        alert.informativeText = "Enter the Unix socket path of a running Neovim "
-            + "server.\nStart one with:  nvim --listen /tmp/nvim.sock --headless"
-        alert.addButton(withTitle: "Connect")
-        alert.addButton(withTitle: "Cancel")
+        alert.messageText = String(localized: "Connect to Running Neovim")
+        alert.informativeText = String(localized:
+            "Enter the Unix socket path of a running Neovim server.\nStart one with:  nvim --listen /tmp/nvim.sock --headless")
+        alert.addButton(withTitle: String(localized: "Connect"))
+        alert.addButton(withTitle: String(localized: "Cancel"))
 
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
         field.placeholderString = "/tmp/nvim.sock"
@@ -336,10 +336,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func drainForQuit() async -> Bool {
         await terminationCoordinator.requestApplicationQuit {
             confirmDiscard(
-                message: "Quit without saving?",
-                informative: "There are modified buffers. "
-                    + "If you quit now all changes will be lost.",
-                confirmTitle: "Quit")
+                message: String(localized: "Quit without saving?"),
+                informative: String(localized:
+                    "There are modified buffers. If you quit now all changes will be lost."),
+                confirmTitle: String(localized: "Quit"))
         } confirmForceTermination: {
             confirmForceTermination()
         }
@@ -362,10 +362,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defer { self.closeAllInFlight = false }
             if await terminationCoordinator.anyUnsavedBuffers() {
                 guard confirmDiscard(
-                    message: "Close all windows without saving?",
-                    informative: "There are modified buffers. If you close "
-                        + "all windows now all changes will be lost.",
-                    confirmTitle: "Close All Windows") else { return }
+                    message: String(localized: "Close all windows without saving?"),
+                    informative: String(localized:
+                        "There are modified buffers. If you close all windows now all changes will be lost."),
+                    confirmTitle: String(localized:
+                        "Close All Windows")) else { return }
                 _ = await terminationCoordinator.requestQuitAll(force: true)
             } else {
                 _ = await terminationCoordinator.requestQuitAll(force: false)
@@ -382,7 +383,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.messageText = message
         alert.informativeText = informative
         alert.addButton(withTitle: confirmTitle)
-        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: String(localized: "Cancel"))
         return alert.runModal() == .alertFirstButtonReturn
     }
 
@@ -390,11 +391,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func confirmForceTermination() -> Bool {
         let alert = NSAlert()
         alert.alertStyle = .critical
-        alert.messageText = "Neovim Is Not Responding"
-        alert.informativeText = "Force Quit will end the remaining editor "
-            + "sessions. Any unsaved changes will be lost."
-        alert.addButton(withTitle: "Force Quit")
-        alert.addButton(withTitle: "Cancel")
+        alert.messageText = String(localized: "Neovim Is Not Responding")
+        alert.informativeText = String(
+            localized:"Force Quit will end the remaining editor sessions. Any unsaved changes will be lost.")
+        alert.addButton(withTitle: String(localized: "Force Quit"))
+        alert.addButton(withTitle: String(localized: "Cancel"))
         return alert.runModal() == .alertFirstButtonReturn
     }
 

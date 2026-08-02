@@ -114,34 +114,28 @@ final class SettingsWindowController: NSWindowController {
 
     convenience init() {
         let behavior = NSTextField(labelWithString:
-            NSLocalizedString("Behavior:", comment: "Settings section"))
+            String(localized: "Behavior:"))
         let appearance = NSTextField(labelWithString:
-            NSLocalizedString("Appearance:", comment: "Settings section"))
+            String(localized: "Appearance:"))
 
         let buffers = Self.checkbox(
-            NSLocalizedString("Open files in buffers instead of tabs",
-                              comment: "Settings checkbox"),
+            String(localized: "Open files in buffers instead of tabs"),
             key: Settings.openFilesInBuffersKey)
-        let buffersNote = Self.note(NSLocalizedString(
-            "Applies to New, Open…, files opened from the Finder, "
-                + "and files dropped on a window with Option held.",
-            comment: "Settings note under the buffers checkbox"))
+        let buffersNote = Self.note(String(localized:
+            "Applies to New, Open…, files opened from the Finder, and files dropped on a window with Option held."))
         let terminate = Self.checkbox(
-            NSLocalizedString("Terminate after last window closed",
-                              comment: "Settings checkbox"),
+            String(localized: "Terminate after last window closed"),
             key: Settings.terminateAfterLastWindowKey)
         let titlebar = Self.checkbox(
-            NSLocalizedString("Transparent title bar", comment: "Settings checkbox"),
+            String(localized: "Transparent title bar"),
             key: Settings.titlebarAppearsTransparentKey)
         let scrollbar = Self.checkbox(
-            NSLocalizedString("Vertical scrollbar", comment: "Settings checkbox"),
+            String(localized: "Vertical scrollbar"),
             key: Settings.verticalScrollbarKey)
-        let scrollbarNote = Self.note(NSLocalizedString(
-            "Scrolls by buffer lines, not visual lines. It may not behave "
-                + "as expected if your text has wrapped lines or folds.",
-            comment: "Settings note under the scrollbar checkbox"))
+        let scrollbarNote = Self.note(String(localized:
+            "Scrolls by buffer lines, not visual lines. It may not behave as expected if your text has wrapped lines or folds."))
         let cursorTrail = Self.checkbox(
-            NSLocalizedString("Cursor trail", comment: "Settings checkbox"),
+            String(localized: "Cursor trail"),
             key: Settings.cursorTrailEnabledKey)
         let cursorTrailGrid = Self.cursorTrailGrid()
 
@@ -183,7 +177,7 @@ final class SettingsWindowController: NSWindowController {
                             styleMask: [.titled, .closable],
                             backing: .buffered,
                             defer: false)
-        panel.title = NSLocalizedString("Settings", comment: "Settings window title")
+        panel.title = String(localized: "Settings")
         panel.contentView = contentView
         self.init(window: panel)
     }
@@ -233,8 +227,8 @@ final class SettingsWindowController: NSWindowController {
 
     /// Cursor trail sliders in a grid.
     private static func cursorTrailGrid() -> NSGridView {
-        let length = NSLocalizedString("Length:", comment: "Settings slider")
-        let intens = NSLocalizedString("Intensity:", comment: "Settings slider")
+        let length = String(localized: "Length:")
+        let intens = String(localized: "Intensity:")
         let lengthLabel = NSTextField(labelWithString:length)
         let intensLabel = NSTextField(labelWithString:intens)
         let lengthSlider = cursorTrailSlider(key: Settings.cursorTrailLengthFractionKey)

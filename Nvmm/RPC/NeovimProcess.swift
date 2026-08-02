@@ -924,7 +924,8 @@ extension NeovimProcess {
 
         let apiOutcome = await requestWaiting("nvim_get_api_info", [], until: deadline)
         guard case .response(let api) = apiOutcome, !api.isError else {
-            return attachFailure(apiOutcome, "API negotiation")
+            return attachFailure(
+                apiOutcome, String(localized: "API negotiation"))
         }
 
         let (validation, capabilities) = validateAPIMetadata(api.result, requested: options)
@@ -933,7 +934,8 @@ extension NeovimProcess {
         let clientOutcome = await requestWaiting(
             "nvim_set_client_info", clientInfoArguments(), until: deadline)
         guard case .response(let client) = clientOutcome, !client.isError else {
-            return attachFailure(clientOutcome, "Client registration")
+            return attachFailure(
+                clientOutcome, String(localized: "Client registration"))
         }
 
         // Register the VimEnter signal before attaching, so it is in place
@@ -957,13 +959,17 @@ extension NeovimProcess {
                                      .int(MPInteger(height)), .map(attachOptions)]
         let attachOutcome = await requestWaiting("nvim_ui_attach", attachArgs, until: deadline)
         guard case .response(let attached) = attachOutcome, !attached.isError else {
-            return attachFailure(attachOutcome, "UI attachment")
+            return attachFailure(
+                attachOutcome, String(localized: "UI attachment"))
         }
 
         let setupScripts = [
-            ("Modified-state setup", Self.modifiedAutocmdLua),
-            ("Progress setup", Self.progressAutocmdLua),
-            ("File-menu setup", Self.fileHelpersLua),
+            (String(localized: "Modified-state setup"),
+             Self.modifiedAutocmdLua),
+            (String(localized: "Progress setup"),
+             Self.progressAutocmdLua),
+            (String(localized: "File-menu setup"),
+             Self.fileHelpersLua),
         ]
         for (operation, lua) in setupScripts {
             let outcome = await requestWaiting(
@@ -1092,14 +1098,16 @@ extension NeovimProcess {
         switch outcome {
         case .response(let response):
             result.status = .rpcError
-            result.message = "\(operation) was rejected by Neovim"
+            result.message = String(localized:
+                "\(operation) was rejected by Neovim")
             result.rpcError = response.error
         case .timedOut:
             result.status = .timedOut
-            result.message = "\(operation) timed out"
+            result.message = String(localized: "\(operation) timed out")
         case .transport(let error):
             result.status = .transportError
-            result.message = "\(operation) failed because the RPC connection closed"
+            result.message = String(localized:
+                "\(operation) failed because the RPC connection closed")
             result.transportError = error
             switch error {
             case .readFailed(let code), .writeFailed(let code): result.systemError = code

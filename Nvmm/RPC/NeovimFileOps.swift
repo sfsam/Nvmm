@@ -52,7 +52,7 @@ nonisolated func classifyWriteResponse(
     _ response: RPCResponse?,
     recognizesUnnamedBuffer: Bool = true
 ) -> WriteOutcome {
-    let fallback = "Neovim did not complete the save."
+    let fallback = String(localized: "Neovim did not complete the save.")
     guard let response else { return .failed(fallback) }
     guard response.isError else { return .written }
     guard let fields = response.error.arrayValue, fields.count == 2,

@@ -131,7 +131,8 @@ nonisolated func validateAPIMetadata(_ metadata: MPValue,
     guard let capabilities = parseAPICapabilities(metadata) else {
         var failure = UIAttachResult()
         failure.status = .incompatible
-        failure.message = "Neovim returned invalid API metadata"
+        failure.message = String(localized:
+            "Neovim returned invalid API metadata")
         return (failure, APICapabilities())
     }
 
@@ -142,27 +143,30 @@ nonisolated func validateAPIMetadata(_ metadata: MPValue,
     // function and capability checked below.
     if capabilities.version < result.requiredVersion {
         result.status = .incompatible
-        result.message =
-            "Neovim \(result.requiredVersion.displayName) or newer is required"
+        result.message = String(localized:
+            "Neovim \(result.requiredVersion.displayName) or newer is required")
         return (result, capabilities)
     }
 
     for name in requiredAPIFunctions where !capabilities.functions.contains(name) {
         result.status = .incompatible
-        result.message = "Required Neovim API method is unavailable: \(name)"
+        result.message = String(localized:
+            "Required Neovim API method is unavailable: \(name)")
         return (result, capabilities)
     }
 
     if !capabilities.uiOptions.contains("ext_linegrid") {
         result.status = .incompatible
-        result.message = "Neovim does not support the ext_linegrid UI protocol"
+        result.message = String(localized:
+            "Neovim does not support the ext_linegrid UI protocol")
         return (result, capabilities)
     }
 
     for (name, wanted) in requestedOptionList(requested) where wanted {
         if !capabilities.uiOptions.contains(name) {
             result.status = .incompatible
-            result.message = "Requested UI option is unavailable: \(name)"
+            result.message = String(localized:
+                "Requested UI option is unavailable: \(name)")
             return (result, capabilities)
         }
     }

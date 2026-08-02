@@ -39,11 +39,28 @@ nonisolated func abnormalNeovimExitDescription(
     case .exited(status: 0), nil:
         return nil
     case .exited(let status):
-        return "Neovim exited with status \(status)."
+        return String(localized: "Neovim exited with status \(status).")
     case .signaled(let signal):
-        return "Neovim was terminated by signal \(signal)."
+        return String(localized:
+            "Neovim was terminated by signal \(signal).")
     case .waitFailed(let error):
-        return "Nvmm could not determine how Neovim exited (errno \(error))."
+        return String(localized:
+            "Nvmm could not determine how Neovim exited (errno \(error)).")
+    }
+}
+
+private nonisolated func localizedTransportErrorDescription(
+    _ error: RPCTransportError
+) -> String {
+    switch error {
+    case .connectionClosed:
+        return String(localized: "connection closed")
+    case .readFailed(let code):
+        return String(localized: "read failed (errno \(code))")
+    case .writeFailed(let code):
+        return String(localized: "write failed (errno \(code))")
+    case .protocolViolation:
+        return String(localized: "protocol violation")
     }
 }
 
@@ -59,23 +76,23 @@ nonisolated func transportDisconnectDescription(
         case .connectionClosed:
             return nil
         case .readFailed, .writeFailed:
-            return "Communication with Neovim failed: \(error.description). "
-                + "The embedded session ended. Unsaved changes may be "
-                + "recoverable from a swap file."
+            let reason = localizedTransportErrorDescription(error)
+            return String(localized:
+                "Communication with Neovim failed: \(reason). The embedded session ended. Unsaved changes may be recoverable from a swap file.")
         case .protocolViolation:
-            return "Nvmm closed the connection because RPC traffic could not "
-                + "be processed safely. The embedded session ended. "
-                + "Unsaved changes may be recoverable from a swap file."
+            return String(localized:
+                "Nvmm closed the connection because RPC traffic could not be processed safely. The embedded session ended. Unsaved changes may be recoverable from a swap file.")
         }
     }
 
     switch error {
     case .connectionClosed:
-        return "The connection to the remote Neovim server closed. "
-            + "The server may still be running."
+        return String(localized:
+            "The connection to the remote Neovim server closed. The server may still be running.")
     case .readFailed, .writeFailed, .protocolViolation:
-        return "Communication with the remote Neovim server failed: "
-            + "\(error.description). The server may still be running."
+        let reason = localizedTransportErrorDescription(error)
+        return String(localized:
+            "Communication with the remote Neovim server failed: \(reason). The server may still be running.")
     }
 }
 
@@ -153,7 +170,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
 
     // The title Neovim last set. Shown while the window is not being resized; a
     // live resize replaces it with the grid size and restores it when it ends.
-    private var currentTitle = "NVIM"
+    private var currentTitle = String(localized: "NVIM")
 
     // The default background color last applied to the window, so the content
     // background and title-bar appearance are only updated when it changes.
@@ -367,18 +384,21 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
 
     private func launch() {
         guard let window else {
-            let reason = "Could not create an editor window."
+            let reason = String(localized:
+                "Could not create an editor window.")
             Log.app.error("\(reason, privacy: .public)")
             resolveStartup(.failed(reason))
-            presentError("Could Not Open an Editor Window", detail: reason)
+            presentError(String(localized:
+                "Could Not Open an Editor Window"), detail: reason)
             handleDisconnect()
             return
         }
         guard let screen = window.screen ?? NSScreen.main else {
-            let reason = "No display is available."
+            let reason = String(localized: "No display is available.")
             Log.app.error("\(reason, privacy: .public)")
             resolveStartup(.failed(reason))
-            presentError("Could Not Open an Editor Window", detail: reason)
+            presentError(String(localized:
+                "Could Not Open an Editor Window"), detail: reason)
             handleDisconnect()
             return
         }
@@ -388,10 +408,12 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
             context = try renderManager.renderContext(for: screen)
         } catch {
             Log.rendering.error("Could not create a Metal context: \(error)")
-            let reason = "Could not initialize Metal: "
-                + error.localizedDescription
+            let detail = error.localizedDescription
+            let reason = String(localized:
+                "Could not initialize Metal: \(detail)")
             resolveStartup(.failed(reason))
-            presentError("Could Not Open an Editor Window", detail: reason)
+            presentError(String(localized:
+                "Could Not Open an Editor Window"), detail: reason)
             handleDisconnect()
             return
         }
@@ -694,10 +716,11 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         case .spawn:
             guard let nvimPath = NeovimBundle.executableURL?.path else {
                 Log.app.error("Bundled Neovim executable not found")
-                let reason = "The bundled Neovim executable is missing. "
-                    + "Reinstall Nvmm."
+                let reason = String(localized:
+                    "The bundled Neovim executable is missing. Reinstall Nvmm.")
                 resolveStartup(.failed(reason))
-                presentError("Nvmm Is Incomplete or Damaged", detail: reason)
+                presentError(String(localized:
+                    "Nvmm Is Incomplete or Damaged"), detail: reason)
                 handleDisconnect()
                 return
             }
@@ -786,11 +809,13 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
                 }
                 if let address = self?.remoteAddress {
                     self?.presentError(
-                        "Could not connect to a Neovim server at “\(address)”.",
+                        String(localized:
+                            "Could not connect to a Neovim server at “\(address)”."),
                         detail: reason)
                 } else {
                     self?.presentError(
-                        "Could Not Start Neovim", detail: reason)
+                        String(localized: "Could Not Start Neovim"),
+                        detail: reason)
                 }
                 self?.handleDisconnect()
                 return
@@ -805,11 +830,14 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
                 Log.rpc.error("Neovim UI attach failed: \(result.message)")
                 if let address = self?.remoteAddress {
                     self?.presentError(
-                        "Connected to “\(address)”, but attaching a UI failed.",
+                        String(localized:
+                            "Connected to “\(address)”, but attaching a UI failed."),
                         detail: result.message)
                 } else {
-                    self?.presentError("Could Not Attach the Neovim UI",
-                                       detail: result.message)
+                    self?.presentError(
+                        String(localized:
+                            "Could Not Attach the Neovim UI"),
+                        detail: result.message)
                 }
                 self?.handleDisconnect()
                 return
@@ -874,11 +902,13 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
                     Log.rpc.error(
                         "Neovim exited unexpectedly: \(detail, privacy: .public)")
                     self.presentError(
-                        "Neovim Exited Unexpectedly",
-                        detail: detail + " Any unsaved changes in that "
-                            + "session may have been lost.")
+                        String(localized: "Neovim Exited Unexpectedly"),
+                        detail: String(localized:
+                            "\(detail) Any unsaved changes in that session may have been lost."))
                 } else if let detail = transportDetail {
-                    self.presentError("Neovim Connection Ended", detail: detail)
+                    self.presentError(
+                        String(localized: "Neovim Connection Ended"),
+                        detail: detail)
                 }
                 self.handleDisconnect()
             }
@@ -927,8 +957,10 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         connectFallback = nil
         if let failedAddress = remoteAddress {
             presentError(
-                "Could not connect to a Neovim server at “\(failedAddress)”.",
-                detail: reason + "\n\nStaying attached to the current session.")
+                String(localized:
+                    "Could not connect to a Neovim server at “\(failedAddress)”."),
+                detail: String(localized:
+                    "\(reason)\n\nStaying attached to the current session."))
         }
         source = .remote(address: fallback.address)
         ownsServer = fallback.owned
@@ -1000,7 +1032,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         alert.alertStyle = .warning
         alert.messageText = message
         alert.informativeText = detail
-        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: String(localized: "OK"))
         alert.runModal()
     }
 
@@ -1353,7 +1385,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         // Show the grid size in the title bar while a live resize is in progress;
         // the real title is restored when the resize ends.
         if liveResizeDepth > 0 {
-            window?.title = "\(size.width) × \(size.height)"
+            window?.title = String(localized: "\(size.width) × \(size.height)")
         }
         guard size.width >= 1, size.height >= 1, size != lastGridSize else { return }
         lastGridSize = size
