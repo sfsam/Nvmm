@@ -37,6 +37,30 @@ nonisolated struct CurrentBufferInfo: Sendable, Equatable {
     var name: String
 }
 
+/// The outcome of creating an empty document in the current session.
+nonisolated enum NewDocumentOutcome: Sendable, Equatable {
+    /// Neovim created the buffer or tab page.
+    case opened
+    /// The mode or connection did not permit a command.
+    case unavailable
+    /// Neovim rejected the command with this user-facing reason.
+    case failed(String)
+}
+
+/// Classifies a New response while preserving Neovim's error message.
+nonisolated func classifyNewDocumentResponse(
+    _ response: RPCResponse?
+) -> NewDocumentOutcome {
+    guard let response else { return .unavailable }
+    guard response.isError else { return .opened }
+    guard let fields = response.error.arrayValue, fields.count == 2,
+          let message = fields[1].stringValue else {
+        return .failed(String(localized:
+            "Neovim could not create a new document."))
+    }
+    return .failed(message)
+}
+
 /// The outcome of writing a buffer.
 nonisolated enum WriteOutcome: Sendable, Equatable {
     /// The buffer was written.
@@ -73,6 +97,15 @@ extension NeovimProcess {
     /// command line or a pending operator.
     private static let escapeToNormal = "\u{1c}\u{0e}"
     private static let abort = "\u{03}"
+
+    /// Creates an empty document according to Nvmm's buffer/tab preference.
+    /// `:hide` sets `'hidden'` only while `:enew` runs, so a modified current
+    /// buffer is preserved without changing the user's option afterward.
+    func newDocument(inBuffers: Bool) async -> NewDocumentOutcome {
+        let command = inBuffers ? "hide enew" : "tabnew"
+        return classifyNewDocumentResponse(
+            await normalCommandResponse(command))
+    }
 
     /// The current mode, bounded by a short deadline. A query that times out or
     /// fails is reported as such and reads as busy, so callers refuse to act

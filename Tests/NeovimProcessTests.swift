@@ -381,6 +381,46 @@ final class NeovimProcessTests: XCTestCase {
 
     // MARK: Controlled-peer cases
 
+    private func assertNewDocumentCommand(
+        inBuffers: Bool, expectedCommand: String
+    ) async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+
+        let operation = Task {
+            await process.newDocument(inBuffers: inBuffers)
+        }
+        var unpacker = MessagePackUnpacker()
+        var id = try readRequest(
+            pair.peer, method: "nvim_get_mode", unpacker: &unpacker)
+        try writeResponse(
+            pair.peer, id: id,
+            result: .map([
+                (.string("mode"), .string("n")),
+                (.string("blocking"), .bool(false)),
+            ]))
+        id = try readRequest(
+            pair.peer, method: "nvim_command",
+            arguments: [.string(expectedCommand)], unpacker: &unpacker)
+        try writeResponse(pair.peer, id: id)
+
+        let outcome = await operation.value
+        XCTAssertEqual(outcome, .opened)
+        await process.disconnect()
+    }
+
+    func testNewDocumentUsesHideEnewForBuffers() async throws {
+        try await assertNewDocumentCommand(
+            inBuffers: true, expectedCommand: "hide enew")
+    }
+
+    func testNewDocumentUsesTabnewForTabs() async throws {
+        try await assertNewDocumentCommand(
+            inBuffers: false, expectedCommand: "tabnew")
+    }
+
     func testServerAddressReturnsNilForEmptyAddress() async throws {
         let pair = try makeSocketPair()
         defer { close(pair.peer) }
@@ -841,6 +881,46 @@ final class NeovimProcessTests: XCTestCase {
         try await withNvim { process in
             let response = try await process.request("nvim_command", [.string("ThisIsNotACommand")])
             XCTAssertTrue(response.isError)
+        }
+    }
+
+    func testNewBufferPreservesModifiedBufferWithNohidden() async throws {
+        try await withNvim { process in
+            let oldReply = try await process.request("nvim_get_current_buf")
+            let old = try XCTUnwrap(oldReply.result.integer?.signed)
+            let changed = try await process.request(
+                "nvim_buf_set_lines",
+                [.int(MPInteger(old)), .int(0), .int(-1), .bool(true),
+                 .array([.string("unsaved")])])
+            XCTAssertFalse(changed.isError)
+            let nohidden = try await process.request(
+                "nvim_command", [.string("set nohidden")])
+            XCTAssertFalse(nohidden.isError)
+
+            let outcome = await process.newDocument(inBuffers: true)
+            XCTAssertEqual(outcome, .opened)
+
+            let lua = """
+                local old = ...
+                return {
+                  vim.o.hidden,
+                  vim.api.nvim_get_current_buf(),
+                  vim.fn.tabpagenr('$'),
+                  vim.api.nvim_buf_is_loaded(old),
+                  vim.bo[old].modified,
+                }
+                """
+            let state = try await process.request(
+                "nvim_exec_lua",
+                [.string(lua), .array([.int(MPInteger(old))])])
+            let values = try XCTUnwrap(state.result.arrayValue)
+
+            XCTAssertEqual(values.count, 5)
+            XCTAssertEqual(values[0], .bool(false))
+            XCTAssertNotEqual(values[1].integer?.signed, old)
+            XCTAssertEqual(values[2].integer?.signed, 1)
+            XCTAssertEqual(values[3], .bool(true))
+            XCTAssertEqual(values[4], .bool(true))
         }
     }
 

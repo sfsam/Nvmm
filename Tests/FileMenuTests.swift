@@ -105,6 +105,31 @@ final class ModifiedBufferTests: XCTestCase {
     }
 }
 
+final class NewDocumentOutcomeTests: XCTestCase {
+
+    func testSuccessAndUnavailableResponses() {
+        let success = RPCResponse(error: .null, result: .null)
+        XCTAssertEqual(classifyNewDocumentResponse(success), .opened)
+        XCTAssertEqual(classifyNewDocumentResponse(nil), .unavailable)
+    }
+
+    func testFailurePreservesNeovimMessage() {
+        let message = "Vim(enew):E37: No write since last change"
+        let response = RPCResponse(
+            error: .array([.int(0), .string(message)]), result: .null)
+
+        XCTAssertEqual(
+            classifyNewDocumentResponse(response), .failed(message))
+    }
+
+    func testMalformedFailureUsesFallback() {
+        let response = RPCResponse(error: .string("bad"), result: .null)
+        XCTAssertEqual(
+            classifyNewDocumentResponse(response),
+            .failed("Neovim could not create a new document."))
+    }
+}
+
 final class WriteOutcomeTests: XCTestCase {
 
     func testSuccessfulWrite() {

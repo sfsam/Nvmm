@@ -22,15 +22,20 @@ extension WindowController {
 
     // MARK: - New
 
-    /// Opens an empty document: a new buffer in the current tab page, or a new
-    /// tab page, following the buffers-instead-of-tabs preference. Neovim
-    /// reports its own error (a modified buffer with `'hidden'` off refuses
-    /// `:enew`), so nothing is second-guessed here.
+    /// Opens an empty document in a buffer or tab page according to the app
+    /// preference. Buffer mode uses `:hide enew`, preserving a modified buffer
+    /// even when `'hidden'` is off without changing the option permanently.
     @IBAction func newDocument(_ sender: Any?) {
         guard let process else { return }
         Task {
-            let command = Settings.openFilesInBuffers ? "enew" : "tabnew"
-            if await !process.normalCommand(command) { NSSound.beep() }
+            switch await process.newDocument(
+                inBuffers: Settings.openFilesInBuffers) {
+            case .opened: break
+            case .unavailable: NSSound.beep()
+            case .failed(let detail):
+                await process.perform(.errorWriteln(detail))
+                NSSound.beep()
+            }
         }
     }
 
