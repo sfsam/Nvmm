@@ -68,6 +68,10 @@ typedef struct {
 typedef struct {
     simd_short2 grid_position;
     uint32_t cell_width;
+    /// Foreground color as packed RGBA bytes (low byte red).
+    uint32_t foreground_color;
+    /// 0 for a one-channel coverage mask, 1 for premultiplied RGBA.
+    uint32_t atlas;
     glyph_rect rect;
 } glyph_data;
 

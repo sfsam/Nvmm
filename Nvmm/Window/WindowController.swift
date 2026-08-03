@@ -1107,8 +1107,16 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
                 self?.applyScrollbarVisibility()
                 self?.updateProgressIndicator()
                 self?.gridView.applyCursorTrailSettings()
+                self?.applyFontRasterizationSettings()
             }
         }
+    }
+
+    /// Synchronizes the shared glyph caches and redraws this window. The
+    /// manager makes repeated calls from windows sharing a GPU idempotent.
+    private func applyFontRasterizationSettings() {
+        renderManager.applyFontRasterizationSettings()
+        gridView.needsDisplay = true
     }
 
     /// Applies the transparent-title-bar setting. The background is reapplied

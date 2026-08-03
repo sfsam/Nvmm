@@ -14,6 +14,44 @@
 
 using namespace metal;
 
+// The drawable uses gamma-encoded Display P3. Neovim colors arrive as sRGB,
+// so every render pass converts them before writing or blending.
+constant float3x3 sRGB_XYZ = transpose(float3x3(
+    0.4360747, 0.3850649, 0.1430804,
+    0.2225045, 0.7168786, 0.0606169,
+    0.0139322, 0.0971045, 0.7141733
+));
+constant float3x3 XYZ_DP3 = transpose(float3x3(
+     2.40414768, -0.99010704, -0.39759019,
+    -0.84239098,  1.79905954,  0.01597023,
+     0.04838763, -0.09752546,  1.27393636
+));
+constant float3x3 sRGB_DP3 = XYZ_DP3 * sRGB_XYZ;
+
+float3 linearize_srgb(float3 color) {
+    bool3 cutoff = color <= 0.04045;
+    float3 lower = color / 12.92;
+    float3 higher = pow((color + 0.055) / 1.055, float3(2.4));
+    return mix(higher, lower, float3(cutoff));
+}
+
+float3 encode_srgb(float3 color) {
+    bool3 cutoff = color <= 0.0031308;
+    float3 lower = color * 12.92;
+    float3 higher = pow(color, float3(1.0 / 2.4)) * 1.055 - 0.055;
+    return mix(higher, lower, float3(cutoff));
+}
+
+float3 srgb_to_display_p3(float3 color) {
+    return encode_srgb(sRGB_DP3 * linearize_srgb(color));
+}
+
+float4 load_color(uint32_t packed) {
+    float4 color = unpack_unorm4x8_to_float(packed);
+    color.rgb = srgb_to_display_p3(color.rgb);
+    return color;
+}
+
 struct grid_rasterizer_data {
     float4 position [[position]];
     float4 color;
@@ -32,7 +70,9 @@ struct line_rasterizer_data {
 struct glyph_rasterizer_data {
     float4 position [[position]];
     float2 texture_position;
+    float4 color;
     uint32_t texture_index;
+    uint32_t atlas;
 };
 
 struct cell_graphic_rasterizer_data {
@@ -77,7 +117,7 @@ background_render(uint vertex_id [[vertex_id]],
 
     grid_rasterizer_data data;
     data.position = float4(position.xy, 0, 1);
-    data.color = unpack_unorm4x8_srgb_to_float(cell_colors[instance_id]);
+    data.color = load_color(cell_colors[instance_id]);
     return data;
 }
 
@@ -112,7 +152,7 @@ cursor_render(uint vertex_id [[vertex_id]],
 
     grid_rasterizer_data data;
     data.position = float4(position.xy, 0.0, 1.0);
-    data.color = unpack_unorm4x8_srgb_to_float(uniforms.cursor_color);
+    data.color = load_color(uniforms.cursor_color);
     return data;
 }
 
@@ -142,7 +182,7 @@ line_render(uint vertex_id [[vertex_id]],
     // color.a and the cell width as a negative period; line_fill detects an
     // undercurl by period < 0.
     if (line.period == 0xFFFF) {
-        float4 color = unpack_unorm4x8_srgb_to_float(line.color);
+        float4 color = load_color(line.color);
         data.color = float4(color.rgb, line_offset.y + line.thickness * 0.5);
         data.period = -uniforms.cell_pixel_size.x;
         data.pattern_size = uniforms.cell_pixel_size.x;
@@ -152,7 +192,7 @@ line_render(uint vertex_id [[vertex_id]],
     } else {
         float line_position = line.count + transforms[vertex_id].x;
         float period = uniforms.cell_pixel_size.x * line_position / line.period;
-        data.color = unpack_unorm4x8_srgb_to_float(line.color);
+        data.color = load_color(line.color);
         data.period = select(0.5, period, line.period);
         data.pattern_size = line.period;
         data.center_y = line_offset.y + line.thickness * 0.5;
@@ -198,7 +238,9 @@ glyph_render(uint vertex_id [[vertex_id]],
     glyph_rasterizer_data data;
     data.position = float4(position.xy, 0, 1);
     data.texture_position = float2(glyph.rect.texture_origin.xy) + texture_offset;
+    data.color = load_color(glyph.foreground_color);
     data.texture_index = glyph.rect.texture_origin.z;
+    data.atlas = glyph.atlas;
     return data;
 }
 
@@ -231,8 +273,8 @@ cell_graphic_render(uint vertex_id [[vertex_id]],
     data.position = float4(position.xy, 0, 1);
     data.cell_position = cell_position;
     data.cell_size = cell_size;
-    data.color = unpack_unorm4x8_srgb_to_float(graphic.color);
-    data.background_color = unpack_unorm4x8_srgb_to_float(graphic.background_color);
+    data.color = load_color(graphic.color);
+    data.background_color = load_color(graphic.background_color);
     data.kind = graphic.kind;
     return data;
 }
@@ -269,13 +311,21 @@ fragment float4 line_fill(line_rasterizer_data in [[stage_in]]) {
 }
 
 fragment float4 glyph_fill(glyph_rasterizer_data in [[stage_in]],
-                           texture2d_array<float> texture [[texture(0)]]) {
+                           texture2d_array<float> masks [[texture(0)]],
+                           texture2d_array<float> colors [[texture(1)]]) {
     constexpr sampler texture_sampler(mag_filter::nearest,
                                       min_filter::nearest,
                                       address::clamp_to_zero,
                                       coord::pixel);
 
-    return texture.sample(texture_sampler, in.texture_position, in.texture_index);
+    if (in.atlas == 0) {
+        float coverage = masks.sample(
+            texture_sampler, in.texture_position, in.texture_index).r;
+        return float4(in.color.rgb * coverage, coverage);
+    }
+
+    // The color atlas is already premultiplied, gamma-encoded Display P3.
+    return colors.sample(texture_sampler, in.texture_position, in.texture_index);
 }
 
 fragment float4 cell_graphic_fill(cell_graphic_rasterizer_data in [[stage_in]]) {

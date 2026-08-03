@@ -2,114 +2,162 @@
 //  Nvmm
 //  GlyphManager.swift
 //
-//  Rasterizes glyphs on demand and caches them in a texture cache.
+//  Rasterizes glyphs on demand and caches them in GPU texture atlases.
 //
-//  A glyph manager guarantees that every glyph needed to render a frame is in
-//  GPU memory. Cached glyphs are keyed by font identity, grapheme text, and the
-//  foreground/background pair (colors matter because the rasterizer bakes them
-//  into the bitmap). After committing a frame, call `evict` to let the manager
-//  cull old cache pages.
+//  Ordinary text is cached independently of its display colors in a one-byte
+//  coverage atlas. Color glyphs use a separate RGBA atlas; their key retains
+//  the foreground because a CoreText grapheme can contain both color and text
+//  runs. After committing a frame, call `evict` to cull old cache pages.
 //
 
 import CoreText
 import Metal
 import simd
 
+/// A cached glyph and the atlas containing its pixels.
+nonisolated struct CachedGlyph {
+    let rect: glyph_rect
+    let format: GlyphBitmapFormat
+}
+
 final class GlyphManager {
-    private struct Key: Hashable {
+    private struct BaseKey: Hashable {
         let font: CTFont
         let text: String
-        let background: UInt32
-        let foreground: UInt32
 
-        static func == (lhs: Key, rhs: Key) -> Bool {
-            lhs.font === rhs.font && lhs.text == rhs.text &&
-                lhs.background == rhs.background &&
-                lhs.foreground == rhs.foreground
+        static func == (lhs: BaseKey, rhs: BaseKey) -> Bool {
+            lhs.font === rhs.font && lhs.text == rhs.text
         }
 
         func hash(into hasher: inout Hasher) {
             hasher.combine(ObjectIdentifier(font))
             hasher.combine(text)
-            hasher.combine(background)
-            hasher.combine(foreground)
         }
     }
 
+    private struct MaskKey: Hashable {
+        let base: BaseKey
+        let options: GlyphRasterizationOptions
+    }
+
+    private struct ColorKey: Hashable {
+        let base: BaseKey
+        let foreground: UInt32
+        let options: GlyphRasterizationOptions
+    }
+
     private let rasterizer: GlyphRasterizer
-    private let textureCache: GlyphTextureCache
+    private let maskCache: GlyphTextureCache
+    private let colorCache: GlyphTextureCache
     private let evictThreshold: Int
     private let evictPreserve: Int
-    private var map: [Key: glyph_rect] = [:]
-    private var needsEviction = false
+    private var options: GlyphRasterizationOptions
+    private var maskMap: [MaskKey: CachedGlyph] = [:]
+    private var colorMap: [ColorKey: CachedGlyph] = [:]
+    private var maskNeedsEviction = false
+    private var colorNeedsEviction = false
 
-    init(rasterizer: GlyphRasterizer, textureCache: GlyphTextureCache,
-         evictThreshold: Int, evictPreserve: Int) {
+    init(rasterizer: GlyphRasterizer, maskCache: GlyphTextureCache,
+         colorCache: GlyphTextureCache, evictThreshold: Int,
+         evictPreserve: Int, options: GlyphRasterizationOptions) {
         self.rasterizer = rasterizer
-        self.textureCache = textureCache
+        self.maskCache = maskCache
+        self.colorCache = colorCache
         self.evictThreshold = evictThreshold
         self.evictPreserve = evictPreserve
+        self.options = options
     }
 
     // Nonisolated so teardown skips the isolated-deinit executor hop that trips
     // a libmalloc double-free under XCTest's post-test memory checker.
     nonisolated deinit {}
 
-    /// The texture holding the cached glyphs.
-    var texture: MTLTexture { textureCache.texture }
+    /// The coverage-mask texture for ordinary text.
+    var maskTexture: MTLTexture { maskCache.texture }
 
-    /// A cached glyph for the given font, text, and colors, rasterizing and
+    /// The premultiplied RGBA texture for intrinsically colored glyphs.
+    var colorTexture: MTLTexture { colorCache.texture }
+
+    /// Applies new rasterization settings and discards obsolete cache pages
+    /// when replacement textures can be allocated. The options remain in each
+    /// key, so a failed reset cannot return pixels made with an old setting.
+    func update(options newOptions: GlyphRasterizationOptions) {
+        guard newOptions != options else { return }
+        options = newOptions
+        if maskCache.reset() {
+            maskMap.removeAll(keepingCapacity: true)
+            maskNeedsEviction = false
+        }
+        if colorCache.reset() {
+            colorMap.removeAll(keepingCapacity: true)
+            colorNeedsEviction = false
+        }
+    }
+
+    /// A cached glyph for the given font, text, and foreground, rasterizing and
     /// caching it on first use.
-    func glyph(font: CTFont, text: String, background: RGBColor,
-               foreground: RGBColor) -> glyph_rect {
-        let key = Key(font: font, text: text,
-                      background: background.opaque, foreground: foreground.opaque)
+    func glyph(font: CTFont, text: String,
+               foreground: RGBColor) -> CachedGlyph {
+        let base = BaseKey(font: font, text: text)
+        let maskKey = MaskKey(base: base, options: options)
+        if let cached = maskMap[maskKey] { return cached }
 
-        if let cached = map[key] { return cached }
+        let colorKey = ColorKey(base: base, foreground: foreground.opaque,
+                                options: options)
+        if let cached = colorMap[colorKey] { return cached }
 
-        let bitmap = rasterizer.rasterize(font: font, background: background,
-                                          foreground: foreground, text: text)
-        guard let position = textureCache.add(bitmap) else {
-            needsEviction = true
-            return glyph_rect(size: .zero, position: .zero,
-                              texture_origin: .zero)
+        let bitmap = rasterizer.rasterize(
+            font: font, foreground: foreground, text: text, options: options)
+        let cache = bitmap.format == .mask ? maskCache : colorCache
+        guard let position = cache.add(bitmap) else {
+            if bitmap.format == .mask {
+                maskNeedsEviction = true
+            } else {
+                colorNeedsEviction = true
+            }
+            return CachedGlyph(
+                rect: glyph_rect(size: .zero, position: .zero,
+                                 texture_origin: .zero),
+                format: bitmap.format)
         }
 
-        let rect = glyph_rect(
-            size: simd_short2(bitmap.width, bitmap.height),
-            position: simd_short2(bitmap.leftBearing, -bitmap.ascent),
-            texture_origin: position)
-
-        map[key] = rect
-        return rect
+        let cached = CachedGlyph(
+            rect: glyph_rect(
+                size: simd_short2(bitmap.width, bitmap.height),
+                position: simd_short2(bitmap.leftBearing, -bitmap.ascent),
+                texture_origin: position),
+            format: bitmap.format)
+        if bitmap.format == .mask {
+            maskMap[maskKey] = cached
+        } else {
+            colorMap[colorKey] = cached
+        }
+        return cached
     }
 
-    /// A cached glyph for a cell, using the cell's own font face and colors.
-    func glyph(family: FontFamily, cell: Cell) -> glyph_rect {
+    /// A cached glyph for a cell, using the cell's own font and foreground.
+    func glyph(family: FontFamily, cell: Cell,
+               foreground: RGBColor) -> CachedGlyph {
         let font = family.font(cell.fontAttributes, wide: cell.width == 2)
-        return glyph(font: font, text: cell.text,
-                     background: cell.background, foreground: cell.foreground)
+        return glyph(font: font, text: cell.text, foreground: foreground)
     }
 
-    /// A cached glyph for a cell rendered with explicit colors.
-    func glyph(family: FontFamily, cell: Cell, background: RGBColor,
-               foreground: RGBColor) -> glyph_rect {
-        let font = family.font(cell.fontAttributes, wide: cell.width == 2)
-        return glyph(font: font, text: cell.text,
-                     background: background, foreground: foreground)
-    }
-
-    /// Evicts old cache pages once the allocated page count exceeds the
-    /// eviction threshold.
+    /// Evicts old pages independently from both texture atlases.
     func evict() {
-        if needsEviction || textureCache.pagesCapacity > evictThreshold {
-            needsEviction = !performEviction()
+        if maskNeedsEviction || maskCache.pagesCapacity > evictThreshold {
+            maskNeedsEviction = !performEviction(
+                cache: maskCache, map: &maskMap)
+        }
+        if colorNeedsEviction || colorCache.pagesCapacity > evictThreshold {
+            colorNeedsEviction = !performEviction(
+                cache: colorCache, map: &colorMap)
         }
     }
 
-    private func performEviction() -> Bool {
-        guard let evicted = textureCache.evict(
-            preserve: evictPreserve) else {
+    private func performEviction<Key: Hashable>(
+        cache: GlyphTextureCache, map: inout [Key: CachedGlyph]
+    ) -> Bool {
+        guard let evicted = cache.evict(preserve: evictPreserve) else {
             return false
         }
 
@@ -119,12 +167,12 @@ final class GlyphManager {
         }
 
         let shift = Int16(evicted)
-        var newMap: [Key: glyph_rect] = [:]
+        var newMap: [Key: CachedGlyph] = [:]
         newMap.reserveCapacity(map.count)
-        for (key, value) in map where value.texture_origin.z >= shift {
-            var shifted = value
-            shifted.texture_origin.z -= shift
-            newMap[key] = shifted
+        for (key, value) in map where value.rect.texture_origin.z >= shift {
+            var rect = value.rect
+            rect.texture_origin.z -= shift
+            newMap[key] = CachedGlyph(rect: rect, format: value.format)
         }
         map = newMap
         return true

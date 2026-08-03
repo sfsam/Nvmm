@@ -21,6 +21,7 @@ final class GlyphTextureCache {
     private let device: MTLDevice
     private let queue: MTLCommandQueue
     private let makeTexture: TextureFactory
+    private let pixelFormat: MTLPixelFormat
     private(set) var texture: MTLTexture
     private let growthFactor: Double
     private let maximumPages: Int
@@ -33,7 +34,8 @@ final class GlyphTextureCache {
     private var yUsed: Int
     private var rowHeight: Int
 
-    init?(queue: MTLCommandQueue, pageWidth: Int, pageHeight: Int,
+    init?(queue: MTLCommandQueue, pixelFormat: MTLPixelFormat,
+          pageWidth: Int, pageHeight: Int,
           initialCapacity: Int, growthFactor: Double,
           maximumPages: Int = 64,
           makeTexture: @escaping TextureFactory = defaultTextureFactory) {
@@ -42,12 +44,14 @@ final class GlyphTextureCache {
         let pageCount = min(maximumPages, max(1, initialCapacity))
         guard let texture = Self.allocTexture(
             device: device, width: pageWidth, height: pageHeight,
-            length: pageCount, makeTexture: makeTexture) else {
+            length: pageCount, pixelFormat: pixelFormat,
+            makeTexture: makeTexture) else {
             return nil
         }
         self.device = device
         self.queue = queue
         self.makeTexture = makeTexture
+        self.pixelFormat = pixelFormat
         self.growthFactor = growthFactor
         self.maximumPages = maximumPages
         xUsed = 0
@@ -70,14 +74,21 @@ final class GlyphTextureCache {
     /// The number of cache pages in use.
     var pagesSize: Int { pageIndex }
 
+    /// Replaces all pages with a fresh empty page. Existing command buffers
+    /// retain the old texture until the GPU has finished reading it.
+    func reset() -> Bool {
+        evict(preserve: 0) != nil
+    }
+
     private static func allocTexture(
         device: MTLDevice, width: Int, height: Int, length: Int,
+        pixelFormat: MTLPixelFormat,
         makeTexture: TextureFactory
     ) -> MTLTexture? {
         let descriptor = MTLTextureDescriptor()
         descriptor.textureType = .type2DArray
         descriptor.arrayLength = length
-        descriptor.pixelFormat = .rgba8Unorm_srgb
+        descriptor.pixelFormat = pixelFormat
         descriptor.width = width
         descriptor.height = height
         descriptor.mipmapLevelCount = 1
@@ -95,7 +106,8 @@ final class GlyphTextureCache {
                             count: Int) -> Bool {
         guard let newTexture = Self.allocTexture(
             device: device, width: xSize, height: ySize,
-            length: newPageCount, makeTexture: makeTexture),
+            length: newPageCount, pixelFormat: pixelFormat,
+            makeTexture: makeTexture),
               let commandBuffer = queue.makeCommandBuffer(),
               let blit = commandBuffer.makeBlitCommandEncoder() else {
             return false
@@ -183,6 +195,7 @@ final class GlyphTextureCache {
         if preserve == 0 {
             guard let newTexture = Self.allocTexture(
                 device: device, width: xSize, height: ySize, length: 1,
+                pixelFormat: pixelFormat,
                 makeTexture: makeTexture) else {
                 return nil
             }

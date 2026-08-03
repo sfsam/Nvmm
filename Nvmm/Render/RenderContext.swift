@@ -28,6 +28,12 @@ struct RenderContextOptions {
 
 /// The Metal device state and glyph cache used to render a grid.
 final class RenderContext {
+    static let outputPixelFormat: MTLPixelFormat = .bgra8Unorm
+
+    static var outputColorSpace: CGColorSpace {
+        CGColorSpace(name: CGColorSpace.displayP3)!
+    }
+
     let device: MTLDevice
     let commandQueue: MTLCommandQueue
     let backgroundPipeline: MTLRenderPipelineState
@@ -39,7 +45,8 @@ final class RenderContext {
     let glyphManager: GlyphManager
 
     init(device: MTLDevice, fontManager: FontManager,
-         rasterizer: GlyphRasterizer, options: RenderContextOptions) throws {
+         rasterizer: GlyphRasterizer, options: RenderContextOptions,
+         glyphOptions: GlyphRasterizationOptions) throws {
         self.device = device
         self.fontManager = fontManager
         guard let queue = device.makeCommandQueue() else {
@@ -50,28 +57,39 @@ final class RenderContext {
         let library = try device.makeDefaultLibrary(bundle: .main)
 
         backgroundPipeline = try Self.pipeline(
-            device: device, library: library, blended: false,
+            device: device, library: library, blend: .none,
             vertex: "background_render", fragment: "background_fill",
             label: "Grid background render pipeline")
         glyphPipeline = try Self.pipeline(
-            device: device, library: library, blended: false,
+            device: device, library: library, blend: .premultiplied,
             vertex: "glyph_render", fragment: "glyph_fill",
             label: "Glyph render pipeline")
         cellGraphicPipeline = try Self.pipeline(
-            device: device, library: library, blended: true,
+            device: device, library: library, blend: .straight,
             vertex: "cell_graphic_render", fragment: "cell_graphic_fill",
             label: "Cell graphic render pipeline")
         cursorPipeline = try Self.pipeline(
-            device: device, library: library, blended: false,
+            device: device, library: library, blend: .none,
             vertex: "cursor_render", fragment: "background_fill",
             label: "Cursor render pipeline")
         linePipeline = try Self.pipeline(
-            device: device, library: library, blended: true,
+            device: device, library: library, blend: .straight,
             vertex: "line_render", fragment: "line_fill",
             label: "Line render pipeline")
 
-        guard let textureCache = GlyphTextureCache(
+        guard let maskCache = GlyphTextureCache(
             queue: queue,
+            pixelFormat: .r8Unorm,
+            pageWidth: options.cachePageWidth,
+            pageHeight: options.cachePageHeight,
+            initialCapacity: options.cacheInitialCapacity,
+            growthFactor: options.cacheGrowthFactor,
+            maximumPages: options.cacheEvictionThreshold) else {
+            throw RenderContextError.glyphTextureUnavailable
+        }
+        guard let colorCache = GlyphTextureCache(
+            queue: queue,
+            pixelFormat: .rgba8Unorm,
             pageWidth: options.cachePageWidth,
             pageHeight: options.cachePageHeight,
             initialCapacity: options.cacheInitialCapacity,
@@ -81,33 +99,39 @@ final class RenderContext {
         }
 
         glyphManager = GlyphManager(
-            rasterizer: rasterizer, textureCache: textureCache,
+            rasterizer: rasterizer, maskCache: maskCache,
+            colorCache: colorCache,
             evictThreshold: options.cacheEvictionThreshold,
-            evictPreserve: options.cacheEvictionPreserve)
+            evictPreserve: options.cacheEvictionPreserve,
+            options: glyphOptions)
     }
 
     // Nonisolated so teardown skips the isolated-deinit executor hop that trips
     // a libmalloc double-free under XCTest's post-test memory checker.
     nonisolated deinit {}
 
+    private enum BlendMode: Equatable { case none, straight, premultiplied }
+
     private static func pipeline(device: MTLDevice, library: MTLLibrary,
-                                 blended: Bool, vertex: String, fragment: String,
+                                 blend: BlendMode, vertex: String, fragment: String,
                                  label: String) throws -> MTLRenderPipelineState {
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.label = label
-        descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        descriptor.colorAttachments[0].pixelFormat = outputPixelFormat
         descriptor.vertexBuffers[0].mutability = .immutable
         descriptor.fragmentBuffers[0].mutability = .immutable
         descriptor.vertexFunction = library.makeFunction(name: vertex)
         descriptor.fragmentFunction = library.makeFunction(name: fragment)
 
-        if blended {
+        if blend != .none {
             let attachment = descriptor.colorAttachments[0]!
             attachment.isBlendingEnabled = true
             attachment.rgbBlendOperation = .add
             attachment.alphaBlendOperation = .add
-            attachment.sourceRGBBlendFactor = .sourceAlpha
-            attachment.sourceAlphaBlendFactor = .sourceAlpha
+            attachment.sourceRGBBlendFactor = blend == .premultiplied
+                ? .one : .sourceAlpha
+            attachment.sourceAlphaBlendFactor = blend == .premultiplied
+                ? .one : .sourceAlpha
             attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
             attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         }
@@ -132,6 +156,7 @@ final class RenderContextManager {
     private let rasterizer: GlyphRasterizer
     private let options: RenderContextOptions
     private var contexts: [ObjectIdentifier: RenderContext] = [:]
+    private var glyphOptions: GlyphRasterizationOptions?
 
     init(options: RenderContextOptions = RenderContextOptions()) {
         self.options = options
@@ -145,12 +170,35 @@ final class RenderContextManager {
 
     /// The render context for a device, creating one on first use.
     func renderContext(for device: MTLDevice) throws -> RenderContext {
+        let options = currentGlyphOptions()
+        _ = applyGlyphOptions(options)
         let key = ObjectIdentifier(device)
         if let existing = contexts[key] { return existing }
         let context = try RenderContext(device: device, fontManager: fontManager,
-                                        rasterizer: rasterizer, options: options)
+                                        rasterizer: rasterizer, options: self.options,
+                                        glyphOptions: options)
         contexts[key] = context
         return context
+    }
+
+    /// Applies the app-wide text-rasterization settings to every GPU cache.
+    @discardableResult
+    func applyFontRasterizationSettings() -> Bool {
+        applyGlyphOptions(currentGlyphOptions())
+    }
+
+    private func currentGlyphOptions() -> GlyphRasterizationOptions {
+        let thickness = Settings.fontThickness
+        return GlyphRasterizationOptions(
+            thicken: thickness > 0,
+            strength: thickness)
+    }
+
+    private func applyGlyphOptions(_ options: GlyphRasterizationOptions) -> Bool {
+        guard options != glyphOptions else { return false }
+        glyphOptions = options
+        for context in contexts.values { context.glyphManager.update(options: options) }
+        return true
     }
 
     /// The best render context for a screen: the device currently driving it.

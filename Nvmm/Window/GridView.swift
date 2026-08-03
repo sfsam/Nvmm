@@ -260,7 +260,8 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     override func makeBackingLayer() -> CALayer {
         let layer = CAMetalLayer()
         layer.delegate = self
-        layer.pixelFormat = .bgra8Unorm_srgb
+        layer.pixelFormat = RenderContext.outputPixelFormat
+        layer.colorspace = RenderContext.outputColorSpace
         layer.allowsNextDrawableTimeout = false
         layer.autoresizingMask = [.layerHeightSizable, .layerWidthSizable]
         layer.needsDisplayOnBoundsChange = true
@@ -684,12 +685,13 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                         continue
                     }
 
-                    let glyph = glyphManager.glyph(
-                        family: font, cell: cell,
-                        background: background, foreground: foreground)
+                    let glyph = glyphManager.glyph(family: font, cell: cell,
+                                                   foreground: foreground)
                     glyphs[glyphCount] = glyph_data(
                         grid_position: gridpos,
-                        cell_width: UInt32(cell.width), rect: glyph)
+                        cell_width: UInt32(cell.width),
+                        foreground_color: foreground.opaque,
+                        atlas: glyph.format.rawValue, rect: glyph.rect)
                     glyphCount += 1
                 }
             }
@@ -739,7 +741,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             lineOffset: lineRegion.offset, gridLineCount: gridLineCount,
             compositionLineCount: lineCount - gridLineCount,
             cursorShape: drawnShape,
-            clearColor: clearColor(for: grid.defaultBackground)
+            clearColor: Self.clearColor(for: grid.defaultBackground)
         ) else {
             retryFrame(frame)
             return
@@ -784,11 +786,13 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
 
             if !cell.isEmpty {
                 let glyph = glyphManager.glyph(family: font, cell: cell,
-                                               background: cell.background,
                                                foreground: cell.foreground)
                 glyphs[glyphCount] = glyph_data(grid_position: entry.position,
                                                 cell_width: UInt32(cell.width),
-                                                rect: glyph)
+                                                foreground_color:
+                                                    cell.foreground.opaque,
+                                                atlas: glyph.format.rawValue,
+                                                rect: glyph.rect)
                 glyphCount += 1
             }
 
@@ -824,19 +828,19 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     /// size can leave along an edge — takes this color, so it matches the text
     /// area instead of standing out against it.
     ///
-    /// The drawable's pixel format is sRGB, and Metal applies the sRGB transfer
-    /// function when it writes the clear value. The color therefore has to be
-    /// given in linear space, which is also the space the shaders work in after
-    /// unpacking their sRGB byte colors.
-    private func clearColor(for background: RGBColor) -> MTLClearColor {
-        func linear(_ component: UInt8) -> Double {
-            let value = Double(component) / 255
-            return value <= 0.04045 ? value / 12.92
-                                    : pow((value + 0.055) / 1.055, 2.4)
-        }
-        return MTLClearColor(red: linear(background.red),
-                             green: linear(background.green),
-                             blue: linear(background.blue), alpha: 1)
+    /// The drawable stores gamma-encoded Display P3, while Neovim supplies an
+    /// sRGB background. Clear values bypass the shaders, so AppKit performs the
+    /// same color-space conversion here.
+    static func clearColor(for background: RGBColor) -> MTLClearColor {
+        let scale = CGFloat(1.0 / 255.0)
+        let srgb = NSColor(srgbRed: CGFloat(background.red) * scale,
+                           green: CGFloat(background.green) * scale,
+                           blue: CGFloat(background.blue) * scale,
+                           alpha: 1)
+        let color = srgb.usingColorSpace(.displayP3)!
+        return MTLClearColor(red: Double(color.redComponent),
+                             green: Double(color.greenComponent),
+                             blue: Double(color.blueComponent), alpha: 1)
     }
 
     private func retryFrame(_ frame: MetalFrameBuffer) {
@@ -887,7 +891,8 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         if gridGlyphCount > 0 {
             encoder.setRenderPipelineState(context.glyphPipeline)
             encoder.setVertexBufferOffset(glyphOffset, index: 1)
-            encoder.setFragmentTexture(context.glyphManager.texture, index: 0)
+            encoder.setFragmentTexture(context.glyphManager.maskTexture, index: 0)
+            encoder.setFragmentTexture(context.glyphManager.colorTexture, index: 1)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
                                    vertexCount: 4, instanceCount: gridGlyphCount)
         }
@@ -914,7 +919,8 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             encoder.setRenderPipelineState(context.glyphPipeline)
             encoder.setVertexBufferOffset(
                 glyphOffset + gridGlyphCount * glyphStride, index: 1)
-            encoder.setFragmentTexture(context.glyphManager.texture, index: 0)
+            encoder.setFragmentTexture(context.glyphManager.maskTexture, index: 0)
+            encoder.setFragmentTexture(context.glyphManager.colorTexture, index: 1)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
                                    vertexCount: 4, instanceCount: compositionGlyphCount)
         }

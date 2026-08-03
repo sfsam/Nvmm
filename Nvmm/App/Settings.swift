@@ -4,13 +4,10 @@
 //
 //  The user defaults the app reads, and the window that edits them.
 //
-//  Settings take effect as they are changed: there is no OK or Apply. Two
-//  mechanisms give that, matching how each setting is used. A setting consulted
-//  at the moment it matters — where to open a file, whether to keep running
-//  after the last window — is simply read then, so a change is picked up by the
-//  next thing that asks. A setting that is part of a window's state has to be
-//  reapplied when it changes, so windows observe the defaults; see
-//  `WindowController.observeSettings`.
+//  Settings normally take effect as they are changed. Text thickness waits for
+//  a short pause in slider movement so dragging does not repeatedly rebuild the
+//  app-wide glyph cache. A setting consulted at the moment it matters is simply
+//  read then; window state is reapplied by `WindowController.observeSettings`.
 //
 
 import Cocoa
@@ -50,8 +47,14 @@ enum Settings {
     /// The maximum opacity of a cursor trail.
     static let cursorTrailOpacityKey = "NVCursorTrailOpacity"
 
+    /// Zero disables thickening; positive values are CoreText strengths.
+    static let fontThicknessKey = "NVFontThickness"
+
     static let cursorTrailMinimumValue = 0.1
     static let cursorTrailMaximumValue = 1.0
+    nonisolated static let fontThicknessMinimum = 0
+    nonisolated static let fontThicknessMaximum = 255
+    nonisolated static let fontThicknessValues = [0, 50, 150, 250]
 
     static var openFilesInBuffers: Bool {
         UserDefaults.standard.bool(forKey: openFilesInBuffersKey)
@@ -89,6 +92,33 @@ enum Settings {
         clampedCursorTrailValue(forKey: cursorTrailOpacityKey)
     }
 
+    static var fontThickness: Int {
+        min(max(UserDefaults.standard.integer(forKey: fontThicknessKey),
+                fontThicknessMinimum), fontThicknessMaximum)
+    }
+
+    /// The slider detent nearest to an existing thickness default.
+    nonisolated static func fontThicknessLevel(for value: Int) -> Int {
+        let value = min(max(value, fontThicknessMinimum),
+                        fontThicknessMaximum)
+        var nearest = 0
+        var distance = Int.max
+        for (index, candidate) in fontThicknessValues.enumerated() {
+            let next = abs(candidate - value)
+            if next <= distance {
+                nearest = index
+                distance = next
+            }
+        }
+        return nearest
+    }
+
+    /// The canonical thickness for a slider detent.
+    nonisolated static func fontThicknessValue(for level: Int) -> Int {
+        let index = min(max(level, 0), fontThicknessValues.count - 1)
+        return fontThicknessValues[index]
+    }
+
     private static func clampedCursorTrailValue(forKey key: String) -> Double {
         min(max(UserDefaults.standard.double(forKey: key),
                 cursorTrailMinimumValue), cursorTrailMaximumValue)
@@ -97,20 +127,26 @@ enum Settings {
     /// Registers settings whose resting value is not supplied by the relevant
     /// typed `UserDefaults` accessor.
     static func registerDefaults() {
-        UserDefaults.standard.register(defaults: [contextSensitiveCursorKey: true,
-                                                  progressBarKey: true,
-                                                  cursorTrailLengthFractionKey: 0.55,
-                                                  cursorTrailOpacityKey: 0.55])
+        UserDefaults.standard.register(defaults: [
+            contextSensitiveCursorKey: true,
+            progressBarKey: true,
+            fontThicknessKey: 50,
+            cursorTrailLengthFractionKey: 0.55,
+            cursorTrailOpacityKey: 0.55,
+        ])
     }
 }
 
-/// The settings window: controls bound straight to the defaults.
+/// The settings window: immediate bindings plus debounced font rasterization.
 ///
-/// The bindings are continuous, so a click writes the default immediately
-/// rather than at some later commit. That write is the only thing this window
-/// does — everything that acts on a setting reads it from `UserDefaults`, so
-/// nothing here needs to know who is listening.
+/// Ordinary controls write their defaults continuously. Text thickness waits
+/// briefly after slider movement because changing it invalidates a GPU cache.
 final class SettingsWindowController: NSWindowController {
+    private static let fontThicknessDebounce = Duration.milliseconds(500)
+
+    private var fontThicknessSlider: NSSlider!
+    private var appliedFontThicknessLevel = 0
+    private var pendingFontThicknessTask: Task<Void, Never>?
 
     convenience init() {
         let behavior = NSTextField(labelWithString:
@@ -134,9 +170,22 @@ final class SettingsWindowController: NSWindowController {
             key: Settings.verticalScrollbarKey)
         let scrollbarNote = Self.note(String(localized:
             "Scrolls by buffer lines, not visual lines. It may not behave as expected if your text has wrapped lines or folds."))
-        let cursorTrail = Self.checkbox(
-            String(localized: "Cursor trail"),
-            key: Settings.cursorTrailEnabledKey)
+        let thicknessLabel = NSTextField(labelWithString:
+            String(localized: "Text thickness:"))
+        let thickness = NSSlider(value: 0, minValue: 0, maxValue: 3,
+                                 target: nil, action: nil)
+        thickness.numberOfTickMarks = 4
+        thickness.allowsTickMarkValuesOnly = true
+        thickness.tickMarkPosition = .below
+        thickness.isContinuous = true
+        thickness.identifier = .init("fontThickness")
+        thickness.widthAnchor.constraint(equalToConstant: 180).isActive = true
+        let thicknessControls = NSStackView(views: [thicknessLabel, thickness])
+        thicknessControls.orientation = .horizontal
+        thicknessControls.alignment = .centerY
+        thicknessControls.spacing = 8
+        let cursorTrail = Self.checkbox(String(localized: "Cursor trail"),
+                                        key: Settings.cursorTrailEnabledKey)
         let cursorTrailGrid = Self.cursorTrailGrid()
 
         let empty = NSGridCell.emptyContentView
@@ -146,6 +195,7 @@ final class SettingsWindowController: NSWindowController {
                                       [appearance, titlebar],
                                       [empty, scrollbar],
                                       [empty, scrollbarNote],
+                                      [empty, thicknessControls],
                                       [empty, cursorTrail],
                                       [empty, cursorTrailGrid]])
         grid.translatesAutoresizingMaskIntoConstraints = false
@@ -163,6 +213,12 @@ final class SettingsWindowController: NSWindowController {
                     equalTo: buffers.leadingAnchor, constant: 21)
             ]
         }
+        let thicknessCell = grid.cell(for: thicknessControls)
+        thicknessCell?.xPlacement = .none
+        thicknessCell?.customPlacementConstraints = [
+            thicknessControls.leadingAnchor.constraint(
+                equalTo: buffers.leadingAnchor)
+        ]
 
         let contentView = NSView()
         contentView.addSubview(grid)
@@ -180,11 +236,47 @@ final class SettingsWindowController: NSWindowController {
         panel.title = String(localized: "Settings")
         panel.contentView = contentView
         self.init(window: panel)
+
+        fontThicknessSlider = thickness
+        thickness.target = self
+        thickness.action = #selector(fontThicknessChanged)
+        loadFontThickness()
     }
 
     override func showWindow(_ sender: Any?) {
+        if pendingFontThicknessTask == nil { loadFontThickness() }
         super.showWindow(sender)
         window?.center()
+    }
+
+    @objc private func fontThicknessChanged(_ sender: NSSlider) {
+        pendingFontThicknessTask?.cancel()
+        let level = sender.integerValue
+        guard level != appliedFontThicknessLevel else {
+            pendingFontThicknessTask = nil
+            return
+        }
+        pendingFontThicknessTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: Self.fontThicknessDebounce)
+            } catch {
+                return
+            }
+            self?.applyFontThickness(level: level)
+            self?.pendingFontThicknessTask = nil
+        }
+    }
+
+    private func applyFontThickness(level: Int) {
+        UserDefaults.standard.set(Settings.fontThicknessValue(for: level),
+                                  forKey: Settings.fontThicknessKey)
+        appliedFontThicknessLevel = level
+    }
+
+    private func loadFontThickness() {
+        appliedFontThicknessLevel = Settings.fontThicknessLevel(
+            for: Settings.fontThickness)
+        fontThicknessSlider.integerValue = appliedFontThicknessLevel
     }
 
     /// A checkbox whose value is the named default, written as it is clicked.

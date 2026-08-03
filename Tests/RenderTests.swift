@@ -14,6 +14,9 @@ import XCTest
 
 @MainActor
 final class RenderTests: XCTestCase {
+    private let rasterOptions = GlyphRasterizationOptions(
+        thicken: true, strength: 50)
+
     private func requireDevice() throws {
         guard MTLCreateSystemDefaultDevice() != nil else {
             throw XCTSkip("No Metal device available")
@@ -25,13 +28,34 @@ final class RenderTests: XCTestCase {
         let manager = RenderContextManager()
         let context = try manager.defaultRenderContext()
 
-        // A built context exposes a live glyph texture as a 2D array.
-        XCTAssertEqual(context.glyphManager.texture.textureType, .type2DArray)
-        XCTAssertEqual(context.glyphManager.texture.pixelFormat, .rgba8Unorm_srgb)
+        // A built context exposes separate mask and color texture arrays.
+        XCTAssertEqual(context.glyphManager.maskTexture.textureType, .type2DArray)
+        XCTAssertEqual(context.glyphManager.maskTexture.pixelFormat, .r8Unorm)
+        XCTAssertEqual(context.glyphManager.colorTexture.textureType, .type2DArray)
+        XCTAssertEqual(context.glyphManager.colorTexture.pixelFormat, .rgba8Unorm)
 
         // The same device returns the same cached context.
         let again = try manager.renderContext(for: context.device)
         XCTAssertTrue(again === context)
+    }
+
+    func testGridLayerUsesNativeDisplayP3Target() throws {
+        let view = GridView(frame: .zero)
+        let layer = try XCTUnwrap(view.layer as? CAMetalLayer)
+        let name = try XCTUnwrap(layer.colorspace?.name)
+
+        XCTAssertEqual(layer.pixelFormat, .bgra8Unorm)
+        XCTAssertEqual(name as String, CGColorSpace.displayP3 as String)
+    }
+
+    func testClearColorConvertsSRGBToDisplayP3() {
+        let color = GridView.clearColor(
+            for: RGBColor(red: 255, green: 0, blue: 0))
+
+        XCTAssertEqual(color.red, 0.9175, accuracy: 0.001)
+        XCTAssertEqual(color.green, 0.2003, accuracy: 0.001)
+        XCTAssertEqual(color.blue, 0.1386, accuracy: 0.001)
+        XCTAssertEqual(color.alpha, 1)
     }
 
     func testDefaultFontFamilyHasUsableMetrics() throws {
@@ -156,23 +180,79 @@ final class RenderTests: XCTestCase {
         let family = manager.fontManager.family(
             descriptor: FontManager.defaultDescriptor(), size: 15, scaleFactor: 2)
 
-        let background = RGBColor(neovim: 0x000000)
         let foreground = RGBColor(neovim: 0xFFFFFF)
         let glyph = context.glyphManager.glyph(
-            font: family.regular, text: "M",
-            background: background, foreground: foreground)
+            font: family.regular, text: "M", foreground: foreground)
 
         // A visible glyph has a non-empty bounding rect.
-        XCTAssertGreaterThan(glyph.size.x, 0)
-        XCTAssertGreaterThan(glyph.size.y, 0)
+        XCTAssertEqual(glyph.format, .mask)
+        XCTAssertGreaterThan(glyph.rect.size.x, 0)
+        XCTAssertGreaterThan(glyph.rect.size.y, 0)
 
-        // The same request is served from the cache with an identical rect.
+        // Text colors do not change the cached coverage-mask rectangle.
         let cached = context.glyphManager.glyph(
             font: family.regular, text: "M",
-            background: background, foreground: foreground)
-        XCTAssertEqual(cached.size.x, glyph.size.x)
-        XCTAssertEqual(cached.size.y, glyph.size.y)
-        XCTAssertEqual(cached.texture_origin.z, glyph.texture_origin.z)
+            foreground: RGBColor(neovim: 0xFF0000))
+        XCTAssertEqual(cached.rect.size.x, glyph.rect.size.x)
+        XCTAssertEqual(cached.rect.size.y, glyph.rect.size.y)
+        XCTAssertEqual(cached.rect.texture_origin,
+                       glyph.rect.texture_origin)
+    }
+
+    func testRasterizerSeparatesTextAndColorGlyphs() {
+        let family = FontManager().family(
+            descriptor: FontManager.defaultDescriptor(), size: 15,
+            scaleFactor: 2)
+        let rasterizer = GlyphRasterizer(width: 64, height: 64)
+        let foreground = RGBColor(neovim: 0xFFFFFF)
+
+        let text = rasterizer.rasterize(
+            font: family.regular, foreground: foreground, text: "M",
+            options: rasterOptions)
+        let emoji = rasterizer.rasterize(
+            font: family.regular, foreground: foreground, text: "😀",
+            options: rasterOptions)
+
+        XCTAssertEqual(text.format, .mask)
+        XCTAssertEqual(emoji.format, .color)
+    }
+
+    func testFontThickeningAndStrengthIncreaseMaskCoverage() {
+        let family = FontManager().family(
+            descriptor: FontManager.defaultDescriptor(), size: 15,
+            scaleFactor: 2)
+        let rasterizer = GlyphRasterizer(width: 64, height: 64)
+        let foreground = RGBColor(neovim: 0xFFFFFF)
+        func coverage(_ options: GlyphRasterizationOptions) -> Int {
+            let bitmap = rasterizer.rasterize(
+                font: family.regular, foreground: foreground, text: "M",
+                options: options)
+            var total = 0
+            for y in 0..<Int(bitmap.height) {
+                for x in 0..<Int(bitmap.width) {
+                    total += Int(bitmap.buffer[y * bitmap.stride + x])
+                }
+            }
+            return total
+        }
+
+        let plain = coverage(GlyphRasterizationOptions(
+            thicken: false, strength: 50))
+        let thickened = coverage(GlyphRasterizationOptions(
+            thicken: true, strength: 50))
+        let strongest = coverage(GlyphRasterizationOptions(
+            thicken: true, strength: 255))
+        XCTAssertGreaterThan(thickened, plain)
+        XCTAssertGreaterThan(strongest, thickened)
+    }
+
+    func testDisabledThickeningNormalizesStrength() {
+        XCTAssertEqual(
+            GlyphRasterizationOptions(thicken: false, strength: 255),
+            GlyphRasterizationOptions(thicken: false, strength: 0))
+        XCTAssertNotEqual(
+            GlyphRasterizationOptions(thicken: true, strength: 50),
+            GlyphRasterizationOptions(thicken: true, strength: 51))
     }
 
     func testTextureCacheGrowsOntoNewPages() throws {
@@ -184,15 +264,16 @@ final class RenderTests: XCTestCase {
 
         // A tiny page forces each added bitmap onto a fresh page.
         let cache = try XCTUnwrap(GlyphTextureCache(
-            queue: queue, pageWidth: 8, pageHeight: 8,
+            queue: queue, pixelFormat: .r8Unorm,
+            pageWidth: 8, pageHeight: 8,
             initialCapacity: 1, growthFactor: 2))
         let rasterizer = GlyphRasterizer(width: 64, height: 64)
         let family = FontManager().family(
             descriptor: FontManager.defaultDescriptor(), size: 15, scaleFactor: 1)
 
         let bitmap = rasterizer.rasterize(
-            font: family.regular, background: RGBColor(neovim: 0),
-            foreground: RGBColor(neovim: 0xFFFFFF), text: "W")
+            font: family.regular, foreground: RGBColor(neovim: 0xFFFFFF),
+            text: "W", options: rasterOptions)
 
         let first = try XCTUnwrap(cache.add(bitmap))
         let second = try XCTUnwrap(cache.add(bitmap))
@@ -211,10 +292,11 @@ final class RenderTests: XCTestCase {
             descriptor: FontManager.defaultDescriptor(), size: 15,
             scaleFactor: 1)
         let bitmap = rasterizer.rasterize(
-            font: family.regular, background: RGBColor(neovim: 0),
-            foreground: RGBColor(neovim: 0xFFFFFF), text: "W")
+            font: family.regular, foreground: RGBColor(neovim: 0xFFFFFF),
+            text: "W", options: rasterOptions)
         let cache = try XCTUnwrap(GlyphTextureCache(
-            queue: queue, pageWidth: Int(bitmap.width) + 1,
+            queue: queue, pixelFormat: .r8Unorm,
+            pageWidth: Int(bitmap.width) + 1,
             pageHeight: Int(bitmap.height), initialCapacity: 1,
             growthFactor: 2, maximumPages: 1))
 
@@ -230,11 +312,39 @@ final class RenderTests: XCTestCase {
             throw XCTSkip("No Metal command queue")
         }
         let cache = GlyphTextureCache(
-            queue: queue, pageWidth: 8, pageHeight: 8,
+            queue: queue, pixelFormat: .r8Unorm,
+            pageWidth: 8, pageHeight: 8,
             initialCapacity: 1, growthFactor: 2,
             makeTexture: { _, _ in nil })
 
         XCTAssertNil(cache)
+    }
+
+    func testTextureCacheResetReplacesAndEmptiesTexture() throws {
+        try requireDevice()
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let queue = device.makeCommandQueue() else {
+            throw XCTSkip("No Metal command queue")
+        }
+        let rasterizer = GlyphRasterizer(width: 64, height: 64)
+        let family = FontManager().family(
+            descriptor: FontManager.defaultDescriptor(), size: 15,
+            scaleFactor: 1)
+        let bitmap = rasterizer.rasterize(
+            font: family.regular, foreground: RGBColor(neovim: 0xFFFFFF),
+            text: "M", options: rasterOptions)
+        let cache = try XCTUnwrap(GlyphTextureCache(
+            queue: queue, pixelFormat: .r8Unorm,
+            pageWidth: 32, pageHeight: 32,
+            initialCapacity: 2, growthFactor: 2))
+
+        XCTAssertNotNil(cache.add(bitmap))
+        let original = cache.texture
+        XCTAssertTrue(cache.reset())
+        XCTAssertFalse(cache.texture === original)
+        XCTAssertEqual(cache.pagesCapacity, 1)
+        XCTAssertEqual(cache.pagesSize, 0)
+        XCTAssertNotNil(cache.add(bitmap))
     }
 
     func testTextureCacheRetriesFailedGrowth() throws {
@@ -248,11 +358,12 @@ final class RenderTests: XCTestCase {
             descriptor: FontManager.defaultDescriptor(), size: 15,
             scaleFactor: 1)
         let bitmap = rasterizer.rasterize(
-            font: family.regular, background: RGBColor(neovim: 0),
-            foreground: RGBColor(neovim: 0xFFFFFF), text: "W")
+            font: family.regular, foreground: RGBColor(neovim: 0xFFFFFF),
+            text: "W", options: rasterOptions)
         var attempts = 0
         let cache = try XCTUnwrap(GlyphTextureCache(
-            queue: queue, pageWidth: Int(bitmap.width) + 1,
+            queue: queue, pixelFormat: .r8Unorm,
+            pageWidth: Int(bitmap.width) + 1,
             pageHeight: Int(bitmap.height), initialCapacity: 1,
             growthFactor: 2,
             makeTexture: { device, descriptor in

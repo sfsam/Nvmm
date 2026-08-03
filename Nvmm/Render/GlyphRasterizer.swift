@@ -2,21 +2,40 @@
 //  Nvmm
 //  GlyphRasterizer.swift
 //
-//  Rasterizes text into RGBA bitmaps with CoreText.
+//  Rasterizes text into reusable coverage masks or color bitmaps with
+//  CoreText.
 //
-//  Text is rasterized as whole strings (usually one grapheme cluster), so the
-//  rasterizer also performs Unicode shaping. Output is premultiplied-alpha RGBA
-//  in the sRGB colorspace, drawn over the cell's background color rather than
-//  as an alpha mask: CoreText dilates glyphs differently per foreground and
-//  background pair, and that dilation is lost in an alpha-only context.
+//  Ordinary text is an alpha-only bitmap, independent of its display colors.
+//  CoreText runs backed by a color-glyph font use transparent RGBA instead, so
+//  emoji retain their intrinsic colors. Text is shaped as a whole string
+//  (usually one grapheme cluster) before either representation is selected.
 //
 
 import CoreGraphics
 import CoreText
 import Foundation
 
+/// Settings that affect the pixels CoreText writes for ordinary text.
+nonisolated struct GlyphRasterizationOptions: Hashable, Sendable {
+    let thicken: Bool
+    let strength: UInt8
+
+    init(thicken: Bool, strength: Int) {
+        self.thicken = thicken
+        self.strength = thicken ? UInt8(clamping: strength) : 0
+    }
+}
+
+/// The texture representation required by a rasterized glyph.
+nonisolated enum GlyphBitmapFormat: UInt32, Sendable {
+    case mask = 0
+    case color = 1
+
+    var pixelSize: Int { self == .mask ? 1 : 4 }
+}
+
 /// A rasterized glyph: a view into the rasterizer's pixel buffer plus metrics.
-/// Valid only until the next `rasterize` call on the same rasterizer.
+/// Valid only until the next call using the same bitmap format.
 nonisolated struct GlyphBitmap {
     /// The top-left pixel of the glyph within the rasterizer's buffer.
     let buffer: UnsafeMutablePointer<UInt8>
@@ -26,20 +45,21 @@ nonisolated struct GlyphBitmap {
     let ascent: Int16
     let width: Int16
     let height: Int16
+    let format: GlyphBitmapFormat
 
     var descent: Int16 { ascent - height }
 }
 
-/// Rasterizes glyphs at the center of a fixed-size canvas.
+/// Rasterizes glyphs at the center of fixed-size alpha and color canvases.
 ///
-/// The canvas spans from `-width` to `width` and `-height` to `height`; glyphs
-/// are drawn at the origin, so the largest representable glyph is twice the
-/// width and height passed to `init`.
+/// Each canvas spans from `-width` to `width` and `-height` to `height`;
+/// glyphs are drawn at the origin, so the largest representable glyph is twice
+/// the width and height passed to `init`.
 nonisolated final class GlyphRasterizer {
-    static let pixelSize = 4
-
-    private let context: CGContext
-    private let buffer: UnsafeMutablePointer<UInt8>
+    private let maskContext: CGContext
+    private let colorContext: CGContext
+    private let maskBuffer: UnsafeMutablePointer<UInt8>
+    private let colorBuffer: UnsafeMutablePointer<UInt8>
     private let midx: Int
     private let midy: Int
 
@@ -49,42 +69,53 @@ nonisolated final class GlyphRasterizer {
 
         let canvasWidth = midx * 2
         let canvasHeight = midy * 2
-        let bytesPerRow = canvasWidth * Self.pixelSize
+        maskBuffer = UnsafeMutablePointer<UInt8>.allocate(
+            capacity: canvasWidth * canvasHeight)
+        colorBuffer = UnsafeMutablePointer<UInt8>.allocate(
+            capacity: canvasWidth * canvasHeight * 4)
 
-        buffer = UnsafeMutablePointer<UInt8>.allocate(
-            capacity: bytesPerRow * canvasHeight)
-
-        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
-        context = CGContext(
-            data: buffer,
+        let maskSpace = CGColorSpace(name: CGColorSpace.linearGray)!
+        maskContext = CGContext(
+            data: maskBuffer,
             width: canvasWidth, height: canvasHeight,
-            bitsPerComponent: 8, bytesPerRow: bytesPerRow,
+            bitsPerComponent: 8, bytesPerRow: canvasWidth,
+            space: maskSpace,
+            bitmapInfo: CGBitmapInfo(
+                rawValue: CGImageAlphaInfo.alphaOnly.rawValue))!
+
+        let colorSpace = CGColorSpace(name: CGColorSpace.displayP3)!
+        colorContext = CGContext(
+            data: colorBuffer,
+            width: canvasWidth, height: canvasHeight,
+            bitsPerComponent: 8, bytesPerRow: canvasWidth * 4,
             space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
 
-        context.setAllowsAntialiasing(true)
-        context.setShouldAntialias(true)
-        context.setAllowsFontSmoothing(true)
-        context.setShouldSmoothFonts(true)
-        context.setAllowsFontSubpixelPositioning(true)
-        context.setShouldSubpixelPositionFonts(true)
-        context.setAllowsFontSubpixelQuantization(true)
-        context.setShouldSubpixelQuantizeFonts(true)
+        for context in [maskContext, colorContext] {
+            context.setAllowsAntialiasing(true)
+            context.setShouldAntialias(true)
+            context.setAllowsFontSmoothing(true)
+            context.setAllowsFontSubpixelPositioning(true)
+            context.setShouldSubpixelPositionFonts(true)
+            context.setAllowsFontSubpixelQuantization(false)
+            context.setShouldSubpixelQuantizeFonts(false)
+        }
     }
 
-    deinit { buffer.deallocate() }
+    deinit {
+        maskBuffer.deallocate()
+        colorBuffer.deallocate()
+    }
 
-    /// Bytes per row for bitmaps this rasterizer produces.
-    var stride: Int { midx * 2 * Self.pixelSize }
+    /// Rasterizes `text`, selecting a reusable mask unless an actual CoreText
+    /// run uses a font capable of color glyphs.
+    func rasterize(font: CTFont, foreground: RGBColor, text: String,
+                   options: GlyphRasterizationOptions) -> GlyphBitmap {
+        let line = makeLine(font: font, text: text)
+        let format: GlyphBitmapFormat = lineUsesColorGlyphs(line) ? .color : .mask
 
-    /// Rasterizes `text` in `font`, over `background`, in `foreground`.
-    func rasterize(font: CTFont, background: RGBColor, foreground: RGBColor,
-                   text: String) -> GlyphBitmap {
-        context.textPosition = CGPoint(x: midx, y: midy)
-        let line = makeLine(font: font, foreground: foreground, text: text)
-
-        // Pad the metrics to absorb antialiasing and float-to-int rounding. The
-        // constants were tuned empirically.
+        // Pad the metrics to absorb antialiasing, smoothing, and rounding. The
+        // constants leave at least the one-pixel expansion used by smoothing.
         let bounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
         let descent = bounds.origin.y - 2
         let ascent = bounds.size.height + bounds.origin.y + 2
@@ -100,10 +131,11 @@ nonisolated final class GlyphRasterizer {
         let ascentInt = Int(ascentPixels)
         let widthInt = Int(widthPixels)
         let heightInt = Int(heightPixels)
-
+        let stride = midx * 2 * format.pixelSize
         let col = (midy - ascentInt) * midx * 2
         let row = midx + leftBearingInt
-        let origin = (col + row) * Self.pixelSize
+        let origin = (col + row) * format.pixelSize
+        let buffer = format == .mask ? maskBuffer : colorBuffer
 
         var bitmap = GlyphBitmap(
             buffer: buffer + origin,
@@ -111,42 +143,55 @@ nonisolated final class GlyphRasterizer {
             leftBearing: Int16(leftBearingInt),
             ascent: Int16(ascentInt),
             width: Int16(widthInt),
-            height: Int16(heightInt))
+            height: Int16(heightInt),
+            format: format)
 
-        clear(&bitmap, pixel: background.opaque)
+        clear(&bitmap)
+        let context = format == .mask ? maskContext : colorContext
+        context.textPosition = CGPoint(x: midx, y: midy)
+        context.setShouldSmoothFonts(options.thicken)
+        if format == .mask {
+            let gray = CGFloat(options.strength) / 255
+            context.setFillColor(gray: gray, alpha: 1)
+        } else {
+            context.setFillColor(CGColor(
+                srgbRed: CGFloat(foreground.red) / 255,
+                green: CGFloat(foreground.green) / 255,
+                blue: CGFloat(foreground.blue) / 255,
+                alpha: 1))
+        }
         CTLineDraw(line, context)
         return bitmap
     }
 
-    private func makeLine(font: CTFont, foreground: RGBColor,
-                          text: String) -> CTLine {
-        let color = CGColor(srgbRed: CGFloat(foreground.red) / 255,
-                            green: CGFloat(foreground.green) / 255,
-                            blue: CGFloat(foreground.blue) / 255, alpha: 1)
-
+    private func makeLine(font: CTFont, text: String) -> CTLine {
         let attributes: [NSAttributedString.Key: Any] = [
             .init(kCTFontAttributeName as String): font,
-            .init(kCTForegroundColorAttributeName as String): color,
+            .init(kCTForegroundColorFromContextAttributeName as String): true,
         ]
-
         let attributed = NSAttributedString(string: text, attributes: attributes)
         return CTLineCreateWithAttributedString(attributed)
     }
 
-    /// Fills the bitmap's region with a solid pixel before drawing the glyph.
-    private func clear(_ bitmap: inout GlyphBitmap, pixel: UInt32) {
-        var value = pixel
-        let rowBytes = Int(bitmap.width) * Self.pixelSize
-        for y in 0..<Int(bitmap.height) {
-            let rowStart = bitmap.buffer + y * bitmap.stride
-            var x = 0
-            while x < rowBytes {
-                withUnsafeBytes(of: &value) { src in
-                    (rowStart + x).update(from: src.bindMemory(to: UInt8.self).baseAddress!,
-                                          count: Self.pixelSize)
-                }
-                x += Self.pixelSize
+    /// Tests the fonts CoreText actually selected, including fallback runs.
+    private func lineUsesColorGlyphs(_ line: CTLine) -> Bool {
+        let runs = CTLineGetGlyphRuns(line) as NSArray
+        for case let run as CTRun in runs {
+            let attributes = CTRunGetAttributes(run) as NSDictionary
+            guard let value = attributes[kCTFontAttributeName] else { continue }
+            let font = value as! CTFont
+            if CTFontGetSymbolicTraits(font).contains(.traitColorGlyphs) {
+                return true
             }
+        }
+        return false
+    }
+
+    /// Clears the bitmap's region before drawing a glyph into a reused canvas.
+    private func clear(_ bitmap: inout GlyphBitmap) {
+        let rowBytes = Int(bitmap.width) * bitmap.format.pixelSize
+        for y in 0..<Int(bitmap.height) {
+            memset(bitmap.buffer + y * bitmap.stride, 0, rowBytes)
         }
     }
 }
