@@ -886,7 +886,9 @@ final class NeovimProcessTests: XCTestCase {
 
     func testNewBufferPreservesModifiedBufferWithNohidden() async throws {
         try await withNvim { process in
-            let oldReply = try await process.request("nvim_get_current_buf")
+            let oldReply = try await process.request(
+                "nvim_eval", [.string("bufnr('%')")])
+            XCTAssertFalse(oldReply.isError)
             let old = try XCTUnwrap(oldReply.result.integer?.signed)
             let changed = try await process.request(
                 "nvim_buf_set_lines",
