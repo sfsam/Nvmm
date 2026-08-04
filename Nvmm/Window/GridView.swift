@@ -4,17 +4,17 @@
 //
 //  A Metal-backed view that renders a grid snapshot.
 //
-//  Each frame draws five passes in order: cell backgrounds, procedural cell
-//  graphics (block and shade characters), glyphs, line decorations, and the
-//  cursor. Rendering is independent of the view's size — too small crops the
-//  output, too large pads it. A grid, a font, and a render context must all be
-//  set before the first draw.
+//  Each frame draws cell backgrounds, procedural cell graphics, glyphs, line
+//  decorations, the cursor, and an optional cursor smear. Rendering is
+//  output is independent of the view's size: too small crops it, while too
+//  large pads it. A grid, a font, and a render context must all be set before
+//  the first draw.
 //
 //  The view is also the `NSTextInputClient`. Keyboard events in a text-entry
 //  mode are offered to Cocoa so dead keys, multi-scalar emoji, and IMEs work;
 //  the marked-text state machine lives in `TextInputCoordinator`, and the
-//  provisional preedit is drawn in-grid as a sixth pass overlaid on the cursor's
-//  row. Preedit placement uses the window's editable-text geometry, fetched
+//  provisional preedit is drawn in-grid over the cursor's row. Preedit
+//  placement uses the window's editable-text geometry, fetched
 //  asynchronously from Neovim and cached, so the synchronous text-input queries
 //  never block; a generation counter discards geometry a later resize or focus
 //  change has invalidated.
@@ -81,6 +81,25 @@ nonisolated struct MouseMoveTracker {
     }
 }
 
+/// Breaks the display link's strong target ownership while preserving its
+/// Objective-C selector callback.
+@MainActor
+private final class CursorTrailDisplayLinkTarget: NSObject {
+    weak var view: GridView?
+
+    init(view: GridView) {
+        self.view = view
+    }
+
+    @objc func frame(_ link: CADisplayLink) {
+        guard let view else {
+            link.invalidate()
+            return
+        }
+        view.cursorTrailFrame(link)
+    }
+}
+
 final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                       TextInputCoordinatorDelegate, NSUserInterfaceValidations {
     private var metalLayer: CAMetalLayer!
@@ -120,12 +139,23 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
 
     private enum BlinkPhase { case off, on }
 
-    // Cursor movement leaves a short, bounded Core Animation bridge above the
-    // Metal contents. It is purely visual: Neovim's destination remains
-    // authoritative and the real cursor moves there immediately.
-    private static let cursorTrailDuration: CFTimeInterval = 0.15
-    private static let maximumCursorTrails = 4
-    private var cursorTrailLayers: [CAGradientLayer] = []
+    // Cursor movement leaves one short Metal smear between the previous and
+    // current positions. Neovim's destination remains authoritative.
+    private struct CursorTrailState {
+        var previous: CGRect
+        var current: CGRect
+        var color: RGBColor
+        var profile: CursorTrailProfile
+        var startTime: CFTimeInterval
+
+        func progress(at time: CFTimeInterval) -> Float {
+            Float(min(max((time - startTime) / profile.duration, 0), 1))
+        }
+    }
+    private var cursorTrail: CursorTrailState?
+    private lazy var cursorTrailDisplayLinkTarget =
+        CursorTrailDisplayLinkTarget(view: self)
+    private var cursorTrailDisplayLink: CADisplayLink?
 
     // MARK: Input
 
@@ -304,7 +334,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
 
     /// Sets the font and recomputes cell and line-decoration metrics.
     func setFont(_ font: FontFamily, lineSpace: Int = 0) {
-        clearCursorTrails()
+        clearCursorTrail()
         fontFamily = font
 
         let leading = font.leading.rounded(.down)
@@ -434,16 +464,21 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     }
 
     override func setFrameSize(_ newSize: NSSize) {
-        clearCursorTrails()
+        clearCursorTrail()
         super.setFrameSize(newSize)
         metalLayer.drawableSize = convertToBacking(newSize)
         textInputGeometryDidChange()
     }
 
     override func viewDidChangeBackingProperties() {
-        clearCursorTrails()
+        clearCursorTrail()
         super.viewDidChangeBackingProperties()
         textInputGeometryDidChange()
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil { clearCursorTrail() }
+        super.viewWillMove(toWindow: newWindow)
     }
 
     /// Disables blinking and forces a block-outline cursor, as inactive windows
@@ -456,7 +491,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         blinkTimer?.invalidate()
         blinkTimer = nil
         cancelCursorFade(opacity: 1)
-        clearCursorTrails()
+        clearCursorTrail()
         needsDisplay = true
     }
 
@@ -603,6 +638,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         let stride = MemoryLayout<glyph_data>.stride
         let lineStride = MemoryLayout<line_data>.stride
         let cellGraphicStride = MemoryLayout<cell_graphic_data>.stride
+        let cursorSmear = cursorSmearData(at: CACurrentMediaTime())
 
         // Preedit cells are drawn on top of the grid: their glyphs and underlines
         // extend the glyph and line buffers, and their backgrounds (plus the
@@ -619,10 +655,11 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         let glyphSize = renderCellCapacity * stride
         let cellGraphicSize = (gridSize + compositionBackgroundCount) * cellGraphicStride
         let lineSize = renderCellCapacity * lineStride * 4
+        let cursorSmearSize = MemoryLayout<cursor_smear_data>.stride
 
         // Pad for per-region alignment overallocation.
-        let total = (256 * 5) + uniformSize + backgroundSize + glyphSize
-                    + cellGraphicSize + lineSize
+        let total = (256 * 6) + uniformSize + backgroundSize + glyphSize
+                    + cellGraphicSize + lineSize + cursorSmearSize
         guard frame.create(device: context.device, size: total) else {
             frame.unlock()
             return
@@ -633,6 +670,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         let glyphRegion = frame.allocate(glyphSize)
         let cellGraphicRegion = frame.allocate(cellGraphicSize)
         let lineRegion = frame.allocate(lineSize)
+        let cursorSmearRegion = frame.allocate(cursorSmearSize)
 
         let uniforms = uniformRegion.ptr.bindMemory(to: uniform_data.self,
                                                     capacity: 1)
@@ -645,6 +683,10 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             capacity: gridSize + compositionBackgroundCount)
         let lines = lineRegion.ptr.bindMemory(to: line_data.self,
                                               capacity: renderCellCapacity * 4)
+        if let cursorSmear {
+            cursorSmearRegion.ptr.storeBytes(of: cursorSmear,
+                                             as: cursor_smear_data.self)
+        }
 
         let drawable = metalLayer.drawableSize
         let pixelSize = SIMD2<Float>(2, -2)
@@ -790,6 +832,10 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             frame.didModify(from: lineRegion.offset,
                             length: lineCount * lineStride)
         }
+        if cursorSmear != nil {
+            frame.didModify(from: cursorSmearRegion.offset,
+                            length: cursorSmearSize)
+        }
 
         guard let metalBuffer = frame.metalBuffer else {
             // Successful frame creation guarantees a buffer. Retrying this
@@ -815,6 +861,8 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             compositionCellGraphicCount: cellGraphicCount - gridCellGraphicCount,
             lineOffset: lineRegion.offset, gridLineCount: gridLineCount,
             compositionLineCount: lineCount - gridLineCount,
+            cursorSmearOffset: cursorSmearRegion.offset,
+            hasCursorSmear: cursorSmear != nil,
             cursorShape: drawnShape,
             clearColor: Self.clearColor(for: grid.defaultBackground)
         ) else {
@@ -932,6 +980,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                         compositionCellGraphicCount: Int,
                         lineOffset: Int, gridLineCount: Int,
                         compositionLineCount: Int,
+                        cursorSmearOffset: Int, hasCursorSmear: Bool,
                         cursorShape: CursorShape?,
                         clearColor: MTLClearColor) -> Bool {
         let glyphStride = MemoryLayout<glyph_data>.stride
@@ -1025,6 +1074,13 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             break // Block cursors are drawn by recoloring the grid.
         }
 
+        if hasCursorSmear {
+            encoder.setRenderPipelineState(context.cursorSmearPipeline)
+            encoder.setVertexBufferOffset(cursorSmearOffset, index: 1)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
+                                   vertexCount: 4)
+        }
+
         encoder.endEncoding()
         commandBuffer.addCompletedHandler { _ in
             frame.unlock()
@@ -1110,15 +1166,18 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
 
     // MARK: - Cursor trail
 
-    /// Applies settings whose disabled state must clear an active effect.
+    /// Applies a changed strength by clearing an incompatible active smear.
     func applyCursorTrailSettings() {
-        if !Settings.cursorTrailEnabled { clearCursorTrails() }
+        let profile = CursorTrailProfile.profile(
+            for: Settings.cursorTrailStrength)
+        if cursorTrail?.profile != profile { clearCursorTrail() }
     }
 
     private func updateCursorTrail(from previousGrid: Grid?, to newGrid: Grid,
                                    sizeChanged: Bool) {
-        guard Settings.cursorTrailEnabled else {
-            clearCursorTrails()
+        guard let profile = CursorTrailProfile.profile(
+            for: Settings.cursorTrailStrength) else {
+            clearCursorTrail()
             return
         }
         guard !inactive, !sizeChanged,
@@ -1127,7 +1186,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
               !previousGrid.hideCursor, !newGrid.hideCursor,
               !shouldSuppressNvimCursorForComposition() else {
             if sizeChanged || newGrid.hideCursor {
-                clearCursorTrails()
+                clearCursorTrail()
             }
             return
         }
@@ -1143,108 +1202,81 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             row: current.row, column: current.column,
             gridHeight: newGrid.height)
         guard !previousIsBottomLeft, !currentIsBottomLeft else {
-            clearCursorTrails()
+            clearCursorTrail()
             return
         }
         guard previous.row != current.row ||
                 previous.column != current.column else { return }
 
+        let cellSize = CGSize(width: CGFloat(cellSizePixels.x),
+                              height: CGFloat(cellSizePixels.y))
         let thickness = CGFloat(cursorLineThickness)
-            / max(metalLayer.contentsScale, 1)
         let oldRect = CursorTrailGeometry.cursorRect(
             row: previous.row, column: previous.column,
             cellWidth: previous.width, shape: previous.shape,
-            cellSize: backingCellSize, lineThickness: thickness)
+            cellSize: cellSize, lineThickness: thickness)
         let newRect = CursorTrailGeometry.cursorRect(
             row: current.row, column: current.column,
             cellWidth: current.width, shape: current.shape,
-            cellSize: backingCellSize, lineThickness: thickness)
+            cellSize: cellSize, lineThickness: thickness)
 
-        guard let points = CursorTrailGeometry.bridge(
-            from: oldRect, to: newRect,
-            lengthFraction: CGFloat(Settings.cursorTrailLengthFraction)),
-              metalLayer.bounds.width > 0, metalLayer.bounds.height > 0 else {
+        cursorTrail = CursorTrailState(
+            previous: oldRect, current: newRect, color: current.background,
+            profile: profile, startTime: CACurrentMediaTime())
+        startCursorTrailDisplayLink()
+        needsDisplay = true
+    }
+
+    private func startCursorTrailDisplayLink() {
+        guard cursorTrailDisplayLink == nil else { return }
+        let link = displayLink(
+            target: cursorTrailDisplayLinkTarget,
+            selector: #selector(CursorTrailDisplayLinkTarget.frame(_:)))
+        link.add(to: .main, forMode: .common)
+        cursorTrailDisplayLink = link
+    }
+
+    fileprivate func cursorTrailFrame(_ link: CADisplayLink) {
+        guard let cursorTrail else {
+            stopCursorTrailDisplayLink()
             return
         }
-
-        addCursorTrail(
-            points: points,
-            from: midpoint(points[0], points[3]),
-            to: midpoint(points[1], points[2]),
-            color: current.background)
+        if cursorTrail.progress(at: link.targetTimestamp) >= 1 {
+            self.cursorTrail = nil
+            stopCursorTrailDisplayLink()
+        }
+        needsDisplay = true
     }
 
-    private func addCursorTrail(points: [CGPoint], from start: CGPoint,
-                                to end: CGPoint, color: RGBColor) {
-        if cursorTrailLayers.count >= Self.maximumCursorTrails {
-            let oldest = cursorTrailLayers.removeFirst()
-            oldest.removeAllAnimations()
-            oldest.removeFromSuperlayer()
+    private func stopCursorTrailDisplayLink() {
+        cursorTrailDisplayLink?.invalidate()
+        cursorTrailDisplayLink = nil
+    }
+
+    private func clearCursorTrail() {
+        let wasActive = cursorTrail != nil
+        cursorTrail = nil
+        stopCursorTrailDisplayLink()
+        if wasActive { needsDisplay = true }
+    }
+
+    private func cursorSmearData(at time: CFTimeInterval)
+        -> cursor_smear_data? {
+        guard let trail = cursorTrail else { return nil }
+
+        func vector(_ rect: CGRect) -> SIMD4<Float> {
+            SIMD4(Float(rect.minX), Float(rect.minY), Float(rect.width),
+                  Float(rect.height))
         }
 
-        let path = CGMutablePath()
-        path.move(to: points[0])
-        for point in points.dropFirst() { path.addLine(to: point) }
-        path.closeSubpath()
-
-        let mask = CAShapeLayer()
-        mask.frame = metalLayer.bounds
-        mask.path = path
-        mask.fillColor = CGColor(gray: 1, alpha: 1)
-
-        let opaque = NSColor(
-            srgbRed: CGFloat(color.red) / 255,
-            green: CGFloat(color.green) / 255,
-            blue: CGFloat(color.blue) / 255,
-            alpha: CGFloat(Settings.cursorTrailOpacity)).cgColor
-        let transparent = opaque.copy(alpha: 0) ?? opaque
-
-        let gradient = CAGradientLayer()
-        gradient.frame = metalLayer.bounds
-        gradient.colors = [transparent, opaque]
-        gradient.startPoint = normalized(start, in: gradient.bounds)
-        gradient.endPoint = normalized(end, in: gradient.bounds)
-        gradient.mask = mask
-        gradient.opacity = 0
-
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        metalLayer.addSublayer(gradient)
-        cursorTrailLayers.append(gradient)
-        CATransaction.commit()
-
-        let fade = CABasicAnimation(keyPath: "opacity")
-        fade.fromValue = 1
-        fade.toValue = 0
-        fade.duration = Self.cursorTrailDuration
-        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
-
-        CATransaction.begin()
-        CATransaction.setCompletionBlock { [weak self, weak gradient] in
-            guard let self, let gradient else { return }
-            gradient.removeFromSuperlayer()
-            self.cursorTrailLayers.removeAll { $0 === gradient }
-        }
-        gradient.add(fade, forKey: "cursorTrailFade")
-        CATransaction.commit()
-    }
-
-    private func clearCursorTrails() {
-        for layer in cursorTrailLayers {
-            layer.removeAllAnimations()
-            layer.removeFromSuperlayer()
-        }
-        cursorTrailLayers.removeAll()
-    }
-
-    private func normalized(_ point: CGPoint, in bounds: CGRect) -> CGPoint {
-        CGPoint(x: (point.x - bounds.minX) / bounds.width,
-                y: (point.y - bounds.minY) / bounds.height)
-    }
-
-    private func midpoint(_ first: CGPoint, _ second: CGPoint) -> CGPoint {
-        CGPoint(x: (first.x + second.x) * 0.5,
-                y: (first.y + second.y) * 0.5)
+        return cursor_smear_data(
+            previous_cursor: vector(trail.previous),
+            current_cursor: vector(trail.current),
+            color: trail.color.opaque,
+            progress: trail.progress(at: time),
+            length_fraction: trail.profile.lengthFraction,
+            opacity: trail.profile.opacity,
+            corner_speed: trail.profile.cornerSpeed)
     }
 
     // MARK: - First responder
@@ -1900,7 +1932,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     /// Notes a change to the preedit state and relayouts, refreshing geometry
     /// when a fresh session needs its anchor bounds.
     private func compositionStateDidChange() {
-        clearCursorTrails()
+        clearCursorTrail()
         if textInputCoordinator.isActive, !compositionSession.anchored {
             compositionGeometry = nil
             refreshCompositionGeometry()

@@ -25,9 +25,7 @@ final class SettingsTests: XCTestCase {
                     Settings.titlebarAppearsTransparentKey,
                     Settings.verticalScrollbarKey,
                     Settings.progressBarKey,
-                    Settings.cursorTrailEnabledKey,
-                    Settings.cursorTrailLengthFractionKey,
-                    Settings.cursorTrailOpacityKey,
+                    Settings.cursorTrailStrengthKey,
                     Settings.fontThicknessKey]
 
         // The user's own values must not decide the outcome, and must survive
@@ -46,34 +44,21 @@ final class SettingsTests: XCTestCase {
         XCTAssertFalse(Settings.terminateAfterLastWindow)
         XCTAssertFalse(Settings.titlebarAppearsTransparent)
         XCTAssertFalse(Settings.verticalScrollbar)
-        XCTAssertFalse(Settings.cursorTrailEnabled)
+        XCTAssertEqual(Settings.cursorTrailStrength, 0)
         XCTAssertEqual(Settings.fontThickness, 50)
-        XCTAssertEqual(
-            Settings.cursorTrailLengthFraction, 0.55, accuracy: 0.001)
-        XCTAssertEqual(Settings.cursorTrailOpacity, 0.55, accuracy: 0.001)
     }
 
     @MainActor
-    func testCursorTrailValuesAreClamped() {
+    func testCursorTrailStrengthIsClamped() {
         let defaults = UserDefaults.standard
-        let lengthKey = Settings.cursorTrailLengthFractionKey
-        let opacityKey = Settings.cursorTrailOpacityKey
-        let savedLength = defaults.object(forKey: lengthKey)
-        let savedOpacity = defaults.object(forKey: opacityKey)
-        defer {
-            defaults.set(savedLength, forKey: lengthKey)
-            defaults.set(savedOpacity, forKey: opacityKey)
-        }
+        let key = Settings.cursorTrailStrengthKey
+        let saved = defaults.object(forKey: key)
+        defer { defaults.set(saved, forKey: key) }
 
-        defaults.set(-1, forKey: lengthKey)
-        defaults.set(2, forKey: opacityKey)
-
-        XCTAssertEqual(
-            Settings.cursorTrailLengthFraction,
-            Settings.cursorTrailMinimumValue)
-        XCTAssertEqual(
-            Settings.cursorTrailOpacity,
-            Settings.cursorTrailMaximumValue)
+        defaults.set(-1, forKey: key)
+        XCTAssertEqual(Settings.cursorTrailStrength, 0)
+        defaults.set(4, forKey: key)
+        XCTAssertEqual(Settings.cursorTrailStrength, 3)
     }
 
     @MainActor
@@ -106,7 +91,7 @@ final class SettingsTests: XCTestCase {
     }
 
     @MainActor
-    func testSettingsWindowContainsBoundCursorTrailSliders() throws {
+    func testSettingsWindowContainsBoundDetentSliders() throws {
         let controller = SettingsWindowController()
         let contentView = try XCTUnwrap(controller.window?.contentView)
 
@@ -116,23 +101,16 @@ final class SettingsTests: XCTestCase {
 
         let sliders = descendants(of: contentView)
             .compactMap { $0 as? NSSlider }
-        let cursorSliders = sliders.filter {
-            $0.identifier?.rawValue != "fontThickness"
-        }
-        XCTAssertEqual(sliders.count, 3)
-        XCTAssertEqual(cursorSliders.count, 2)
-        for slider in cursorSliders {
-            XCTAssertEqual(slider.minValue, Settings.cursorTrailMinimumValue)
-            XCTAssertEqual(slider.maxValue, Settings.cursorTrailMaximumValue)
-            XCTAssertNotNil(slider.infoForBinding(.value))
-            XCTAssertNotNil(slider.infoForBinding(.enabled))
-            XCTAssertTrue(slider.isContinuous)
-        }
-
-        let colorBoundLabels = descendants(of: contentView)
-            .compactMap { $0 as? NSTextField }
-            .filter { $0.infoForBinding(.textColor) != nil }
-        XCTAssertEqual(colorBoundLabels.count, 2)
+        XCTAssertEqual(sliders.count, 2)
+        let cursorSlider = try XCTUnwrap(sliders.first {
+            $0.identifier?.rawValue == "cursorTrailStrength"
+        })
+        XCTAssertEqual(cursorSlider.minValue, 0)
+        XCTAssertEqual(cursorSlider.maxValue, 3)
+        XCTAssertEqual(cursorSlider.numberOfTickMarks, 4)
+        XCTAssertTrue(cursorSlider.allowsTickMarkValuesOnly)
+        XCTAssertTrue(cursorSlider.isContinuous)
+        XCTAssertNotNil(cursorSlider.infoForBinding(.value))
     }
 
     @MainActor

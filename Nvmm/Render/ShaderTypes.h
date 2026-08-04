@@ -116,4 +116,16 @@ typedef struct {
     uint16_t style;
 } line_data;
 
+/// One animated cursor smear. Rectangles are x, y, width, height in drawable
+/// pixels, with a top-left origin.
+typedef struct {
+    simd_float4 previous_cursor;
+    simd_float4 current_cursor;
+    uint32_t color;
+    float progress;
+    float length_fraction;
+    float opacity;
+    float corner_speed;
+} cursor_smear_data;
+
 #endif /* SHADER_TYPES_H */

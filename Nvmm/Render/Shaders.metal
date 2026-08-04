@@ -3,10 +3,10 @@
 //  Shaders.metal
 //
 //  The grid render pipelines. Each frame draws, in order: cell backgrounds,
-//  procedural cell graphics, glyphs, line decorations, and the cursor. Every
-//  pipeline is instanced: one instance per cell, glyph, graphic, or line, each
-//  drawn as a four-vertex triangle strip. Vertex data describes rectangles as
-//  an origin plus a size; a vertex offset selects one of the four corners.
+//  procedural cell graphics, glyphs, line decorations, the cursor, and an
+//  optional cursor smear. Each pass draws four-vertex triangle strips. Vertex
+//  data describes rectangles as an origin plus a size; a vertex offset selects
+//  one of the four corners.
 //
 
 #include <metal_stdlib>
@@ -84,6 +84,16 @@ struct cell_graphic_rasterizer_data {
     uint32_t kind;
 };
 
+struct cursor_smear_rasterizer_data {
+    float4 position [[position]];
+    float2 pixel_position;
+    float4 previous_cursor;
+    float4 current_cursor;
+    float4 color;
+    float progress;
+    float corner_speed;
+};
+
 // Corner selectors for a rectangle given as origin + size. The vertex offset is
 // the size vector multiplied by the selected transform.
 constant float2 transforms[4] = {
@@ -92,6 +102,9 @@ constant float2 transforms[4] = {
     {1, 0}, // Top right
     {1, 1}, // Bottom right
 };
+
+// Keeps the transient effect vivid without changing the authoritative cursor.
+constant float cursor_smear_saturation = 1.8;
 
 // Per-shape corner nudges that carve a thin bar out of a full cell rect. Row 0
 // is a right-anchored vertical bar, row 1 a bottom-anchored horizontal bar,
@@ -153,6 +166,41 @@ cursor_render(uint vertex_id [[vertex_id]],
     grid_rasterizer_data data;
     data.position = float4(position.xy, 0.0, 1.0);
     data.color = load_color(uniforms.cursor_color);
+    return data;
+}
+
+vertex cursor_smear_rasterizer_data
+cursor_smear_render(uint vertex_id [[vertex_id]],
+                    constant uniform_data &uniforms [[buffer(0)]],
+                    constant cursor_smear_data *smears [[buffer(1)]]) {
+    constant cursor_smear_data &smear = smears[0];
+    // Shorter profiles move the effective source toward the destination.
+    float4 previous = mix(smear.current_cursor, smear.previous_cursor,
+                          smear.length_fraction);
+    // Two pixels contain the one-pixel antialiasing ramp at either boundary.
+    float2 bounds_min = min(previous.xy, smear.current_cursor.xy) - 2.0;
+    float2 bounds_max = max(previous.xy + previous.zw,
+                            smear.current_cursor.xy + smear.current_cursor.zw)
+                        + 2.0;
+    float2 pixel_position = bounds_min
+        + (bounds_max - bounds_min) * transforms[vertex_id];
+    float2 position = float2(-1, 1) + pixel_position * uniforms.pixel_size;
+
+    float4 color = unpack_unorm4x8_to_float(smear.color);
+    float gray = dot(color.rgb, float3(0.299, 0.587, 0.114));
+    color.rgb = clamp(mix(float3(gray), color.rgb,
+                          cursor_smear_saturation), 0.0, 1.0);
+    color.rgb = srgb_to_display_p3(color.rgb);
+    color.a = smear.opacity;
+
+    cursor_smear_rasterizer_data data;
+    data.position = float4(position, 0, 1);
+    data.pixel_position = pixel_position;
+    data.previous_cursor = previous;
+    data.current_cursor = smear.current_cursor;
+    data.color = color;
+    data.progress = smear.progress;
+    data.corner_speed = smear.corner_speed;
     return data;
 }
 
@@ -376,4 +424,127 @@ fragment float4 cell_graphic_fill(cell_graphic_rasterizer_data in [[stage_in]]) 
     if (alpha <= 0.0) discard_fragment();
 
     return float4(in.color.rgb, alpha);
+}
+
+struct cursor_quad {
+    float2 top_left;
+    float2 top_right;
+    float2 bottom_left;
+    float2 bottom_right;
+};
+
+cursor_quad make_cursor_quad(float2 position, float2 size) {
+    cursor_quad quad;
+    quad.top_left = position;
+    quad.top_right = position + float2(size.x, 0);
+    quad.bottom_left = position - float2(0, size.y);
+    quad.bottom_right = position + float2(size.x, -size.y);
+    return quad;
+}
+
+void select_trail_corners(cursor_quad quad, float2 selector,
+                          thread float2 &p1, thread float2 &p2,
+                          thread float2 &p3) {
+    p1 = mix(mix(quad.top_right, quad.top_left, selector.x),
+             mix(quad.bottom_right, quad.bottom_left, selector.x),
+             selector.y);
+    p2 = mix(mix(quad.top_left, quad.bottom_left, selector.x),
+             mix(quad.top_right, quad.bottom_right, selector.x),
+             selector.y);
+    p3 = mix(mix(quad.bottom_right, quad.top_right, selector.x),
+             mix(quad.bottom_left, quad.top_left, selector.x),
+             selector.y);
+}
+
+void select_cursor_corners(cursor_quad quad, float2 selector,
+                           thread float2 &p1, thread float2 &p2,
+                           thread float2 &p3, thread float2 &p4) {
+    select_trail_corners(quad, selector, p1, p2, p3);
+    p4 = mix(mix(quad.bottom_left, quad.bottom_right, selector.x),
+             mix(quad.top_left, quad.top_right, selector.x), selector.y);
+}
+
+void cursor_smear_edge(float2 point, float2 first, float2 second,
+                       thread float &minimum_distance,
+                       thread float &inside) {
+    float2 edge = second - first;
+    float2 offset = point - first;
+    float length_squared = max(dot(edge, edge), 1e-6);
+    float position = clamp(dot(offset, edge) / length_squared, 0.0, 1.0);
+    float2 difference = offset - edge * position;
+    minimum_distance = min(minimum_distance, dot(difference, difference));
+    float cross_product = edge.x * offset.y - edge.y * offset.x;
+    inside = min(inside, step(0.0, cross_product));
+}
+
+float cursor_smear_hexagon_distance(float2 point, float2 p0, float2 p1,
+                                    float2 p2, float2 p3, float2 p4,
+                                    float2 p5) {
+    float minimum_distance = 1e20;
+    float inside = 1.0;
+    cursor_smear_edge(point, p0, p1, minimum_distance, inside);
+    cursor_smear_edge(point, p1, p2, minimum_distance, inside);
+    cursor_smear_edge(point, p2, p3, minimum_distance, inside);
+    cursor_smear_edge(point, p3, p4, minimum_distance, inside);
+    cursor_smear_edge(point, p4, p5, minimum_distance, inside);
+    cursor_smear_edge(point, p5, p0, minimum_distance, inside);
+    float distance = sqrt(max(minimum_distance, 0.0));
+    return mix(distance, -distance, inside);
+}
+
+float cursor_rectangle_distance(float2 point, float2 center,
+                                float2 half_size) {
+    float2 distance = abs(point - center) - half_size;
+    return length(max(distance, 0.0))
+        + min(max(distance.x, distance.y), 0.0);
+}
+
+float cursor_smear_ease(float progress) {
+    float remaining = 1.0 - clamp(progress, 0.0, 1.0);
+    return 1.0 - remaining * remaining * remaining;
+}
+
+fragment float4
+cursor_smear_fill(cursor_smear_rasterizer_data in [[stage_in]]) {
+    // Corner selection uses a bottom-left coordinate system. Negating y keeps
+    // its polygon vertices counter-clockwise for the edge tests below.
+    float2 point = float2(in.pixel_position.x, -in.pixel_position.y);
+    float2 current_position =
+        float2(in.current_cursor.x, -in.current_cursor.y);
+    float2 previous_position =
+        float2(in.previous_cursor.x, -in.previous_cursor.y);
+    cursor_quad current = make_cursor_quad(current_position,
+                                           in.current_cursor.zw);
+    cursor_quad previous = make_cursor_quad(previous_position,
+                                            in.previous_cursor.zw);
+    float2 selector = step(float2(0), current_position - previous_position);
+
+    float2 current_p1, current_p2, current_p3, current_p4;
+    float2 previous_p1, previous_p2, previous_p3;
+    select_cursor_corners(current, selector, current_p1, current_p2,
+                          current_p3, current_p4);
+    select_trail_corners(previous, selector, previous_p1, previous_p2,
+                         previous_p3);
+
+    float progress = cursor_smear_ease(in.progress);
+    // Three corners arrive early, leaving one corner to trail behind.
+    float corner_progress = cursor_smear_ease(
+        min(in.progress * in.corner_speed, 1.0));
+    float2 trail_p1 = mix(previous_p1, current_p1, progress);
+    float2 trail_p2 = mix(previous_p2, current_p2, corner_progress);
+    float2 trail_p3 = mix(previous_p3, current_p3, corner_progress);
+
+    float distance = cursor_smear_hexagon_distance(
+        point, trail_p1, trail_p2, current_p2, current_p4, current_p3,
+        trail_p3);
+    float alpha = 1.0 - smoothstep(-1.0, 1.0, distance);
+
+    float2 half_size = in.current_cursor.zw * 0.5;
+    float2 current_center = current_position
+        + float2(half_size.x, -half_size.y);
+    // The authoritative cursor is already present beneath this overlay.
+    if (cursor_rectangle_distance(point, current_center, half_size) <= 0.0) {
+        discard_fragment();
+    }
+    return float4(in.color.rgb, alpha * in.color.a);
 }

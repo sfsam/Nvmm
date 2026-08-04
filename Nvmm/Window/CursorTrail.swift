@@ -2,20 +2,42 @@
 //  Nvmm
 //  CursorTrail.swift
 //
-//  Geometry for the transient polygon drawn between cursor positions.
+//  Cursor-smear profiles and renderer-independent cursor geometry.
 //
 
 import CoreGraphics
+import Foundation
 
-/// Pure cursor-trail geometry, kept separate from Core Animation so cell-shape
-/// sizing and bridge construction can be tested deterministically.
+/// One detent of the cursor-trail strength setting.
+nonisolated struct CursorTrailProfile: Equatable {
+    let lengthFraction: Float
+    let opacity: Float
+    let duration: TimeInterval
+    let cornerSpeed: Float
+
+    /// Returns nil for off. Each higher profile jointly increases the smear's
+    /// coverage, visibility, lifetime, and trailing-corner lag.
+    static func profile(for strength: Int) -> CursorTrailProfile? {
+        switch min(max(strength, 0), 3) {
+        case 1: CursorTrailProfile(lengthFraction: 0.35, opacity: 0.35,
+                                   duration: 0.035, cornerSpeed: 1.5)
+        case 2: CursorTrailProfile(lengthFraction: 0.7, opacity: 0.6,
+                                   duration: 0.05, cornerSpeed: 2)
+        case 3: CursorTrailProfile(lengthFraction: 1, opacity: 0.85,
+                                   duration: 0.08, cornerSpeed: 2.75)
+        default: nil
+        }
+    }
+}
+
+/// Pure cursor geometry shared by trail state construction and tests.
 nonisolated enum CursorTrailGeometry {
     /// True for the grid's exact bottom-left cell.
     static func isBottomLeft(row: Int, column: Int, gridHeight: Int) -> Bool {
         gridHeight > 0 && row == gridHeight - 1 && column == 0
     }
 
-    /// The cursor's rectangle in view coordinates.
+    /// The cursor rectangle in the coordinate space supplied by `cellSize`.
     static func cursorRect(row: Int, column: Int, cellWidth: Int,
                            shape: CursorShape, cellSize: CGSize,
                            lineThickness: CGFloat) -> CGRect {
@@ -37,51 +59,5 @@ nonisolated enum CursorTrailGeometry {
             return CGRect(x: origin.x, y: origin.y + cellSize.height - height,
                           width: width, height: height)
         }
-    }
-
-    /// A quadrilateral spanning the trailing part of two cursor rects.
-    ///
-    /// The cross-sections are perpendicular to the direction of travel. Their
-    /// radii are the projection of each rectangle onto that perpendicular, so
-    /// bars, blocks, different cursor shapes, and diagonal moves join without
-    /// a shape-specific case. `lengthFraction` is clamped to one and keeps the
-    /// requested final fraction of the center-to-center movement.
-    static func bridge(from source: CGRect, to destination: CGRect,
-                       lengthFraction: CGFloat = 1) -> [CGPoint]? {
-        let sourceCenter = CGPoint(x: source.midX, y: source.midY)
-        let end = CGPoint(x: destination.midX, y: destination.midY)
-        let dx = end.x - sourceCenter.x
-        let dy = end.y - sourceCenter.y
-        let length = hypot(dx, dy)
-        let fraction = min(max(lengthFraction, 0), 1)
-        guard length > .ulpOfOne, fraction > 0 else { return nil }
-
-        let perpendicular = CGPoint(x: -dy / length, y: dx / length)
-
-        func radius(_ rect: CGRect) -> CGFloat {
-            abs(perpendicular.x) * rect.width * 0.5
-                + abs(perpendicular.y) * rect.height * 0.5
-        }
-
-        let sourceRadius = radius(source)
-        let endRadius = radius(destination)
-        let tailProgress = 1 - fraction
-        let start = CGPoint(
-            x: sourceCenter.x + dx * tailProgress,
-            y: sourceCenter.y + dy * tailProgress)
-        let startRadius = sourceRadius
-            + (endRadius - sourceRadius) * tailProgress
-
-        func offset(_ point: CGPoint, by value: CGFloat) -> CGPoint {
-            CGPoint(x: point.x + perpendicular.x * value,
-                    y: point.y + perpendicular.y * value)
-        }
-
-        return [
-            offset(start, by: -startRadius),
-            offset(end, by: -endRadius),
-            offset(end, by: endRadius),
-            offset(start, by: startRadius),
-        ]
     }
 }

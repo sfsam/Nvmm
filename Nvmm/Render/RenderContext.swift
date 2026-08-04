@@ -5,7 +5,7 @@
 //  Per-device Metal render state.
 //
 //  A render context owns the Metal objects tied to one GPU: the command queue,
-//  the five render pipelines, and a glyph manager (glyphs live in that GPU's
+//  the six render pipelines, and a glyph manager (glyphs live in that GPU's
 //  textures, so they are device-specific). The font manager and rasterizer are
 //  shared across devices and owned by the manager. Create contexts through a
 //  `RenderContextManager`, which maps each Metal device to one context.
@@ -40,6 +40,7 @@ final class RenderContext {
     let glyphPipeline: MTLRenderPipelineState
     let cellGraphicPipeline: MTLRenderPipelineState
     let cursorPipeline: MTLRenderPipelineState
+    let cursorSmearPipeline: MTLRenderPipelineState
     let linePipeline: MTLRenderPipelineState
     let fontManager: FontManager
     let glyphManager: GlyphManager
@@ -72,6 +73,10 @@ final class RenderContext {
             device: device, library: library, blend: .straight,
             vertex: "cursor_render", fragment: "background_fill",
             label: "Cursor render pipeline")
+        cursorSmearPipeline = try Self.pipeline(
+            device: device, library: library, blend: .straight,
+            vertex: "cursor_smear_render", fragment: "cursor_smear_fill",
+            label: "Cursor smear render pipeline")
         linePipeline = try Self.pipeline(
             device: device, library: library, blend: .straight,
             vertex: "line_render", fragment: "line_fill",

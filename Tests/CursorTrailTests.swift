@@ -2,7 +2,7 @@
 //  NvmmTests
 //  CursorTrailTests.swift
 //
-//  Cursor shape and polygon-bridge geometry.
+//  Cursor trail profiles and cursor-shape geometry.
 //
 
 import CoreGraphics
@@ -49,74 +49,37 @@ final class CursorTrailTests: XCTestCase {
             CGRect(x: 30, y: 58, width: 10, height: 2))
     }
 
-    func testHorizontalBridgeSpansCursorCenterLines() throws {
-        let points = try XCTUnwrap(CursorTrailGeometry.bridge(
-            from: CGRect(x: 0, y: 0, width: 10, height: 20),
-            to: CGRect(x: 20, y: 0, width: 10, height: 20)))
+    func testStrengthProfilesIncreaseMonotonically() throws {
+        XCTAssertNil(CursorTrailProfile.profile(for: 0))
+        XCTAssertNil(CursorTrailProfile.profile(for: -1))
 
-        XCTAssertEqual(points, [
-            CGPoint(x: 5, y: 0),
-            CGPoint(x: 25, y: 0),
-            CGPoint(x: 25, y: 20),
-            CGPoint(x: 5, y: 20),
-        ])
+        let subtle = try XCTUnwrap(CursorTrailProfile.profile(for: 1))
+        let normal = try XCTUnwrap(CursorTrailProfile.profile(for: 2))
+        let strong = try XCTUnwrap(CursorTrailProfile.profile(for: 3))
+        XCTAssertEqual(CursorTrailProfile.profile(for: 4), strong)
+
+        XCTAssertLessThan(subtle.lengthFraction, normal.lengthFraction)
+        XCTAssertLessThan(normal.lengthFraction, strong.lengthFraction)
+        XCTAssertLessThan(subtle.opacity, normal.opacity)
+        XCTAssertLessThan(normal.opacity, strong.opacity)
+        XCTAssertLessThan(subtle.duration, normal.duration)
+        XCTAssertLessThan(normal.duration, strong.duration)
+        XCTAssertLessThan(subtle.cornerSpeed, normal.cornerSpeed)
+        XCTAssertLessThan(normal.cornerSpeed, strong.cornerSpeed)
     }
 
-    func testVerticalBarBridgeStaysNarrow() throws {
-        let points = try XCTUnwrap(CursorTrailGeometry.bridge(
-            from: CGRect(x: 0, y: 0, width: 2, height: 20),
-            to: CGRect(x: 0, y: 40, width: 2, height: 20)))
-
-        XCTAssertEqual(points, [
-            CGPoint(x: 2, y: 10),
-            CGPoint(x: 2, y: 50),
-            CGPoint(x: 0, y: 50),
-            CGPoint(x: 0, y: 10),
-        ])
-    }
-
-    func testDiagonalBridgeUsesProjectedCursorWidth() throws {
-        let points = try XCTUnwrap(CursorTrailGeometry.bridge(
-            from: CGRect(x: 0, y: 0, width: 10, height: 20),
-            to: CGRect(x: 20, y: 20, width: 10, height: 20)))
-
-        XCTAssertEqual(points.count, 4)
-        XCTAssertEqual(points[0].x + points[3].x, 10, accuracy: 0.0001)
-        XCTAssertEqual(points[0].y + points[3].y, 20, accuracy: 0.0001)
-        XCTAssertEqual(points[1].x + points[2].x, 50, accuracy: 0.0001)
-        XCTAssertEqual(points[1].y + points[2].y, 60, accuracy: 0.0001)
-    }
-
-    func testLengthFractionKeepsDestinationEnd() throws {
-        let source = CGRect(x: 0, y: 0, width: 10, height: 20)
-        let destination = CGRect(x: 20, y: 0, width: 10, height: 20)
-        let points = try XCTUnwrap(CursorTrailGeometry.bridge(
-            from: source, to: destination, lengthFraction: 0.5))
-
-        XCTAssertEqual(points, [
-            CGPoint(x: 15, y: 0),
-            CGPoint(x: 25, y: 0),
-            CGPoint(x: 25, y: 20),
-            CGPoint(x: 15, y: 20),
-        ])
-    }
-
-    func testLengthFractionIsClamped() {
-        let source = CGRect(x: 0, y: 0, width: 10, height: 20)
-        let destination = CGRect(x: 20, y: 0, width: 10, height: 20)
-
-        XCTAssertNil(CursorTrailGeometry.bridge(
-            from: source, to: destination, lengthFraction: 0))
-        XCTAssertNil(CursorTrailGeometry.bridge(
-            from: source, to: destination, lengthFraction: -1))
+    func testStrengthProfilesHaveCanonicalValues() {
         XCTAssertEqual(
-            CursorTrailGeometry.bridge(
-                from: source, to: destination, lengthFraction: 2),
-            CursorTrailGeometry.bridge(from: source, to: destination))
-    }
-
-    func testCoincidentCursorRectsHaveNoBridge() {
-        let rect = CGRect(x: 10, y: 20, width: 10, height: 20)
-        XCTAssertNil(CursorTrailGeometry.bridge(from: rect, to: rect))
+            CursorTrailProfile.profile(for: 1),
+            CursorTrailProfile(lengthFraction: 0.35, opacity: 0.35,
+                               duration: 0.035, cornerSpeed: 1.5))
+        XCTAssertEqual(
+            CursorTrailProfile.profile(for: 2),
+            CursorTrailProfile(lengthFraction: 0.7, opacity: 0.6,
+                               duration: 0.05, cornerSpeed: 2))
+        XCTAssertEqual(
+            CursorTrailProfile.profile(for: 3),
+            CursorTrailProfile(lengthFraction: 1, opacity: 0.85,
+                               duration: 0.08, cornerSpeed: 2.75))
     }
 }

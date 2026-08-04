@@ -38,20 +38,14 @@ enum Settings {
     /// on unless the key is set by hand.
     static let contextSensitiveCursorKey = "NVEnableContextSensitiveMouseCursor"
 
-    /// Whether cursor movement leaves a transient polygon trail.
-    static let cursorTrailEnabledKey = "NVEnableCursorTrail"
-
-    /// The final fraction of a cursor move covered by its trail.
-    static let cursorTrailLengthFractionKey = "NVCursorTrailLengthFraction"
-
-    /// The maximum opacity of a cursor trail.
-    static let cursorTrailOpacityKey = "NVCursorTrailOpacity"
+    /// Zero disables the cursor trail; larger values select stronger profiles.
+    static let cursorTrailStrengthKey = "NVCursorTrailStrength"
 
     /// Zero disables thickening; positive values are CoreText strengths.
     static let fontThicknessKey = "NVFontThickness"
 
-    static let cursorTrailMinimumValue = 0.1
-    static let cursorTrailMaximumValue = 1.0
+    nonisolated static let cursorTrailStrengthMinimum = 0
+    nonisolated static let cursorTrailStrengthMaximum = 3
     nonisolated static let fontThicknessMinimum = 0
     nonisolated static let fontThicknessMaximum = 255
     nonisolated static let fontThicknessValues = [0, 50, 150, 250]
@@ -80,16 +74,9 @@ enum Settings {
         UserDefaults.standard.bool(forKey: contextSensitiveCursorKey)
     }
 
-    static var cursorTrailEnabled: Bool {
-        UserDefaults.standard.bool(forKey: cursorTrailEnabledKey)
-    }
-
-    static var cursorTrailLengthFraction: Double {
-        clampedCursorTrailValue(forKey: cursorTrailLengthFractionKey)
-    }
-
-    static var cursorTrailOpacity: Double {
-        clampedCursorTrailValue(forKey: cursorTrailOpacityKey)
+    static var cursorTrailStrength: Int {
+        min(max(UserDefaults.standard.integer(forKey: cursorTrailStrengthKey),
+                cursorTrailStrengthMinimum), cursorTrailStrengthMaximum)
     }
 
     static var fontThickness: Int {
@@ -119,11 +106,6 @@ enum Settings {
         return fontThicknessValues[index]
     }
 
-    private static func clampedCursorTrailValue(forKey key: String) -> Double {
-        min(max(UserDefaults.standard.double(forKey: key),
-                cursorTrailMinimumValue), cursorTrailMaximumValue)
-    }
-
     /// Registers settings whose resting value is not supplied by the relevant
     /// typed `UserDefaults` accessor.
     static func registerDefaults() {
@@ -131,8 +113,6 @@ enum Settings {
             contextSensitiveCursorKey: true,
             progressBarKey: true,
             fontThicknessKey: 50,
-            cursorTrailLengthFractionKey: 0.55,
-            cursorTrailOpacityKey: 0.55,
         ])
     }
 }
@@ -184,9 +164,28 @@ final class SettingsWindowController: NSWindowController {
         thicknessControls.orientation = .horizontal
         thicknessControls.alignment = .centerY
         thicknessControls.spacing = 8
-        let cursorTrail = Self.checkbox(String(localized: "Cursor trail"),
-                                        key: Settings.cursorTrailEnabledKey)
-        let cursorTrailGrid = Self.cursorTrailGrid()
+        let cursorTrailLabel = NSTextField(labelWithString:
+            String(localized: "Cursor trail:"))
+        let cursorTrail = NSSlider(
+            value: 0,
+            minValue: Double(Settings.cursorTrailStrengthMinimum),
+            maxValue: Double(Settings.cursorTrailStrengthMaximum),
+            target: nil, action: nil)
+        cursorTrail.numberOfTickMarks = 4
+        cursorTrail.allowsTickMarkValuesOnly = true
+        cursorTrail.tickMarkPosition = .below
+        cursorTrail.isContinuous = true
+        cursorTrail.identifier = .init("cursorTrailStrength")
+        cursorTrail.widthAnchor.constraint(equalToConstant: 180).isActive = true
+        cursorTrail.bind(
+            .value, to: NSUserDefaultsController.shared,
+            withKeyPath: "values.\(Settings.cursorTrailStrengthKey)",
+            options: [.continuouslyUpdatesValue: true])
+        let cursorTrailControls = NSStackView(
+            views: [cursorTrailLabel, cursorTrail])
+        cursorTrailControls.orientation = .horizontal
+        cursorTrailControls.alignment = .centerY
+        cursorTrailControls.spacing = 8
 
         let empty = NSGridCell.emptyContentView
         let grid = NSGridView(views: [[behavior, buffers],
@@ -196,8 +195,7 @@ final class SettingsWindowController: NSWindowController {
                                       [empty, scrollbar],
                                       [empty, scrollbarNote],
                                       [empty, thicknessControls],
-                                      [empty, cursorTrail],
-                                      [empty, cursorTrailGrid]])
+                                      [empty, cursorTrailControls]])
         grid.translatesAutoresizingMaskIntoConstraints = false
         grid.rowAlignment = .firstBaseline
         grid.column(at: 0).xPlacement = .trailing
@@ -205,7 +203,7 @@ final class SettingsWindowController: NSWindowController {
 
         // Each item belongs to the checkbox above it, so it lines up with that
         // checkbox's title rather than with the column.
-        for item in [buffersNote, scrollbarNote, cursorTrailGrid] {
+        for item in [buffersNote, scrollbarNote] {
             let cell = grid.cell(for: item)
             cell?.xPlacement = .none
             cell?.customPlacementConstraints = [
@@ -217,6 +215,12 @@ final class SettingsWindowController: NSWindowController {
         thicknessCell?.xPlacement = .none
         thicknessCell?.customPlacementConstraints = [
             thicknessControls.leadingAnchor.constraint(
+                equalTo: buffers.leadingAnchor)
+        ]
+        let cursorTrailCell = grid.cell(for: cursorTrailControls)
+        cursorTrailCell?.xPlacement = .none
+        cursorTrailCell?.customPlacementConstraints = [
+            cursorTrailControls.leadingAnchor.constraint(
                 equalTo: buffers.leadingAnchor)
         ]
 
@@ -300,60 +304,4 @@ final class SettingsWindowController: NSWindowController {
         return field
     }
 
-    /// A continuously bound slider for a cursor trail parameter.
-    private static func cursorTrailSlider(key: String) -> NSSlider {
-        let slider = NSSlider(
-            value: 0,
-            minValue: Settings.cursorTrailMinimumValue,
-            maxValue: Settings.cursorTrailMaximumValue,
-            target: nil,
-            action: nil)
-        slider.isContinuous = true
-        slider.widthAnchor.constraint(equalToConstant: 160).isActive = true
-        let defaults = NSUserDefaultsController.shared
-        slider.bind(
-            .value, to: defaults, withKeyPath: "values.\(key)",
-            options: [.continuouslyUpdatesValue: true])
-        return slider
-    }
-
-    /// Cursor trail sliders in a grid.
-    private static func cursorTrailGrid() -> NSGridView {
-        let length = String(localized: "Length:")
-        let intens = String(localized: "Intensity:")
-        let lengthLabel = NSTextField(labelWithString:length)
-        let intensLabel = NSTextField(labelWithString:intens)
-        let lengthSlider = cursorTrailSlider(key: Settings.cursorTrailLengthFractionKey)
-        let intensSlider = cursorTrailSlider(key: Settings.cursorTrailOpacityKey)
-
-        let defaults = NSUserDefaultsController.shared
-        let enabledPath = "values.\(Settings.cursorTrailEnabledKey)"
-        for control in [lengthSlider, intensSlider] {
-            control.bind(.enabled, to: defaults, withKeyPath: enabledPath)
-        }
-        // Slider labels get disabled text color when disabled.
-        let colorTransformer = EnabledLabelColorTransformer()
-        for label in [lengthLabel, intensLabel] {
-            label.bind(.textColor, to: defaults, withKeyPath: enabledPath,
-                       options: [.valueTransformer: colorTransformer])
-        }
-
-        let grid = NSGridView(views: [[intensLabel, intensSlider],
-                                      [lengthLabel, lengthSlider]])
-        grid.rowAlignment = .firstBaseline
-        grid.column(at: 0).xPlacement = .trailing
-        return grid
-    }
-}
-
-/// Maps an enabled binding to AppKit's corresponding control-text color.
-nonisolated private final class EnabledLabelColorTransformer: ValueTransformer {
-    override class func transformedValueClass() -> AnyClass {
-        NSColor.self
-    }
-
-    override func transformedValue(_ value: Any?) -> Any? {
-        let enabled = (value as? NSNumber)?.boolValue ?? false
-        return enabled ? NSColor.labelColor : NSColor.disabledControlTextColor
-    }
 }
