@@ -129,29 +129,35 @@ final class SettingsWindowController: NSWindowController {
     private var pendingFontThicknessTask: Task<Void, Never>?
 
     convenience init() {
-        let behavior = NSTextField(labelWithString:
+        let behaviorLabel = NSTextField(labelWithString:
             String(localized: "Behavior:"))
-        let appearance = NSTextField(labelWithString:
-            String(localized: "Appearance:"))
+        let windowLabel = NSTextField(labelWithString:
+            String(localized: "Window:"))
+        let thicknessLabel = NSTextField(labelWithString:
+            String(localized: "Text thickness:"))
+        let cursorTrailLabel = NSTextField(labelWithString:
+            String(localized: "Cursor trail:"))
 
         let buffers = Self.checkbox(
             String(localized: "Open files in buffers instead of tabs"),
             key: Settings.openFilesInBuffersKey)
         let buffersNote = Self.note(String(localized:
             "Applies to New, Open…, files opened from the Finder, and files dropped on a window with Option held."))
+
         let terminate = Self.checkbox(
             String(localized: "Terminate after last window closed"),
             key: Settings.terminateAfterLastWindowKey)
+
         let titlebar = Self.checkbox(
             String(localized: "Transparent title bar"),
             key: Settings.titlebarAppearsTransparentKey)
+
         let scrollbar = Self.checkbox(
             String(localized: "Vertical scrollbar"),
             key: Settings.verticalScrollbarKey)
         let scrollbarNote = Self.note(String(localized:
             "Scrolls by buffer lines, not visual lines. It may not behave as expected if your text has wrapped lines or folds."))
-        let thicknessLabel = NSTextField(labelWithString:
-            String(localized: "Text thickness:"))
+
         let thickness = NSSlider(value: 0, minValue: 0, maxValue: 3,
                                  target: nil, action: nil)
         thickness.numberOfTickMarks = 4
@@ -160,12 +166,7 @@ final class SettingsWindowController: NSWindowController {
         thickness.isContinuous = true
         thickness.identifier = .init("fontThickness")
         thickness.widthAnchor.constraint(equalToConstant: 180).isActive = true
-        let thicknessControls = NSStackView(views: [thicknessLabel, thickness])
-        thicknessControls.orientation = .horizontal
-        thicknessControls.alignment = .centerY
-        thicknessControls.spacing = 8
-        let cursorTrailLabel = NSTextField(labelWithString:
-            String(localized: "Cursor trail:"))
+
         let cursorTrail = NSSlider(
             value: 0,
             minValue: Double(Settings.cursorTrailStrengthMinimum),
@@ -181,29 +182,25 @@ final class SettingsWindowController: NSWindowController {
             .value, to: NSUserDefaultsController.shared,
             withKeyPath: "values.\(Settings.cursorTrailStrengthKey)",
             options: [.continuouslyUpdatesValue: true])
-        let cursorTrailControls = NSStackView(
-            views: [cursorTrailLabel, cursorTrail])
-        cursorTrailControls.orientation = .horizontal
-        cursorTrailControls.alignment = .centerY
-        cursorTrailControls.spacing = 8
 
         let empty = NSGridCell.emptyContentView
-        let grid = NSGridView(views: [[behavior, buffers],
+        let grid = NSGridView(views: [[behaviorLabel, buffers],
                                       [empty, buffersNote],
                                       [empty, terminate],
-                                      [appearance, titlebar],
+                                      [windowLabel, titlebar],
                                       [empty, scrollbar],
                                       [empty, scrollbarNote],
-                                      [empty, thicknessControls],
-                                      [empty, cursorTrailControls]])
+                                      [thicknessLabel, thickness],
+                                      [cursorTrailLabel, cursorTrail]])
         grid.translatesAutoresizingMaskIntoConstraints = false
         grid.rowAlignment = .firstBaseline
         grid.column(at: 0).xPlacement = .trailing
         grid.row(at: 2).bottomPadding = 12
+        grid.row(at: 5).bottomPadding = 12
+        grid.row(at: 6).bottomPadding = 12
 
-        // Each item belongs to the checkbox above it, so it lines up with that
-        // checkbox's title rather than with the column.
-        for item in [buffersNote, scrollbarNote] {
+        // Indent secondary controls to the checkbox-title column.
+        for item in [buffersNote, scrollbarNote, thickness, cursorTrail] {
             let cell = grid.cell(for: item)
             cell?.xPlacement = .none
             cell?.customPlacementConstraints = [
@@ -211,18 +208,6 @@ final class SettingsWindowController: NSWindowController {
                     equalTo: buffers.leadingAnchor, constant: 21)
             ]
         }
-        let thicknessCell = grid.cell(for: thicknessControls)
-        thicknessCell?.xPlacement = .none
-        thicknessCell?.customPlacementConstraints = [
-            thicknessControls.leadingAnchor.constraint(
-                equalTo: buffers.leadingAnchor)
-        ]
-        let cursorTrailCell = grid.cell(for: cursorTrailControls)
-        cursorTrailCell?.xPlacement = .none
-        cursorTrailCell?.customPlacementConstraints = [
-            cursorTrailControls.leadingAnchor.constraint(
-                equalTo: buffers.leadingAnchor)
-        ]
 
         let contentView = NSView()
         contentView.addSubview(grid)
