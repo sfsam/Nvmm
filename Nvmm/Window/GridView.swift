@@ -112,8 +112,10 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     private var frameIndex: UInt64 = 0
 
     // Cursor blink and activation state.
-    private var cursorVisible = true
+    private var cursorOpacity: Float = 1
     private var blinkTimer: Timer?
+    private var cursorFade: CursorFade?
+    private var cursorFadeTimer: Timer?
     private var inactive = false
 
     private enum BlinkPhase { case off, on }
@@ -400,7 +402,6 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         let previousSize = grid?.size
         grid = newGrid
         if !newGrid.mouseMoveEvent { mouseMoveTracker.reset() }
-        cursorVisible = true
         // A new grid means any commit we were holding the final preedit frame
         // for has now landed.
         compositionSession.awaitingCommitRedraw = false
@@ -454,7 +455,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         textInputCoordinator.suspendOrCancel(inputContext: inputContext)
         blinkTimer?.invalidate()
         blinkTimer = nil
-        cursorVisible = true
+        cancelCursorFade(opacity: 1)
         clearCursorTrails()
         needsDisplay = true
     }
@@ -473,9 +474,10 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     private func restartBlink() {
         blinkTimer?.invalidate()
         blinkTimer = nil
-        cursorVisible = true
+        cancelCursorFade(opacity: 1)
 
-        guard !inactive, let grid, !grid.hideCursor else { return }
+        guard !inactive, let grid, !grid.hideCursor,
+              !shouldSuppressNvimCursorForComposition() else { return }
         let cursor = grid.cursor
         guard cursor.blinks, cursor.blinkon > 0, cursor.blinkoff > 0 else { return }
         scheduleBlink(afterMilliseconds: cursor.blinkwait, phase: .off)
@@ -490,16 +492,82 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                 let cursor = grid.cursor
                 switch phase {
                 case .off:
-                    self.cursorVisible = false
-                    self.needsDisplay = true
+                    self.beginCursorFade(
+                        to: 0, phaseMilliseconds: cursor.blinkoff)
                     self.scheduleBlink(afterMilliseconds: cursor.blinkoff, phase: .on)
                 case .on:
-                    if !grid.hideCursor { self.cursorVisible = true }
-                    self.needsDisplay = true
+                    if !grid.hideCursor {
+                        self.beginCursorFade(
+                            to: 1, phaseMilliseconds: cursor.blinkon)
+                    }
                     self.scheduleBlink(afterMilliseconds: cursor.blinkon, phase: .off)
                 }
             }
         }
+    }
+
+    private func beginCursorFade(to opacity: Float,
+                                 phaseMilliseconds: UInt16) {
+        let now = CACurrentMediaTime()
+        updateCursorFade(at: now)
+        cursorFadeTimer?.invalidate()
+        cursorFadeTimer = nil
+        cursorFade = nil
+
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            cursorOpacity = opacity
+            needsDisplay = true
+            return
+        }
+
+        let fade = CursorFade(from: cursorOpacity, to: opacity, start: now,
+                              phaseMilliseconds: phaseMilliseconds)
+        guard fade.duration > 0, fade.from != fade.to else {
+            cursorOpacity = opacity
+            needsDisplay = true
+            return
+        }
+
+        cursorFade = fade
+        scheduleCursorFadeStep(after: fade.timerInterval)
+    }
+
+    private func scheduleCursorFadeStep(after interval: TimeInterval) {
+        let timer = Timer(timeInterval: interval, repeats: false) {
+            [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let now = CACurrentMediaTime()
+                // Absolute-time sampling skips stale steps after a delayed
+                // callback. Shorten the last timer so the endpoint stays fixed.
+                self.updateCursorFade(at: now)
+                if let fade = self.cursorFade {
+                    let remaining = fade.start + fade.duration - now
+                    self.scheduleCursorFadeStep(
+                        after: min(fade.timerInterval, remaining))
+                }
+            }
+        }
+        cursorFadeTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func updateCursorFade(at time: TimeInterval) {
+        guard let cursorFade else { return }
+        cursorOpacity = cursorFade.opacity(at: time)
+        needsDisplay = true
+        if cursorFade.isComplete(at: time) {
+            cursorFadeTimer?.invalidate()
+            cursorFadeTimer = nil
+            self.cursorFade = nil
+        }
+    }
+
+    private func cancelCursorFade(opacity: Float) {
+        cursorFadeTimer?.invalidate()
+        cursorFadeTimer = nil
+        cursorFade = nil
+        cursorOpacity = opacity
     }
 
     // MARK: - Rendering
@@ -582,13 +650,15 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         let pixelSize = SIMD2<Float>(2, -2)
             / SIMD2<Float>(Float(drawable.width), Float(drawable.height))
 
+        let cursorAlpha = UInt32(
+            (min(max(cursorOpacity, 0), 1) * 255).rounded())
         uniforms.pointee = uniform_data(
             pixel_size: pixelSize,
             cell_pixel_size: cellSizePixels,
             cell_size: cellSizePixels * pixelSize,
             baseline: baselineTranslate,
             cursor_position: SIMD2<Int16>(Int16(cursor.column), Int16(cursor.row)),
-            cursor_color: cursor.background.rgb,
+            cursor_color: cursor.background.rgb | (cursorAlpha << 24),
             cursor_line_width: cursorLineThickness,
             cursor_cell_width: UInt32(cursor.width),
             grid_width: UInt32(grid.width))
@@ -610,9 +680,14 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                 var cell = grid.cell(row, col)
                 if blockCursorApplies, row == cursor.row,
                    col >= cursor.column, col < cursor.column + cursor.width {
-                    cell = cell.recolored(foreground: cursor.foreground,
-                                          background: cursor.background,
-                                          special: cursor.special)
+                    // Block cursors invert the cell through the normal grid
+                    // passes, so fade their replacement colors in place.
+                    cell = cell.recolored(
+                        foreground: blendCursorColor(
+                            cell.foreground, cursor.foreground),
+                        background: blendCursorColor(
+                            cell.background, cursor.background),
+                        special: blendCursorColor(cell.special, cursor.special))
                 }
 
                 let gridpos = SIMD2<Int16>(Int16(col), Int16(row))
@@ -966,7 +1041,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     /// views always outline; a hidden or blinked-off cursor, or a visible preedit
     /// covering the insertion point, draws nothing.
     private func renderedCursorShape(grid: Grid, cursor: Cursor) -> CursorShape? {
-        if grid.hideCursor || !cursorVisible { return nil }
+        if grid.hideCursor || cursorOpacity <= 0 { return nil }
         if shouldSuppressNvimCursorForComposition() { return nil }
         if inactive { return .blockOutline }
         return cursor.shape
@@ -994,6 +1069,18 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             red: UInt8((Int(foreground.red) + Int(background.red)) / 2),
             green: UInt8((Int(foreground.green) + Int(background.green)) / 2),
             blue: UInt8((Int(foreground.blue) + Int(background.blue)) / 2))
+    }
+
+    private func blendCursorColor(_ color: RGBColor,
+                                  _ cursorColor: RGBColor) -> RGBColor {
+        let opacity = min(max(cursorOpacity, 0), 1)
+        func blend(_ first: UInt8, _ second: UInt8) -> UInt8 {
+            let value = Float(first) + (Float(second) - Float(first)) * opacity
+            return UInt8(clamping: Int(value.rounded()))
+        }
+        return RGBColor(red: blend(color.red, cursorColor.red),
+                        green: blend(color.green, cursorColor.green),
+                        blue: blend(color.blue, cursorColor.blue))
     }
 
     private func convertSize(from backing: NSSize) -> NSSize {
@@ -1819,6 +1906,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             refreshCompositionGeometry()
         }
         updateCompositionLayout()
+        restartBlink()
         needsDisplay = true
     }
 

@@ -69,7 +69,7 @@ final class RenderContext {
             vertex: "cell_graphic_render", fragment: "cell_graphic_fill",
             label: "Cell graphic render pipeline")
         cursorPipeline = try Self.pipeline(
-            device: device, library: library, blend: .none,
+            device: device, library: library, blend: .straight,
             vertex: "cursor_render", fragment: "background_fill",
             label: "Cursor render pipeline")
         linePipeline = try Self.pipeline(
