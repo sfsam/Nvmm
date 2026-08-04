@@ -281,6 +281,8 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             .layerWidthSizable, .layerHeightSizable,
         ]
         visualBellLayer.opacity = 0
+        visualBellLayer.backgroundColor = NSColor(
+            red: 0.8, green: 0, blue: 0, alpha: 1).cgColor
         metalLayer.addSublayer(visualBellLayer)
         textInputCoordinator = TextInputCoordinator(delegate: self)
     }
@@ -315,20 +317,11 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
 
     /// Briefly flashes the grid in response to Neovim's visual bell.
     func showVisualBell() {
-        let background = grid?.defaultBackground ?? RGBColor()
-        let r = Double(background.red)
-        let g = Double(background.green)
-        let b = Double(background.blue)
-        let lightness =
-            (0.299 * r * r + 0.587 * g * g + 0.114 * b * b).squareRoot()
-        visualBellLayer.backgroundColor =
-            (lightness > 127.5 ? NSColor.black : NSColor.white).cgColor
-
         visualBellLayer.removeAnimation(forKey: "visualBell")
         let animation = CABasicAnimation(keyPath: "opacity")
-        animation.fromValue = 0.45
+        animation.fromValue = 1
         animation.toValue = 0
-        animation.duration = 0.16
+        animation.duration = 0.3
         visualBellLayer.add(animation, forKey: "visualBell")
     }
 
