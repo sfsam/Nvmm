@@ -489,6 +489,13 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         gridTrailingConstraint = contentView.trailingAnchor.constraint(
             equalTo: gridView.trailingAnchor, constant: trailingInset)
 
+        var scrollerBottomOffset = 0.0
+        if #available(macOS 26.0, *) {
+            // Empirically chosen so scroller isn't clipped by huge
+            // corner radius on macOS 26+ windows.
+            scrollerBottomOffset = -8.0
+        }
+
         NSLayoutConstraint.activate([
             gridView.topAnchor.constraint(equalTo: safeArea.topAnchor),
             gridView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
@@ -502,7 +509,8 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
             // trailing edge: it takes the margin's place rather than sitting
             // inside it.
             scroller.topAnchor.constraint(equalTo: safeArea.topAnchor),
-            scroller.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            scroller.bottomAnchor.constraint(equalTo: contentView.bottomAnchor,
+                                             constant: scrollerBottomOffset),
             scroller.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             scroller.widthAnchor.constraint(
                 equalToConstant: ScrollerController.width),
