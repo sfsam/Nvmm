@@ -256,6 +256,15 @@ final class CompositionTests: XCTestCase {
     }
 
     @MainActor
+    private final class CompositionKindState {
+        var value: CompositionKind
+
+        init(_ value: CompositionKind) {
+            self.value = value
+        }
+    }
+
+    @MainActor
     private func makeCoordinator(kind: CompositionKind)
         -> (TextInputCoordinator, RecordingDelegate) {
         let delegate = RecordingDelegate()
@@ -312,13 +321,13 @@ final class CompositionTests: XCTestCase {
     @MainActor
     func testCancelsWhenInputSourceChanges() {
         let delegate = RecordingDelegate()
-        var kind = CompositionKind.ime
+        let kind = CompositionKindState(.ime)
         let coordinator = TextInputCoordinator(delegate: delegate,
-                                               kindResolver: { kind })
+                                               kindResolver: { kind.value })
         coordinator.setMarkedText("preedit", selectedRange: NSRange(location: 3, length: 0),
                                   replacementRange: NSRange(location: NSNotFound, length: 0))
 
-        kind = .deadKey
+        kind.value = .deadKey
         coordinator.cancelIfInputSourceChanged(inputContext: nil)
         XCTAssertFalse(coordinator.isActive)
         XCTAssertEqual(delegate.commits.count, 0)
@@ -327,9 +336,9 @@ final class CompositionTests: XCTestCase {
     @MainActor
     func testResumesOnlyWhenInputSourceMatches() {
         let delegate = RecordingDelegate()
-        var kind = CompositionKind.ime
+        let kind = CompositionKindState(.ime)
         let coordinator = TextInputCoordinator(delegate: delegate,
-                                               kindResolver: { kind })
+                                               kindResolver: { kind.value })
         coordinator.setMarkedText("preedit", selectedRange: NSRange(location: 3, length: 0),
                                   replacementRange: NSRange(location: NSNotFound, length: 0))
         coordinator.suspendOrCancel(inputContext: nil)
@@ -338,7 +347,7 @@ final class CompositionTests: XCTestCase {
         XCTAssertTrue(coordinator.isActive)
 
         coordinator.suspendOrCancel(inputContext: nil)
-        kind = .deadKey
+        kind.value = .deadKey
         coordinator.resume(inputContext: nil)
         XCTAssertFalse(coordinator.isActive)
         XCTAssertEqual(delegate.commits.count, 0)

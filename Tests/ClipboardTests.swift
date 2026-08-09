@@ -15,19 +15,12 @@ import AppKit
 
 @MainActor
 final class ClipboardTests: XCTestCase {
-    private var pasteboard: NSPasteboard!
-
-    override func setUp() {
-        super.setUp()
-        pasteboard = NSPasteboard(name: NSPasteboard.Name("NvmmClipboardTests"))
+    private lazy var pasteboard: NSPasteboard = {
+        let name = NSPasteboard.Name("NvmmClipboardTests.\(UUID())")
+        let pasteboard = NSPasteboard(name: name)
         pasteboard.clearContents()
-    }
-
-    override func tearDown() {
-        pasteboard.clearContents()
-        pasteboard = nil
-        super.tearDown()
-    }
+        return pasteboard
+    }()
 
     /// Unwraps a `.result`, failing the test on `.error`.
     private func result(_ outcome: RequestOutcome) -> MPValue? {
