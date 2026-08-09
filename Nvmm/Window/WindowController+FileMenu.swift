@@ -64,6 +64,12 @@ extension WindowController {
         return panel.urls.map(\.path)
     }
 
+    /// Adds a successfully opened file to AppKit's application-wide history.
+    func noteRecentDocument(path: String) {
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        NSDocumentController.shared.noteNewRecentDocumentURL(url)
+    }
+
     /// Opens paths in this window, following the buffers-instead-of-tabs
     /// preference, and brings the window forward. Used by the Finder and
     /// drag-and-drop open paths, which choose a window before opening.

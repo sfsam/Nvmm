@@ -224,6 +224,11 @@ actor NeovimProcess {
     nonisolated let progressUpdates: AsyncStream<ProgressUpdate>
     private let progressUpdatesContinuation: AsyncStream<ProgressUpdate>.Continuation
 
+    /// Absolute paths Neovim successfully read or wrote. The window forwards
+    /// them to AppKit's application-wide recent-document store.
+    nonisolated let recentFilePaths: AsyncStream<String>
+    private let recentFilePathsContinuation: AsyncStream<String>.Continuation
+
     init(
         limits: RPCResourceLimits = .production,
         standardErrorHandler: @escaping StandardErrorCapture.Handler =
@@ -260,6 +265,10 @@ actor NeovimProcess {
             of: ProgressUpdate.self, bufferingPolicy: .bufferingNewest(1))
         progressUpdates = progressPair.stream
         progressUpdatesContinuation = progressPair.continuation
+
+        let recentFilesPair = AsyncStream.makeStream(of: String.self)
+        recentFilePaths = recentFilesPair.stream
+        recentFilePathsContinuation = recentFilesPair.continuation
     }
 
     // MARK: Connecting
@@ -764,6 +773,12 @@ actor NeovimProcess {
                     modifiedStatesContinuation.yield(value)
                 }
                 return
+            case "recent_file":
+                if arguments.count == 1,
+                   let path = arguments[0].stringValue, !path.isEmpty {
+                    recentFilePathsContinuation.yield(path)
+                }
+                return
             default:
                 break
             }
@@ -844,6 +859,7 @@ actor NeovimProcess {
         bellsContinuation.finish()
         modifiedStatesContinuation.finish()
         progressUpdatesContinuation.finish()
+        recentFilePathsContinuation.finish()
         inboundContinuation.finish()
         io = nil
     }
@@ -938,6 +954,18 @@ extension NeovimProcess {
                 clientOutcome, String(localized: "Client registration"))
         }
 
+        // Install this before attaching: a spawned Neovim resumes startup as
+        // soon as a UI attaches, and startup file reads must not race setup.
+        let recentFilesOutcome = await requestWaiting(
+            "nvim_exec_lua",
+            [.string(Self.recentFilesAutocmdLua), .array([])],
+            until: deadline)
+        guard case .response(let recentFiles) = recentFilesOutcome,
+              !recentFiles.isError else {
+            return attachFailure(
+                recentFilesOutcome, String(localized: "Recent-files setup"))
+        }
+
         // Register the VimEnter signal before attaching, so it is in place
         // before Neovim finishes startup. It lets the window hold its first
         // paint until startup config (notably `guifont`) has been applied.
@@ -1014,6 +1042,22 @@ extension NeovimProcess {
         local group = vim.api.nvim_create_augroup('NvmmProgress', {clear=true})
         vim.api.nvim_create_autocmd('Progress', {group=group,
           callback=function(ev) vim.rpcnotify(0, 'progress', ev.data) end})
+        """
+
+    /// Reports successful reads and writes of ordinary local files. This is
+    /// deliberately narrower than buffer visits: switching to a loaded buffer
+    /// does not make it a newly opened document.
+    private static let recentFilesAutocmdLua = """
+        local group = vim.api.nvim_create_augroup(
+          'NvmmRecentFiles', {clear=true})
+        local function notify(ev)
+          if vim.bo[ev.buf].buftype ~= '' then return end
+          local path = vim.api.nvim_buf_get_name(ev.buf)
+          if path == '' or vim.fn.filereadable(path) ~= 1 then return end
+          vim.rpcnotify(0, 'recent_file', vim.fn.fnamemodify(path, ':p'))
+        end
+        vim.api.nvim_create_autocmd({'BufReadPost', 'BufWritePost'},
+          {group=group, callback=notify})
         """
 
     /// Points Neovim's `g:clipboard` provider at this UI, so the `+`/`*`

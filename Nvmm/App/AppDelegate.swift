@@ -205,7 +205,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// arguments. Otherwise they are opened over RPC into whichever existing
     /// window suits them best.
     func application(_ application: NSApplication, open urls: [URL]) {
-        let paths = urls.map(\.path)
+        openApplicationPaths(urls.map(\.path))
+    }
+
+    /// Handles a standard Open Recent selection in this non-NSDocument app.
+    func application(_ sender: NSApplication,
+                     openFile filename: String) -> Bool {
+        guard !filename.isEmpty else { return false }
+        openApplicationPaths([filename])
+        return true
+    }
+
+    /// Applies one policy to Open Recent, Finder, `open`, and services.
+    private func openApplicationPaths(_ paths: [String]) {
         guard !paths.isEmpty else { return }
         let candidates = windows
         if candidates.isEmpty {
@@ -273,7 +285,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let paths = request.absoluteFiles
-        Task {
+        Task { @MainActor in
             if let controller = await self.bestWindow(for: paths,
                                                       among: candidates),
                !controller.hasExited {

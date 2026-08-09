@@ -77,6 +77,19 @@
                                     <action selector="openDocument:" target="-1" id="IAo-SY-act"/>
                                 </connections>
                             </menuItem>
+                            <menuItem title="Open Recent" id="rcn-01-rcn">
+                                <modifierMask key="keyEquivalentModifierMask"/>
+                                <menu key="submenu" title="Open Recent" systemMenu="recentDocuments" id="rcn-02-rcn">
+                                    <items>
+                                        <menuItem title="Clear Menu" id="rcn-03-rcn">
+                                            <modifierMask key="keyEquivalentModifierMask"/>
+                                            <connections>
+                                                <action selector="clearRecentDocuments:" target="-1" id="rcn-04-rcn"/>
+                                            </connections>
+                                        </menuItem>
+                                    </items>
+                                </menu>
+                            </menuItem>
                             <menuItem title="Connect to Running Neovim…" id="crn-01-crn">
                                 <connections>
                                     <action selector="connectToRunningNvim:" target="-1" id="crn-02-crn"/>

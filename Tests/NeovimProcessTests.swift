@@ -355,6 +355,10 @@ final class NeovimProcessTests: XCTestCase {
         id = try readRequest(
             fd, method: "nvim_set_client_info", unpacker: &unpacker)
         try writeResponse(fd, id: id)
+
+        id = try readRequest(
+            fd, method: "nvim_exec_lua", unpacker: &unpacker)
+        try writeResponse(fd, id: id)
         try readNotification(
             fd, method: "nvim_command", unpacker: &unpacker)
         try readNotification(
@@ -827,14 +831,56 @@ final class NeovimProcessTests: XCTestCase {
                   {group='NvmmModified'}) > 0
                 local progress = vim.fn.exists('##Progress') ~= 1
                   or #vim.api.nvim_get_autocmds({group='NvmmProgress'}) > 0
-                return {helpers, modified, progress}
+                local recent = #vim.api.nvim_get_autocmds(
+                  {group='NvmmRecentFiles'}) == 2
+                return {helpers, modified, progress, recent}
                 """
             let response = try await process.request(
                 "nvim_exec_lua", [.string(lua), .array([])])
 
             XCTAssertFalse(response.isError)
             XCTAssertEqual(response.result.arrayValue,
-                           [.bool(true), .bool(true), .bool(true)])
+                           [.bool(true), .bool(true), .bool(true), .bool(true)])
+        }
+    }
+
+    func testSuccessfulReadsAndWritesPublishRecentFilePaths() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            let directory = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+                .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: false)
+            defer { try? FileManager.default.removeItem(at: directory) }
+
+            let existing = directory.appendingPathComponent("existing").path
+            let created = directory.appendingPathComponent("created").path
+            XCTAssertTrue(FileManager.default.createFile(
+                atPath: existing, contents: Data("hello".utf8)))
+
+            let read = expectation(description: "read file reported")
+            let written = expectation(description: "written file reported")
+            let collector = Task {
+                for await path in process.recentFilePaths {
+                    if path == existing { read.fulfill() }
+                    if path == created { written.fulfill() }
+                }
+            }
+            defer { collector.cancel() }
+
+            let lua = """
+                local existing, created = ...
+                vim.api.nvim_cmd({cmd='edit', args={existing}}, {})
+                vim.api.nvim_cmd({cmd='enew'}, {})
+                vim.api.nvim_buf_set_name(0, created)
+                vim.api.nvim_buf_set_lines(0, 0, -1, true, {'new'})
+                vim.api.nvim_cmd({cmd='write'}, {})
+                """
+            let response = try await process.request(
+                "nvim_exec_lua",
+                [.string(lua), .array([.string(existing), .string(created)])])
+            XCTAssertFalse(response.isError)
+            await fulfillment(of: [read, written], timeout: 2)
         }
     }
 

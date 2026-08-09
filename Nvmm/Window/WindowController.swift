@@ -121,6 +121,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     private var inputTask: Task<Void, Never>?
     private var modifiedTask: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
+    private var recentFileTask: Task<Void, Never>?
     private var bellTask: Task<Void, Never>?
     private var settingsTask: Task<Void, Never>?
 
@@ -775,6 +776,12 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
             }
         }
 
+        recentFileTask = Task { [weak self] in
+            for await path in process.recentFilePaths {
+                self?.noteRecentDocument(path: path)
+            }
+        }
+
         bellTask = Task { [weak self] in
             for await bell in process.bells {
                 switch bell {
@@ -931,8 +938,9 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     private func reconnect(_ handoff: UIHandoff) {
         // Leave `inputTask` running — it is the window's single command
         // consumer and forwards to the new process once `startNeovim` swaps it
-        // in. Only the per-process `modifiedTask` is rebuilt, by `startNeovim`.
+        // in. The per-process stream tasks are rebuilt by `startNeovim`.
         modifiedTask?.cancel()
+        recentFileTask?.cancel()
         // The new session has no tasks of its own yet, so nothing carries over.
         progressTask?.cancel()
         progressHoldTask?.cancel()
@@ -1481,6 +1489,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         inputTask?.cancel()
         modifiedTask?.cancel()
         progressTask?.cancel()
+        recentFileTask?.cancel()
         bellTask?.cancel()
         progressHoldTask?.cancel()
         settingsTask?.cancel()
