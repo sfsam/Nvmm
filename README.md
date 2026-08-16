@@ -41,14 +41,20 @@ Supported options are shown by `nvmm --help`.
 
 No Apple Developer account is required. The checked-in signing configuration uses an ad-hoc signature by default.
 
-To sign with your own Apple Development certificate, copy the local example and replace its placeholder team ID:
+To sign Debug with Apple Development or Release with Developer ID, copy the
+local example, replace its placeholder team ID, and enable only the intended
+configuration:
 
 ```sh
 cp Config/Signing.local.xcconfig.example \
   Config/Signing.local.xcconfig
 ```
 
-`Config/Signing.local.xcconfig` is ignored by Git. Edit that file instead of choosing a team in Xcode's Signing & Capabilities editor; the latter writes account-specific values into the shared project file.
+`Config/Signing.local.xcconfig` is ignored by Git. Edit that file instead of
+choosing a team in Xcode's Signing & Capabilities editor; the latter writes
+account-specific values into the shared project file. Keep Developer ID values
+conditional on `Release` so Debug continues to use fast ad-hoc signing unless
+Apple Development is explicitly enabled for it.
 
 Download Neovim 0.12 or newer, then build the app:
 

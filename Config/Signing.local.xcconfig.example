@@ -3,12 +3,12 @@
 // Signing.local.xcconfig is ignored by Git. Never commit account-specific
 // signing values to the project.
 
-// Apple Development signing:
-DEVELOPMENT_TEAM = XXXXXXXXXX
-CODE_SIGN_STYLE = Manual
-CODE_SIGN_IDENTITY = Apple Development
+// Apple Development signing for Debug:
+DEVELOPMENT_TEAM[config=Debug] = XXXXXXXXXX
+CODE_SIGN_STYLE[config=Debug] = Manual
+CODE_SIGN_IDENTITY[config=Debug] = Apple Development
 
 // Developer ID signing for a notarized release:
-// DEVELOPMENT_TEAM = XXXXXXXXXX
-// CODE_SIGN_STYLE = Manual
-// CODE_SIGN_IDENTITY = Developer ID Application
+// DEVELOPMENT_TEAM[config=Release] = XXXXXXXXXX
+// CODE_SIGN_STYLE[config=Release] = Manual
+// CODE_SIGN_IDENTITY[config=Release] = Developer ID Application

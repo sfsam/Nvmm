@@ -15,6 +15,7 @@
 #   build/nvim/lib
 #   build/nvim/share
 #   build/nvim/Neovim-LICENSE.txt
+#   build/nvim/MachO-files.txt
 
 set -e
 
@@ -38,5 +39,7 @@ rm -f "${ARCHIVE}"
 
 curl -fL -o nvim/Neovim-LICENSE.txt \
     "https://raw.githubusercontent.com/neovim/neovim/${TAG}/LICENSE.txt"
+
+../Scripts/index_nvim_macho.sh nvim
 
 echo "Staged Neovim in build/nvim"

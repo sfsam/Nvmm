@@ -354,13 +354,15 @@
 				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/share",
 				"$(BUILT_PRODUCTS_DIR)/$(EXECUTABLE_FOLDER_PATH)/nvim",
 				"$(SRCROOT)/Config/Neovim.entitlements",
+				"$(SRCROOT)/Scripts/index_nvim_macho.sh",
+				"$(SRCROOT)/Scripts/sign_bundled_nvim.sh",
 			);
 			name = "Sign Bundled Neovim";
 			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -eu\n\nif [ \"${CODE_SIGNING_ALLOWED:-NO}\" != \"YES\" ]; then\n  exit 0\nfi\n\nidentity=\"${EXPANDED_CODE_SIGN_IDENTITY:-}\"\nif [ -z \"$identity\" ]; then\n  exit 0\nfi\n\ncontents=\"$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH\"\nnvim=\"$BUILT_PRODUCTS_DIR/$EXECUTABLE_FOLDER_PATH/nvim\"\nentitlements=\"$SRCROOT/Config/Neovim.entitlements\"\n\nif [ ! -f \"$entitlements\" ]; then\n  echo \"error: missing Neovim entitlements: $entitlements\" >&2\n  exit 1\nfi\n\nif [ ! -x \"$nvim\" ]; then\n  echo \"error: missing bundled Neovim executable: $nvim\" >&2\n  exit 1\nfi\n\nsign_without_entitlements() {\n  file=\"$1\"\n\n  if [ \"$CONFIGURATION\" = \"Release\" ] && [ \"$identity\" != \"-\" ]; then\n    /usr/bin/codesign --force --sign \"$identity\" --options runtime \\\n      --timestamp \"$file\"\n  else\n    /usr/bin/codesign --force --sign \"$identity\" --options runtime \\\n      --timestamp=none \"$file\"\n  fi\n}\n\nfor root in \"$contents/lib\" \"$contents/share\"; do\n  if [ ! -d \"$root\" ]; then\n    echo \"error: missing bundled Neovim directory: $root\" >&2\n    exit 1\n  fi\n\n  find \"$root\" -type f | while IFS= read -r file; do\n    case \"$(/usr/bin/file -b \"$file\")\" in\n      Mach-O*) sign_without_entitlements \"$file\" ;;\n    esac\n  done\ndone\n\nif [ \"$CONFIGURATION\" = \"Release\" ] && [ \"$identity\" != \"-\" ]; then\n  /usr/bin/codesign --force --sign \"$identity\" --options runtime \\\n    --timestamp --entitlements \"$entitlements\" \"$nvim\"\nelse\n  /usr/bin/codesign --force --sign \"$identity\" --options runtime \\\n    --timestamp=none --entitlements \"$entitlements\" \"$nvim\"\nfi\n";
+			shellScript = "\"$SRCROOT/Scripts/sign_bundled_nvim.sh\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
