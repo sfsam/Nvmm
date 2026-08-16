@@ -134,11 +134,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = String(localized: "Connect to Running Neovim")
         alert.informativeText = String(localized:
-            "Enter the Unix socket path of a running Neovim server.\nStart one with:  nvim --listen /tmp/nvim.sock --headless")
+            "Enter the Unix socket path of a running Neovim server.")
         alert.addButton(withTitle: String(localized: "Connect"))
         alert.addButton(withTitle: String(localized: "Cancel"))
 
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        // The field is 3 lines tall to accommodate a long socket path.
+        let field = PasteTrimmingTextField(
+            frame: NSRect(x: 0, y: 0, width: 320, height: 0))
+        let font = field.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let lineHeight = NSLayoutManager().defaultLineHeight(for: font)
+        field.frame.size.height = ceil(field.fittingSize.height + 2 * lineHeight)
+        field.maximumNumberOfLines = 3
         field.placeholderString = "/tmp/nvim.sock"
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
