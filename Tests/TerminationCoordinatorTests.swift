@@ -28,6 +28,7 @@ final class TerminationCoordinatorTests: XCTestCase {
         /// Whether an orderly quit request receives any response.
         let respondsToQuit: Bool
         var forceTerminateCount = 0
+        var unsavedQueryCount = 0
 
         /// A clean session (`unsaved: false`) exits on any quit; an unsaved one
         /// exits only when forced (unless `exitsOnForce` is overridden).
@@ -38,7 +39,10 @@ final class TerminationCoordinatorTests: XCTestCase {
             self.respondsToQuit = respondsToQuit
         }
 
-        func hasUnsavedBuffers() async -> Bool { unsaved }
+        func hasUnsavedBuffers() async -> Bool {
+            unsavedQueryCount += 1
+            return unsaved
+        }
 
         func beginQuit(force: Bool) {
             quitCount += 1
@@ -88,6 +92,21 @@ final class TerminationCoordinatorTests: XCTestCase {
         coordinator.register(dirty)
         unsaved = await coordinator.anyUnsavedBuffers()
         XCTAssertTrue(unsaved)
+    }
+
+    func testAnyUnsavedBuffersSkipsExitedSessions() async {
+        let coordinator = TerminationCoordinator()
+        let exited = FakeSession(unsaved: true)
+        exited.hasExited = true
+        let live = FakeSession(unsaved: false)
+        coordinator.register(exited)
+        coordinator.register(live)
+
+        let unsaved = await coordinator.anyUnsavedBuffers()
+
+        XCTAssertFalse(unsaved)
+        XCTAssertEqual(exited.unsavedQueryCount, 0)
+        XCTAssertEqual(live.unsavedQueryCount, 1)
     }
 
     func testNonForcedQuitDoesNotExitUnsavedSession() async {

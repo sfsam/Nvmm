@@ -907,7 +907,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
             } else {
                 let exitDetail = self.ownsServer && !self.expectsDisconnect
                     ? abnormalNeovimExitDescription(
-                        await process.childTermination())
+                        await process.recordedChildTermination())
                     : nil
                 let transportDetail = transportDisconnectDescription(
                     await process.transportTermination(),

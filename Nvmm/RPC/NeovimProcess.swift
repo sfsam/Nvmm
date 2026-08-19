@@ -394,6 +394,12 @@ actor NeovimProcess {
         return await childWaitTask.value
     }
 
+    /// The spawned child's termination status if it has already been reaped.
+    /// Unlike `childTermination()`, this never waits for a running child.
+    func recordedChildTermination() -> Spawn.Termination? {
+        childTerminationResult
+    }
+
     /// Terminates the locally spawned child, escalating from `SIGTERM` to
     /// `SIGKILL` if it does not exit during `gracePeriod`.
     ///

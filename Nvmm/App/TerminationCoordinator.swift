@@ -63,8 +63,8 @@ import Foundation
     func anyUnsavedBuffers() async -> Bool {
         // `sessions` is a value type, so the loop iterates a stable snapshot
         // even if a window deregisters while a query is in flight.
-        for session in sessions where await session.hasUnsavedBuffers() {
-            return true
+        for session in sessions where !session.hasExited {
+            if await session.hasUnsavedBuffers() { return true }
         }
         return false
     }

@@ -704,6 +704,65 @@ final class UIControllerTests: XCTestCase {
         }
     }
 
+    func testRealDetachEndsUIWhileSpawnedServerKeepsRunning() async throws {
+        guard let nvim = await MainActor.run(body: { NeovimBundle.executableURL }) else {
+            throw XCTSkip("bundled nvim executable not available")
+        }
+        let process = NeovimProcess()
+        try await process.spawn(path: nvim.path,
+                                argv: [nvim.path, "--clean", "--embed"])
+        var options = UIOptions()
+        options.extLinegrid = true
+        let result = await process.uiAttach(width: 80, height: 24,
+                                            options: options)
+        guard result.status == .success else {
+            await process.disconnect()
+            return XCTFail("attach failed: \(result.status) \(result.message)")
+        }
+        guard let address = await process.serverAddress() else {
+            _ = await process.terminateChild()
+            return XCTFail("spawned Neovim has no server address")
+        }
+
+        _ = try? await process.request(
+            "nvim_command", [.string("detach")])
+        let detached = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                for await _ in process.grids {}
+                return true
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(5))
+                return false
+            }
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
+        }
+        XCTAssertTrue(detached, "detach should end the UI stream")
+        let detachedTermination = await process.recordedChildTermination()
+        XCTAssertNil(detachedTermination)
+
+        let reattached = NeovimProcess()
+        do {
+            try await reattached.connect(address)
+            let modified = try await reattached.request(
+                "nvim_eval",
+                [.string("len(filter(getbufinfo(), 'v:val.changed'))")])
+            XCTAssertEqual(modified.result.integer?.signed, 0)
+            _ = try? await reattached.request(
+                "nvim_command", [.string("qall!")])
+            await reattached.disconnect()
+            let termination = await process.childTermination()
+            XCTAssertEqual(termination, .exited(status: 0))
+        } catch {
+            await reattached.disconnect()
+            _ = await process.terminateChild()
+            throw error
+        }
+        await process.disconnect()
+    }
+
     func testMissingRestartSocketIsAnAbandonedHandoff() {
         XCTAssertTrue(handoffConnectionErrorIsStale(
             .restart, "/tmp/nvim.sock", ENOENT))

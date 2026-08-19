@@ -155,6 +155,36 @@ final class NeovimProcessTests: XCTestCase {
         await process.disconnect()
     }
 
+    func testRecordedChildTerminationDoesNotWaitForRunningChild() async throws {
+        let process = NeovimProcess()
+        try await process.spawn(
+            path: "/bin/sh",
+            argv: ["/bin/sh", "-c", "while :; do :; done"])
+
+        let termination = await process.recordedChildTermination()
+
+        XCTAssertNil(termination)
+        _ = await process.terminateChild(gracePeriod: .milliseconds(50))
+        await process.disconnect()
+    }
+
+    func testRecordedChildTerminationReturnsReapedStatus() async throws {
+        let process = NeovimProcess()
+        try await process.spawn(
+            path: "/bin/sh",
+            argv: ["/bin/sh", "-c", "exit 11"])
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        var termination: Spawn.Termination?
+        while ContinuousClock.now < deadline {
+            termination = await process.recordedChildTermination()
+            if termination != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertEqual(termination, .exited(status: 11))
+        await process.disconnect()
+    }
+
     func testTerminateChildAllowsGracefulExit() async throws {
         let marker = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
