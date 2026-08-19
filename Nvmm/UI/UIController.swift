@@ -45,12 +45,14 @@ nonisolated enum ProgressOutcome: Sendable, Equatable {
 }
 
 /// True when a handoff connection error means Neovim abandoned the successor
-/// socket rather than failing to open a server. A `:restart` that fails can leave
-/// its UI event pending after Neovim removes the temporary socket; the resulting
-/// `ENOENT` is cancellation of the handoff, not a user-visible error.
+/// Unix socket rather than failing to open a server. A `:restart` that fails can
+/// leave its UI event pending after Neovim removes the temporary socket; the
+/// resulting `ENOENT` is cancellation of the handoff, not a user-visible error.
 nonisolated func handoffConnectionErrorIsStale(_ kind: UIHandoff.Kind,
+                                               _ address: String,
                                                _ error: Int32) -> Bool {
-    kind == .restart && error == ENOENT
+    guard case .unix = parseRPCAddress(address) else { return false }
+    return kind == .restart && error == ENOENT
 }
 
 /// Applies Neovim UI redraw events, producing grid snapshots on flush.

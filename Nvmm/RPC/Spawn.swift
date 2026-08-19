@@ -4,7 +4,7 @@
 //
 //  Low-level process and socket plumbing for the RPC transport: launching a
 //  child process with redirected standard streams (posix_spawn), creating
-//  pipes, connecting a Unix domain socket, and shell-quoting an argument.
+//  pipes, connecting Unix or TCP sockets, and shell-quoting an argument.
 //
 //  These are pure syscall wrappers with no isolation requirements, so they are
 //  marked nonisolated and can be called from the NeovimProcess actor.
@@ -33,8 +33,40 @@ nonisolated func spawnShellQuoteArg(_ value: String) -> String {
     return quoted
 }
 
+/// A Neovim server address accepted by the connection UI.
+nonisolated enum RPCAddress: Sendable, Equatable {
+    case unix(path: String)
+    case tcp(host: String, port: UInt16)
+}
+
+/// Treats `host:port` and `[IPv6]:port` as TCP. Every other value remains a
+/// Unix socket path, which preserves support for relative socket paths.
+nonisolated func parseRPCAddress(_ value: String) -> RPCAddress {
+    if value.hasPrefix("/") { return .unix(path: value) }
+
+    if value.first == "[", let closing = value.firstIndex(of: "]") {
+        let host = String(value[value.index(after: value.startIndex)..<closing])
+        let suffix = value[value.index(after: closing)...]
+        if suffix.first == ":", let port = UInt16(suffix.dropFirst()), port > 0,
+           !host.isEmpty {
+            return .tcp(host: host, port: port)
+        }
+    } else if let separator = value.lastIndex(of: ":") {
+        let host = String(value[..<separator])
+        let portText = value[value.index(after: separator)...]
+        if !host.contains(":"), let port = UInt16(portText), port > 0,
+           !host.isEmpty {
+            return .tcp(host: host, port: port)
+        }
+    }
+
+    return .unix(path: value)
+}
+
 /// Process and socket plumbing for the RPC transport.
 nonisolated enum Spawn {
+    private static let tcpConnectTimeoutMilliseconds: Int32 = 5_000
+
     /// A child process's standard streams. A stream left at -1 is inherited
     /// from the parent; otherwise the descriptor is duplicated onto the child's
     /// standard input (0), output (1), or error (2).
@@ -171,10 +203,17 @@ nonisolated enum Spawn {
         }
     }
 
-    /// Connects a new stream socket to a Unix domain socket address.
+    /// Connects to a Neovim server at a Unix socket path or TCP address.
     /// - Returns: A connected descriptor and a zero error code, or -1 and an
     ///   errno on failure.
-    static func connectUnixSocket(_ address: String) -> (fd: Int32, error: Int32) {
+    static func connectRPCAddress(_ address: RPCAddress) -> (fd: Int32, error: Int32) {
+        switch address {
+        case .unix(let path): return connectUnixSocket(path)
+        case .tcp(let host, let port): return connectTCPSocket(host: host, port: port)
+        }
+    }
+
+    private static func connectUnixSocket(_ address: String) -> (fd: Int32, error: Int32) {
         let pathCapacity = MemoryLayout.size(ofValue: sockaddr_un().sun_path)
         let bytes = Array(address.utf8)
         if bytes.count >= pathCapacity {
@@ -205,5 +244,75 @@ nonisolated enum Spawn {
             return (-1, failure)
         }
         return (fd, 0)
+    }
+
+    private static func connectTCPSocket(
+        host: String, port: UInt16
+    ) -> (fd: Int32, error: Int32) {
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+
+        var result: UnsafeMutablePointer<addrinfo>?
+        let status = host.withCString { host in
+            String(port).withCString { service in
+                getaddrinfo(host, service, &hints, &result)
+            }
+        }
+        guard status == 0, let first = result else {
+            return (-1, EHOSTUNREACH)
+        }
+        defer { freeaddrinfo(first) }
+
+        var candidate: UnsafeMutablePointer<addrinfo>? = first
+        var failure = ECONNREFUSED
+        while let info = candidate {
+            let value = info.pointee
+            let fd = socket(value.ai_family, value.ai_socktype, value.ai_protocol)
+            if fd != -1 {
+                _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
+                let flags = fcntl(fd, F_GETFL, 0)
+                if flags == -1 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1 {
+                    failure = errno
+                    close(fd)
+                } else if connectTCP(fd, address: value) == 0 {
+                    return (fd, 0)
+                } else {
+                    failure = errno
+                    close(fd)
+                }
+            } else {
+                failure = errno
+            }
+            candidate = value.ai_next
+        }
+        return (-1, failure)
+    }
+
+    /// Completes a nonblocking TCP connect within the startup deadline.
+    private static func connectTCP(_ fd: Int32, address: addrinfo) -> Int32 {
+        if Darwin.connect(fd, address.ai_addr, address.ai_addrlen) == 0 {
+            return 0
+        }
+        guard errno == EINPROGRESS else { return -1 }
+
+        var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+        let waited = poll(&descriptor, 1, tcpConnectTimeoutMilliseconds)
+        if waited == 0 {
+            errno = ETIMEDOUT
+            return -1
+        }
+        guard waited > 0 else { return -1 }
+
+        var error: Int32 = 0
+        var length = socklen_t(MemoryLayout<Int32>.size)
+        guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) == 0 else {
+            return -1
+        }
+        if error != 0 {
+            errno = error
+            return -1
+        }
+        return 0
     }
 }

@@ -804,8 +804,8 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
             } catch {
                 Log.rpc.error("Could not start Neovim: \(error)")
                 let code = (error as? NeovimSpawnError)?.code
-                if let kind = self?.lastHandoffKind, let code,
-                   handoffConnectionErrorIsStale(kind, code) {
+                if let kind = self?.lastHandoffKind, let address = self?.remoteAddress,
+                   let code, handoffConnectionErrorIsStale(kind, address, code) {
                     // A `:restart` whose successor Neovim abandoned: it removed
                     // the socket, so the connect fails with `ENOENT`. Not a
                     // user-visible error — just close the window.

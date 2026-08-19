@@ -337,13 +337,13 @@ actor NeovimProcess {
         attach(readFD: read.pipe.readEnd, writeFD: write.pipe.writeEnd)
     }
 
-    /// Connects to an existing Neovim process over a Unix domain socket.
+    /// Connects to an existing Neovim process over a Unix or TCP socket.
     /// - Throws: `NeovimSpawnError` if the socket could not be connected.
     func connect(_ address: String) throws {
         guard state == .idle else {
             throw NeovimSpawnError(code: EISCONN, operation: "connect")
         }
-        let socket = Spawn.connectUnixSocket(address)
+        let socket = Spawn.connectRPCAddress(parseRPCAddress(address))
         if socket.error != 0 {
             throw NeovimSpawnError(code: socket.error, operation: "connect")
         }

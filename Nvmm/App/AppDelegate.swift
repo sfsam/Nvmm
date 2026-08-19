@@ -134,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = String(localized: "Connect to Running Neovim")
         alert.informativeText = String(localized:
-            "Enter the Unix socket path of a running Neovim server.")
+            "Enter a Neovim server address: a Unix socket path or host:port.")
         alert.addButton(withTitle: String(localized: "Connect"))
         alert.addButton(withTitle: String(localized: "Cancel"))
 
@@ -145,7 +145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let lineHeight = NSLayoutManager().defaultLineHeight(for: font)
         field.frame.size.height = ceil(field.fittingSize.height + 2 * lineHeight)
         field.maximumNumberOfLines = 3
-        field.placeholderString = "/tmp/nvim.sock"
+        field.placeholderString = "/tmp/nvim.sock or localhost:6666"
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
 

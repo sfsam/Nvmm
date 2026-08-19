@@ -645,10 +645,10 @@ final class UIControllerTests: XCTestCase {
 
     func testRestartEventRecordsServerHandoff() {
         let controller = UIController()
-        _ = controller.redraw([["restart", "/tmp/nvim-restart.sock"]])
+        _ = controller.redraw([["restart", "127.0.0.1:6666"]])
         let handoff = controller.handoff
         XCTAssertEqual(handoff?.kind, .restart)
-        XCTAssertEqual(handoff?.address, "/tmp/nvim-restart.sock")
+        XCTAssertEqual(handoff?.address, "127.0.0.1:6666")
     }
 
     func testConnectEventRecordsServerHandoff() {
@@ -705,9 +705,14 @@ final class UIControllerTests: XCTestCase {
     }
 
     func testMissingRestartSocketIsAnAbandonedHandoff() {
-        XCTAssertTrue(handoffConnectionErrorIsStale(.restart, ENOENT))
-        XCTAssertFalse(handoffConnectionErrorIsStale(.connect, ENOENT))
-        XCTAssertFalse(handoffConnectionErrorIsStale(.restart, ECONNREFUSED))
+        XCTAssertTrue(handoffConnectionErrorIsStale(
+            .restart, "/tmp/nvim.sock", ENOENT))
+        XCTAssertFalse(handoffConnectionErrorIsStale(
+            .connect, "/tmp/nvim.sock", ENOENT))
+        XCTAssertFalse(handoffConnectionErrorIsStale(
+            .restart, "localhost:6666", ENOENT))
+        XCTAssertFalse(handoffConnectionErrorIsStale(
+            .restart, "/tmp/nvim.sock", ECONNREFUSED))
     }
 
     // MARK: Live attach
