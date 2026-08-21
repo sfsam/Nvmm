@@ -23,7 +23,8 @@ nonisolated struct RPCResourceLimits: Sendable {
 
     var maximumGridWidth = Int(Int16.max)
     var maximumGridHeight = Int(Int16.max)
-    var maximumCellTextBytes = 24
+    // Neovim's MAX_SCHAR_SIZE is 32 bytes including the terminating NUL.
+    var maximumCellTextBytes = 31
     var maximumReverseRequests = 8
     var maximumRetainedBells = 16
     var maximumProgressEntries = 1_024

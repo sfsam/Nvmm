@@ -436,8 +436,39 @@ final class MessagePackTests: XCTestCase {
         XCTAssertFalse(unpacker.failed)
     }
 
+    func testGridLineStreamsComposedEmojiCell() {
+        let text = "👨‍👩‍👧‍👦"
+        let cell: MPValue = .array([.string(text), .int(0)])
+        let maximumCell: MPValue = .array([
+            .string(String(repeating: "x", count: 31)),
+        ])
+        let event: MPValue = .array([
+            .string("grid_line"),
+            .array([.int(1), .int(0), .int(0),
+                    .array([cell, maximumCell]),
+                    .bool(false)]),
+        ])
+        var writer = MessagePackWriter()
+        writer.encodeNotification(method: "redraw", arguments: [event])
+
+        var receivedCells: [MPValue] = []
+        var unpacker = MessagePackUnpacker()
+        for byte in writer.bytes {
+            unpacker.feed(CollectionOfOne(byte))
+            _ = unpacker.unpack(redrawItem: {
+                if case .gridLineCell(let value) = $0 {
+                    receivedCells.append(value)
+                }
+            })
+        }
+
+        XCTAssertEqual(text.utf8.count, 25)
+        XCTAssertEqual(receivedCells, [cell, maximumCell])
+        XCTAssertFalse(unpacker.failed)
+    }
+
     func testGridLineCellTextLimitFailsBeforeRetainingTheCell() {
-        let text = String(repeating: "x", count: 25)
+        let text = String(repeating: "x", count: 32)
         let event: MPValue = .array([
             .string("grid_line"),
             .array([.int(1), .int(0), .int(0),
