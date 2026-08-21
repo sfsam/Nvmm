@@ -467,19 +467,54 @@ final class MessagePackTests: XCTestCase {
         XCTAssertFalse(unpacker.failed)
     }
 
-    func testGridLineCellTextLimitFailsBeforeRetainingTheCell() {
+    func testOversizedGridLineCellIsDiscardedWithoutLosingFraming() {
         let text = String(repeating: "x", count: 32)
+        let validCell: MPValue = .array([.string("y")])
         let event: MPValue = .array([
             .string("grid_line"),
             .array([.int(1), .int(0), .int(0),
-                    .array([.array([.string(text), .int(0)])]),
+                    .array([.array([.string(text), .int(0)]), validCell]),
+                    .bool(false)]),
+        ])
+        var writer = MessagePackWriter()
+        writer.encodeNotification(method: "redraw", arguments: [event])
+        writer.encodeNotification(method: "after", arguments: [.int(7)])
+
+        var cells: [MPValue] = []
+        var messages: [MPValue] = []
+        var unpacker = MessagePackUnpacker()
+        for byte in writer.bytes {
+            unpacker.feed(CollectionOfOne(byte))
+            if let message = unpacker.unpack(redrawItem: {
+                if case .gridLineCell(let cell) = $0 { cells.append(cell) }
+            }) {
+                messages.append(message)
+            }
+        }
+
+        XCTAssertEqual(cells, [
+            .array([.invalid, .int(0)]), validCell,
+        ])
+        XCTAssertEqual(messages.last, [2, "after", [7]])
+        XCTAssertFalse(unpacker.failed)
+    }
+
+    func testGridLineCellAboveGeneralStringLimitFails() {
+        var limits = RPCResourceLimits.production
+        limits.maximumCellTextBytes = 1
+        limits.maximumStringBytes = 3
+        let event: MPValue = .array([
+            .string("grid_line"),
+            .array([.int(1), .int(0), .int(0),
+                    .array([.array([.string("xxxx"), .int(0)])]),
                     .bool(false)]),
         ])
         var writer = MessagePackWriter()
         writer.encodeNotification(method: "redraw", arguments: [event])
 
-        var unpacker = MessagePackUnpacker()
+        var unpacker = MessagePackUnpacker(limits: limits)
         unpacker.feed(writer.bytes)
+
         XCTAssertNil(unpacker.unpack(redrawItem: { _ in }))
         XCTAssertTrue(unpacker.failed)
     }

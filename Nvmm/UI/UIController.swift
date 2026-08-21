@@ -286,8 +286,18 @@ nonisolated final class UIController {
     func applyStreamingGridLineCell(_ object: MPValue) {
         guard var line = activeGridLine,
               case .array(let fields) = object,
-              let text = fields.first?.stringValue,
-              text.utf8.count <= limits.maximumCellTextBytes else {
+              let first = fields.first else {
+            activeGridLine = nil
+            return
+        }
+        let text: String
+        switch first {
+        case .string(let value)
+            where value.utf8.count <= limits.maximumCellTextBytes:
+            text = value
+        case .invalid:
+            text = "\u{fffd}"
+        default:
             activeGridLine = nil
             return
         }

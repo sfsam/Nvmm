@@ -389,7 +389,8 @@ nonisolated struct MessagePackUnpacker {
         }
         var kind: Kind
         var remaining: Int
-        var bytes: [UInt8]
+        // Nil discards a recoverable oversized grid-cell string.
+        var bytes: [UInt8]?
     }
 
     /// Set once a limit above is exceeded. The caller stops decoding and closes
@@ -577,7 +578,8 @@ nonisolated struct MessagePackUnpacker {
         let available = storage.count - offset
         let count = min(available, current.remaining)
         if count > 0 {
-            current.bytes.append(contentsOf: storage[offset..<(offset + count)])
+            current.bytes?.append(
+                contentsOf: storage[offset..<(offset + count)])
             offset += count
             current.remaining -= count
             valueBytes += count
@@ -590,11 +592,14 @@ nonisolated struct MessagePackUnpacker {
         payload = nil
         switch current.kind {
         case .string:
-            return .string(String(decoding: current.bytes, as: UTF8.self))
+            guard let bytes = current.bytes else { return .invalid }
+            return .string(String(decoding: bytes, as: UTF8.self))
         case .binary:
-            return .binary(current.bytes)
+            guard let bytes = current.bytes else { return .invalid }
+            return .binary(bytes)
         case .ext(let type):
-            return .ext(type: type, payload: current.bytes)
+            guard let bytes = current.bytes else { return .invalid }
+            return .ext(type: type, payload: bytes)
         }
     }
 
@@ -726,16 +731,16 @@ nonisolated struct MessagePackUnpacker {
             failed = true
             return nil
         }
+        let isCellText: Bool
         let maximum: Int
         switch kind {
         case .string:
-            if frames.last?.role == .gridLineCell,
-               frames.last?.values.isEmpty == true {
-                maximum = limits.maximumCellTextBytes
-            } else {
-                maximum = limits.maximumStringBytes
-            }
-        case .binary, .ext: maximum = limits.maximumBinaryBytes
+            isCellText = frames.last?.role == .gridLineCell &&
+                frames.last?.values.isEmpty == true
+            maximum = limits.maximumStringBytes
+        case .binary, .ext:
+            isCellText = false
+            maximum = limits.maximumBinaryBytes
         }
         guard count <= maximum, valueBytes <= limits.maximumValueBytes - count
         else {
@@ -748,6 +753,9 @@ nonisolated struct MessagePackUnpacker {
             case .binary: return .value(.binary([]))
             case .ext(let type): return .value(.ext(type: type, payload: []))
             }
+        }
+        if isCellText, count > limits.maximumCellTextBytes {
+            return .payload(Payload(kind: kind, remaining: count, bytes: nil))
         }
         var bytes: [UInt8] = []
         bytes.reserveCapacity(count)

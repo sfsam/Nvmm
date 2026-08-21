@@ -293,6 +293,21 @@ final class UIControllerTests: XCTestCase {
         XCTAssertEqual(controller.globalGrid.cells[1].text, "")
     }
 
+    func testRejectedCellTextPreservesGridAlignment() {
+        let controller = UIController()
+        _ = controller.redraw([
+            ["grid_resize", [1, 4, 1]],
+            ["grid_line", [1, 0, 0, [
+                [.invalid, 0, 2], ["x"], ["y"],
+            ]]],
+            ["flush", []],
+        ])
+
+        XCTAssertEqual(
+            controller.globalGrid.cells.map(\.text),
+            ["\u{fffd}", "\u{fffd}", "x", "y"])
+    }
+
     func testGridLineWithoutInitialHighlightIsIgnored() {
         let controller = UIController()
         _ = controller.redraw([
