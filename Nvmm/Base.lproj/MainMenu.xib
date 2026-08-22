@@ -165,6 +165,13 @@
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <menu key="submenu" title="Font" id="aXa-aM-Jaq">
                                     <items>
+                                        <menuItem title="Show Fonts" id="ur4-2b-fm8">
+                                            <modifierMask key="keyEquivalentModifierMask"/>
+                                            <connections>
+                                                <action selector="orderFrontFontPanel:" target="-1" id="G6h-KX-RLk"/>
+                                            </connections>
+                                        </menuItem>
+                                        <menuItem isSeparatorItem="YES" id="m8o-Bo-RCB"/>
                                         <menuItem title="Bigger" keyEquivalent="+" id="Ptp-SP-VEL">
                                             <connections>
                                                 <action selector="zoomIn:" target="-1" id="Uc7-di-UnL"/>
