@@ -14,6 +14,29 @@ import XCTest
 
 final class GuifontTests: XCTestCase {
 
+    func testFontPanelSelectionProducesConcreteSpec() {
+        XCTAssertEqual(
+            guifontSpec(fontName: "Menlo-Regular", pointSize: 13),
+            "Menlo-Regular:h13")
+        XCTAssertEqual(
+            guifontSpec(fontName: "Menlo-Regular", pointSize: 13.75),
+            "Menlo-Regular:h13")
+    }
+
+    func testInvalidFontPanelSelectionIsRejected() {
+        XCTAssertNil(guifontSpec(fontName: "", pointSize: 13))
+        XCTAssertNil(guifontSpec(fontName: "Menlo-Regular", pointSize: .nan))
+    }
+
+    func testFontPanelSelectionIsClampedToSupportedSize() {
+        XCTAssertEqual(
+            guifontSpec(fontName: "Menlo-Regular", pointSize: 0),
+            "Menlo-Regular:h1")
+        XCTAssertEqual(
+            guifontSpec(fontName: "Menlo-Regular", pointSize: 513),
+            "Menlo-Regular:h512")
+    }
+
     func testEmptyStringYieldsNoEntries() {
         XCTAssertEqual(parseGuifont("", defaultSize: 15), [])
     }

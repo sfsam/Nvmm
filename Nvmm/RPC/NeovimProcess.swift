@@ -539,6 +539,10 @@ actor NeovimProcess {
             notify("nvim_echo",
                    [.array([.array([.string(text)])]), true,
                     .map([(.string("err"), true)])])
+        case .setGlobalOption(let name, let value):
+            notify("nvim_set_option_value",
+                   [.string(name), .string(value),
+                    .map([(.string("scope"), .string("global"))])])
         case .scrollToLine(let line):
             // `zt` rather than `winrestview`: it redraws through Neovim's own
             // scrolling, so wrapped lines, folds, and `smoothscroll` are

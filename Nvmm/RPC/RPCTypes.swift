@@ -39,6 +39,8 @@ nonisolated enum NvimCommand: Sendable {
         reply: @MainActor @Sendable (UndoRedoOutcome) -> Void)
     /// An error message written to Neovim via `nvim_echo` (`err: true`).
     case errorWriteln(String)
+    /// Sets one global Neovim option through `nvim_set_option_value`.
+    case setGlobalOption(name: String, value: String)
     /// Put the given one-based line at the top of the window, for the
     /// scrollbar. Carries a line rather than a screen offset because that is
     /// what the scrollbar knows: Neovim reports its viewport in buffer lines.

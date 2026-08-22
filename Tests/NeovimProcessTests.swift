@@ -415,6 +415,28 @@ final class NeovimProcessTests: XCTestCase {
 
     // MARK: Controlled-peer cases
 
+    func testSetGlobalOptionUsesOptionAPI() async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+
+        await process.perform(.setGlobalOption(
+            name: "guifont", value: "Menlo-Regular:h13"))
+
+        let message = try readMessage(pair.peer)
+        let options: MPValue = .map([
+            (.string("scope"), .string("global")),
+        ])
+        XCTAssertEqual(message, .array([
+            .int(2), .string("nvim_set_option_value"),
+            .array([
+                .string("guifont"), .string("Menlo-Regular:h13"), options,
+            ]),
+        ]))
+        await process.disconnect()
+    }
+
     private func assertNewDocumentCommand(
         inBuffers: Bool, expectedCommand: String
     ) async throws {

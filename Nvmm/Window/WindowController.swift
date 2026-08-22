@@ -96,7 +96,8 @@ nonisolated func transportDisconnectDescription(
     }
 }
 
-final class WindowController: NSWindowController, NSWindowDelegate, QuitSession {
+final class WindowController: NSWindowController, NSWindowDelegate,
+                              NSFontChanging, QuitSession {
     // MARK: - State
 
     private let gridView = GridView(frame: .zero)
@@ -204,9 +205,18 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     private let defaultFontSize: CGFloat = 15
 
     // Font options last applied, so metrics are rebuilt only on a change.
+    // Empty is Neovim's default and the only safe restoration if the first
+    // value this external UI observes is the action value `*`.
     private var currentGuifont = ""
     private var currentGuifontwide = ""
     private var currentLinespace = 0
+    // A wildcard can span several grid flushes. Present its panel once.
+    private var fontPanelShownForWildcard = false
+    // Startup may report the wildcard before the editor window is visible.
+    private var pendingFontPanelPresentation = false
+    // The panel is modeless, so retain its latest selection while Neovim
+    // asynchronously applies each change.
+    private var fontPanelFont: NSFont?
 
     // Constraints kept so they can be adjusted without rebuilding the layout:
     // the min-size pair on a font change, the trailing inset as the scrollbar
@@ -1100,6 +1110,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         gridView.displayIfNeeded()
         showWindow(nil)
         saveFrame()
+        presentPendingFontPanel()
     }
 
     // MARK: - Applying window state
@@ -1292,12 +1303,20 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
     /// Rebuilds font and row metrics when a Neovim font option changes.
     private func applyFontOptions(guifont: String, guifontwide: String,
                                   linespace: Int) {
-        let primaryChanged = guifont != currentGuifont
+        var resolvedGuifont = guifont
+        if guifont == "*" {
+            resolvedGuifont = currentGuifont
+            handleGuifontWildcard()
+        } else {
+            fontPanelShownForWildcard = false
+        }
+
+        let primaryChanged = resolvedGuifont != currentGuifont
         let wideChanged = guifontwide != currentGuifontwide
         let spacingChanged = linespace != currentLinespace
         guard primaryChanged || wideChanged || spacingChanged else { return }
 
-        currentGuifont = guifont
+        currentGuifont = resolvedGuifont
         currentGuifontwide = guifontwide
         currentLinespace = linespace
 
@@ -1314,7 +1333,7 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
             descriptor = CTFontCopyFontDescriptor(current.regular)
             size = current.unscaledSize
         } else {
-            (descriptor, size) = resolveFont(guifont)
+            (descriptor, size) = resolveFont(resolvedGuifont)
         }
         let wide = resolveWideFont(guifontwide, defaultSize: size)
         let font = renderManager.fontManager.family(
@@ -1322,6 +1341,61 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
             scaleFactor: screen.backingScaleFactor,
             wideDescriptor: wide?.0, wideSize: wide?.1)
         setFont(font)
+        if window?.isMainWindow == true {
+            updateFontManagerSelection()
+        }
+    }
+
+    /// Handles one `guifont=*` episode and restores the concrete option value.
+    private func handleGuifontWildcard() {
+        guard !fontPanelShownForWildcard else { return }
+        fontPanelShownForWildcard = true
+        pendingFontPanelPresentation = true
+        enqueue(.setGlobalOption(name: "guifont", value: currentGuifont))
+        presentPendingFontPanel()
+    }
+
+    /// Opens the modeless panel only after its editor window is on screen.
+    private func presentPendingFontPanel() {
+        guard pendingFontPanelPresentation, hasShownWindow else { return }
+        pendingFontPanelPresentation = false
+        updateFontManagerSelection()
+        NSFontManager.shared.orderFrontFontPanel(self)
+    }
+
+    /// Returns the active regular face at its user-facing, unscaled point size.
+    private func currentPanelFont() -> NSFont? {
+        guard let family = gridView.fontFamily else { return nil }
+        let descriptor = CTFontCopyFontDescriptor(family.regular)
+        return NSFont(descriptor: descriptor as NSFontDescriptor,
+                      size: family.unscaledSize)
+    }
+
+    /// Seeds the process-wide font manager from this window's current font.
+    private func updateFontManagerSelection() {
+        guard let font = currentPanelFont() else { return }
+        fontPanelFont = font
+        NSFontManager.shared.setSelectedFont(font, isMultiple: false)
+    }
+
+    /// Receives changes from the modeless system font panel. Neovim remains
+    /// authoritative: the selected value is applied when `option_set` returns.
+    func changeFont(_ sender: NSFontManager?) {
+        guard let manager = sender,
+              let oldFont = fontPanelFont ?? currentPanelFont()
+        else { return }
+        let font = manager.convert(oldFont)
+        guard let spec = guifontSpec(fontName: font.fontName,
+                                     pointSize: font.pointSize)
+        else { return }
+        fontPanelFont = font
+        enqueue(.setGlobalOption(name: "guifont", value: spec))
+    }
+
+    func validModesForFontPanel(
+        _ fontPanel: NSFontPanel
+    ) -> NSFontPanel.ModeMask {
+        [.collection, .face, .size]
     }
 
     /// Resolves a `guifont` list to a descriptor and size: the first installed
@@ -1452,6 +1526,10 @@ final class WindowController: NSWindowController, NSWindowDelegate, QuitSession 
         enqueue(.focus(true))
         window?.makeFirstResponder(gridView)
         gridView.setActive()
+    }
+
+    func windowDidBecomeMain(_ notification: Notification) {
+        updateFontManagerSelection()
     }
 
     func windowDidResignKey(_ notification: Notification) {
