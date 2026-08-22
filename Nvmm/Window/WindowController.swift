@@ -1460,10 +1460,16 @@ final class WindowController: NSWindowController, NSWindowDelegate,
             NSSound.beep()
             return
         }
+        let name = CTFontCopyPostScriptName(font.regular) as String
+        guard let spec = guifontSpec(fontName: name, pointSize: size) else {
+            return
+        }
 
         let resized = renderManager.fontManager.resized(
             font, size: size, scaleFactor: window.backingScaleFactor)
         setFont(resized)
+        updateFontManagerSelection()
+        enqueue(.setGlobalOption(name: "guifont", value: spec))
     }
 
     @IBAction func zoomIn(_ sender: Any?) { performZoom(1) }
