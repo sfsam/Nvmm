@@ -237,23 +237,25 @@ final class RenderTests: XCTestCase {
             device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
         })
 
+        let outputDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm, width: width, height: height,
+            mipmapped: false)
+        outputDescriptor.usage = [.renderTarget]
+        outputDescriptor.storageMode = .shared
+        let output = try XCTUnwrap(device.makeTexture(
+            descriptor: outputDescriptor))
+        // The pass clears on load, so both draws can share one target.
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = output
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+
         func render(_ source: glyph_data) throws -> [UInt8] {
             var glyph = source
             let glyphBuffer = try XCTUnwrap(withUnsafeBytes(of: &glyph) {
                 device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
             })
-            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .bgra8Unorm, width: width, height: height,
-                mipmapped: false)
-            descriptor.usage = [.renderTarget]
-            descriptor.storageMode = .shared
-            let output = try XCTUnwrap(device.makeTexture(
-                descriptor: descriptor))
-            let pass = MTLRenderPassDescriptor()
-            pass.colorAttachments[0].texture = output
-            pass.colorAttachments[0].loadAction = .clear
-            pass.colorAttachments[0].storeAction = .store
-            pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
             let command = try XCTUnwrap(
                 context.commandQueue.makeCommandBuffer())
             let encoder = try XCTUnwrap(command.makeRenderCommandEncoder(

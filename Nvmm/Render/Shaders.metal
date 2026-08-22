@@ -272,13 +272,10 @@ glyph_render(uint vertex_id [[vertex_id]],
     float2 glyph_offset_raw = uniforms.baseline + glyph_position + vertex_offset;
 
     // Limit ink overhang to one neighboring cell or row on each side.
-    float glyph_min_x = -uniforms.cell_pixel_size.x;
-    float glyph_max_x = uniforms.cell_pixel_size.x * (glyph.cell_width + 1);
-    float glyph_min_y = -uniforms.cell_pixel_size.y;
-    float glyph_max_y = uniforms.cell_pixel_size.y * 2.0;
-    float glyph_x = clamp(glyph_offset_raw.x, glyph_min_x, glyph_max_x);
-    float glyph_y = clamp(glyph_offset_raw.y, glyph_min_y, glyph_max_y);
-    float2 glyph_offset = float2(glyph_x, glyph_y);
+    float2 glyph_max = uniforms.cell_pixel_size
+        * float2(float(glyph.cell_width) + 1.0, 2.0);
+    float2 glyph_offset = clamp(glyph_offset_raw,
+                                -uniforms.cell_pixel_size, glyph_max);
 
     // If the glyph was cropped, crop the texture quad to match.
     float2 texture_offset = vertex_offset - (glyph_offset_raw - glyph_offset);

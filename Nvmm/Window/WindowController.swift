@@ -1381,8 +1381,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     /// Receives changes from the modeless system font panel. Neovim remains
     /// authoritative: the selected value is applied when `option_set` returns.
     func changeFont(_ sender: NSFontManager?) {
-        guard let manager = sender,
-              let oldFont = fontPanelFont ?? currentPanelFont()
+        guard let manager = sender, let oldFont = fontPanelFont
         else { return }
         let font = manager.convert(oldFont)
         guard let spec = guifontSpec(fontName: font.fontName,

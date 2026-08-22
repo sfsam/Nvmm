@@ -18,16 +18,19 @@ nonisolated struct GuifontEntry: Sendable, Equatable {
     var size: CGFloat
 }
 
+/// The integer point sizes a `:h` suffix may carry.
+private nonisolated let guifontSizeRange = 1...512
+
 /// Returns the concrete `guifont` value for a font-panel selection.
 ///
 /// AppKit supplies a PostScript font name, which CoreText accepts directly.
-/// The panel permits fractional and out-of-range sizes, but Nvmm's current
-/// `:h` parser accepts integer points from 1 through 512. Convert and clamp the
-/// selection to that supported representation.
+/// The panel permits fractional and out-of-range sizes, so convert and clamp
+/// the selection to a size the `:h` parser accepts.
 nonisolated func guifontSpec(fontName: String,
                              pointSize: CGFloat) -> String? {
     guard !fontName.isEmpty, pointSize.isFinite else { return nil }
-    let size = Int(min(max(pointSize, 1), 512))
+    let size = Int(min(max(pointSize, CGFloat(guifontSizeRange.lowerBound)),
+                       CGFloat(guifontSizeRange.upperBound)))
     return "\(fontName):h\(size)"
 }
 
@@ -113,7 +116,7 @@ private nonisolated func makeGuifontEntry(_ fontstr: ArraySlice<Character>,
         }
     }
 
-    if validSize, (1...512).contains(size), index != 0,
+    if validSize, guifontSizeRange.contains(size), index != 0,
        chars[index] == "h", chars[index - 1] == ":" {
         return GuifontEntry(name: String(chars[0..<(index - 1)]),
                             size: CGFloat(size))
