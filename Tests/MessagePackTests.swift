@@ -502,11 +502,12 @@ final class MessagePackTests: XCTestCase {
     func testGridLineCellAboveGeneralStringLimitFails() {
         var limits = RPCResourceLimits.production
         limits.maximumCellTextBytes = 1
-        limits.maximumStringBytes = 3
+        limits.maximumStringBytes = 10
+        let text = String(repeating: "x", count: 11)
         let event: MPValue = .array([
             .string("grid_line"),
             .array([.int(1), .int(0), .int(0),
-                    .array([.array([.string("xxxx"), .int(0)])]),
+                    .array([.array([.string(text), .int(0)])]),
                     .bool(false)]),
         ])
         var writer = MessagePackWriter()
@@ -515,7 +516,11 @@ final class MessagePackTests: XCTestCase {
         var unpacker = MessagePackUnpacker(limits: limits)
         unpacker.feed(writer.bytes)
 
-        XCTAssertNil(unpacker.unpack(redrawItem: { _ in }))
+        var reachedGridLine = false
+        XCTAssertNil(unpacker.unpack(redrawItem: {
+            if case .gridLineStart = $0 { reachedGridLine = true }
+        }))
+        XCTAssertTrue(reachedGridLine)
         XCTAssertTrue(unpacker.failed)
     }
 
