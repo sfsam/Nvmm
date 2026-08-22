@@ -199,6 +199,109 @@ final class RenderTests: XCTestCase {
                        glyph.rect.texture_origin)
     }
 
+    func testGlyphPipelineBoundsOverhangToAdjacentCells() throws {
+        try requireDevice()
+        let context = try RenderContextManager().defaultRenderContext()
+        let device = context.device
+        let width = 32
+        let height = 32
+
+        func atlas(_ format: MTLPixelFormat) throws -> MTLTexture {
+            let descriptor = MTLTextureDescriptor()
+            descriptor.textureType = .type2DArray
+            descriptor.pixelFormat = format
+            descriptor.width = 32
+            descriptor.height = 32
+            descriptor.arrayLength = 1
+            descriptor.usage = [.shaderRead]
+            descriptor.storageMode = .shared
+            return try XCTUnwrap(device.makeTexture(descriptor: descriptor))
+        }
+
+        let mask = try atlas(.r8Unorm)
+        let color = try atlas(.rgba8Unorm)
+        let coverage = [UInt8](repeating: 255, count: 32 * 32)
+        mask.replace(
+            region: MTLRegionMake2D(0, 0, 32, 32), mipmapLevel: 0,
+            slice: 0, withBytes: coverage, bytesPerRow: 32,
+            bytesPerImage: 0)
+
+        var uniforms = uniform_data(
+            pixel_size: SIMD2<Float>(2.0 / Float(width),
+                                     -2.0 / Float(height)),
+            cell_pixel_size: SIMD2<Float>(8, 8),
+            cell_size: SIMD2<Float>(1, -1), baseline: .zero,
+            cursor_position: .zero, cursor_color: 0,
+            cursor_line_width: 0, cursor_cell_width: 1, grid_width: 4)
+        let uniformBuffer = try XCTUnwrap(withUnsafeBytes(of: &uniforms) {
+            device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
+        })
+
+        func render(_ source: glyph_data) throws -> [UInt8] {
+            var glyph = source
+            let glyphBuffer = try XCTUnwrap(withUnsafeBytes(of: &glyph) {
+                device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
+            })
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm, width: width, height: height,
+                mipmapped: false)
+            descriptor.usage = [.renderTarget]
+            descriptor.storageMode = .shared
+            let output = try XCTUnwrap(device.makeTexture(
+                descriptor: descriptor))
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = output
+            pass.colorAttachments[0].loadAction = .clear
+            pass.colorAttachments[0].storeAction = .store
+            pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+            let command = try XCTUnwrap(
+                context.commandQueue.makeCommandBuffer())
+            let encoder = try XCTUnwrap(command.makeRenderCommandEncoder(
+                descriptor: pass))
+            encoder.setRenderPipelineState(context.glyphPipeline)
+            encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 0)
+            encoder.setVertexBuffer(glyphBuffer, offset: 0, index: 1)
+            encoder.setFragmentTexture(mask, index: 0)
+            encoder.setFragmentTexture(color, index: 1)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
+                                   vertexCount: 4, instanceCount: 1)
+            encoder.endEncoding()
+            command.commit()
+            command.waitUntilCompleted()
+            XCTAssertEqual(command.status, .completed)
+
+            var pixels = [UInt8](repeating: 0, count: width * height * 4)
+            output.getBytes(&pixels, bytesPerRow: width * 4,
+                            from: MTLRegionMake2D(0, 0, width, height),
+                            mipmapLevel: 0)
+            return pixels
+        }
+        func alpha(_ pixels: [UInt8], _ x: Int, _ y: Int) -> UInt8 {
+            pixels[(y * width + x) * 4 + 3]
+        }
+
+        let rightAndVertical = try render(glyph_data(
+            grid_position: SIMD2<Int16>(0, 2), cell_width: 1,
+            foreground_color: UInt32.max, atlas: 0,
+            rect: glyph_rect(
+                size: SIMD2<Int16>(24, 32),
+                position: SIMD2<Int16>(0, -12), texture_origin: .zero)))
+        XCTAssertGreaterThan(alpha(rightAndVertical, 14, 10), 0)
+        XCTAssertEqual(alpha(rightAndVertical, 18, 10), 0)
+        XCTAssertGreaterThan(alpha(rightAndVertical, 4, 10), 0)
+        XCTAssertEqual(alpha(rightAndVertical, 4, 6), 0)
+        XCTAssertGreaterThan(alpha(rightAndVertical, 4, 30), 0)
+
+        let left = try render(glyph_data(
+            grid_position: SIMD2<Int16>(2, 0), cell_width: 1,
+            foreground_color: UInt32.max, atlas: 0,
+            rect: glyph_rect(
+                size: SIMD2<Int16>(24, 8),
+                position: SIMD2<Int16>(-12, 0), texture_origin: .zero)))
+        XCTAssertGreaterThan(alpha(left, 10, 4), 0)
+        XCTAssertEqual(alpha(left, 6, 4), 0)
+    }
+
     func testRasterizerSeparatesTextAndColorGlyphs() {
         let family = FontManager().family(
             descriptor: FontManager.defaultDescriptor(), size: 15,
