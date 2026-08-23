@@ -90,35 +90,27 @@ private nonisolated func findUnescapedComma(_ chars: [Character],
 private nonisolated func makeGuifontEntry(_ fontstr: ArraySlice<Character>,
                                           defaultSize: CGFloat) -> GuifontEntry {
     let chars = Array(fontstr)
-    var index = chars.count
-    var multiply = 1
-    var size = 0
-    var validSize = true
 
-    // Accumulate a run of trailing ASCII digits, least significant first.
-    while index > 0 {
-        index -= 1
-        let c = chars[index]
-        if c.isASCII, c.isNumber, let digit = c.wholeNumberValue {
-            let (part, partOverflow) = multiply.multipliedReportingOverflow(
-                by: digit)
-            let (nextSize, sizeOverflow) = size.addingReportingOverflow(part)
-            let (nextMultiply, multiplyOverflow) =
-                multiply.multipliedReportingOverflow(by: 10)
-            if partOverflow || sizeOverflow || multiplyOverflow {
-                validSize = false
-            } else {
-                size = nextSize
-                multiply = nextMultiply
-            }
-        } else {
-            break
-        }
+    // Find where the run of trailing ASCII digits begins.
+    var start = chars.count
+    while start > 0, chars[start - 1].isASCII, chars[start - 1].isNumber {
+        start -= 1
     }
 
-    if validSize, guifontSizeRange.contains(size), index != 0,
-       chars[index] == "h", chars[index - 1] == ":" {
-        return GuifontEntry(name: String(chars[0..<(index - 1)]),
+    // Read it most significant digit first, saturating one past the largest
+    // accepted size. That keeps an oversized run out of range without
+    // overflowing, however many digits it holds. The scan above accepted only
+    // ASCII digits, so each has a numeric value.
+    var size = 0
+    for character in chars[start...] {
+        size = min(size * 10 + (character.wholeNumberValue ?? 0),
+                   guifontSizeRange.upperBound + 1)
+    }
+
+    // The run must be introduced by ":h" for it to be a size.
+    if guifontSizeRange.contains(size), start >= 2,
+       chars[start - 1] == "h", chars[start - 2] == ":" {
+        return GuifontEntry(name: String(chars[0..<(start - 2)]),
                             size: CGFloat(size))
     }
 

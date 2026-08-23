@@ -99,6 +99,19 @@ final class GuifontTests: XCTestCase {
                        [GuifontEntry(name: "123", size: 15)])
     }
 
+    func testLeadingZeroesInSizeAreAccepted() {
+        XCTAssertEqual(parseGuifont("Menlo:h0007", defaultSize: 15),
+                       [GuifontEntry(name: "Menlo", size: 7)])
+    }
+
+    /// A size is read most significant digit first and saturates out of range,
+    /// so padding it cannot overflow into being treated as part of the name.
+    func testExcessiveLeadingZeroesStillYieldASize() {
+        let padded = "Menlo:h" + String(repeating: "0", count: 20) + "7"
+        XCTAssertEqual(parseGuifont(padded, defaultSize: 15),
+                       [GuifontEntry(name: "Menlo", size: 7)])
+    }
+
     func testOverflowingAndExcessiveSizesAreNotApplied() {
         let huge = "Menlo:h" + String(repeating: "9", count: 100)
         XCTAssertEqual(parseGuifont(huge, defaultSize: 15),
