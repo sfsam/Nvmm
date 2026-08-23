@@ -294,18 +294,15 @@ nonisolated struct CLIArguments: Sendable, Equatable {
         }
     }
 
+    /// A forwarded argument list is valid exactly when parsing it yields
+    /// nothing but those same arguments: no file, and no option the helper
+    /// was supposed to consume itself. Asking the parser is what keeps the
+    /// two from drifting — the set of forwardable options is never written
+    /// down a second time.
     static func validateForwarded(_ values: [String]) throws {
-        var index = 0
-        while index < values.count {
-            let value = values[index]
-            if value.hasPrefix("+") || value == "--clean"
-                || ["-d", "-o", "-O", "-p", "-R"].contains(value) {
-                index += 1
-            } else if value == "-c", index + 1 < values.count {
-                index += 2
-            } else {
-                throw CLIProtocolError.invalidForwardedArguments
-            }
+        guard let parsed = try? parse(values),
+              parsed == CLIArguments(arguments: values) else {
+            throw CLIProtocolError.invalidForwardedArguments
         }
     }
 }

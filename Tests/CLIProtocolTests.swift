@@ -84,6 +84,30 @@ final class CLIProtocolTests: XCTestCase {
         }
     }
 
+    // An option the helper consumes itself is not something Neovim may be
+    // given, so a request naming one is not a request the helper built.
+    func testRequestRejectsLocallyConsumedOption() {
+        let request = CLIRequest(arguments: ["--wait"], files: [],
+                                 workingDirectory: "/tmp",
+                                 forceNewWindow: false, wait: false)
+
+        XCTAssertThrowsError(try request.validate()) { error in
+            XCTAssertEqual(error as? CLIProtocolError,
+                           .invalidForwardedArguments)
+        }
+    }
+
+    func testRequestRejectsCommandWithoutItsValue() {
+        let request = CLIRequest(arguments: ["-c"], files: [],
+                                 workingDirectory: "/tmp",
+                                 forceNewWindow: false, wait: false)
+
+        XCTAssertThrowsError(try request.validate()) { error in
+            XCTAssertEqual(error as? CLIProtocolError,
+                           .invalidForwardedArguments)
+        }
+    }
+
     func testFileResolutionIsLexicalAndAllowsMissingPaths() {
         let request = CLIRequest(arguments: [], files: ["a/../new", "/x/../y"],
                                  workingDirectory: "/tmp/project",
