@@ -41,6 +41,9 @@ private enum CellGraphicKind: UInt32 {
     case lightShade = 4
     case diagonalUpperRightToLowerLeft = 5
     case diagonalUpperLeftToLowerRight = 6
+    case lightVertical = 7
+    case heavyVertical = 8
+    case doubleVertical = 9
 
     /// The kind a grapheme maps to, or nil if it is not a cell graphic.
     init?(grapheme: String) {
@@ -51,6 +54,10 @@ private enum CellGraphicKind: UInt32 {
         case "\u{2591}": self = .lightShade       // ░
         case "\u{2571}": self = .diagonalUpperRightToLowerLeft // ╱
         case "\u{2572}": self = .diagonalUpperLeftToLowerRight // ╲
+        // Render vertical box-drawing glyphs at full cell height so adjacent rows join.
+        case "\u{2502}": self = .lightVertical // │
+        case "\u{2503}": self = .heavyVertical // ┃
+        case "\u{2551}": self = .doubleVertical // ║
         default: return nil
         }
     }

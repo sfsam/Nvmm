@@ -82,8 +82,8 @@ typedef struct {
 /// `glyph_data.flags`: this glyph is the block cursor's x-ray character.
 #define GLYPH_FLAG_XRAY 1u
 
-/// One procedurally-drawn cell graphic (block/shade/diagonal fills) that the
-/// fragment shader renders without a glyph texture.
+/// One procedurally-drawn cell graphic (block, shade, diagonal, or separator)
+/// that the fragment shader renders without a glyph texture.
 typedef struct {
     simd_short2 grid_position;
     uint32_t cell_width;

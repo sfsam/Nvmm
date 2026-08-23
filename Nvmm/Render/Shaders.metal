@@ -414,6 +414,9 @@ fragment float4 cell_graphic_fill(cell_graphic_rasterizer_data in [[stage_in]]) 
     constexpr uint32_t light_shade = 4;
     constexpr uint32_t diagonal_upper_right_to_lower_left = 5;
     constexpr uint32_t diagonal_upper_left_to_lower_right = 6;
+    constexpr uint32_t light_vertical = 7;
+    constexpr uint32_t heavy_vertical = 8;
+    constexpr uint32_t double_vertical = 9;
 
     if (in.kind == full_block) {
         return float4(in.color.rgb, 1.0);
@@ -438,6 +441,29 @@ fragment float4 cell_graphic_fill(cell_graphic_rasterizer_data in [[stage_in]]) 
     float2 local = in.position.xy - in.cell_position;
     float width = in.cell_size.x;
     float height = in.cell_size.y;
+
+    if (in.kind == light_vertical ||
+        in.kind == heavy_vertical ||
+        in.kind == double_vertical) {
+        float light_half_width = max(0.65, min(width, height) * 0.045);
+        float dist;
+
+        if (in.kind == double_vertical) {
+            float offset = max(light_half_width * 2.25, width * 0.18);
+            dist = min(abs(local.x - (width * 0.5 - offset)),
+                       abs(local.x - (width * 0.5 + offset)));
+        } else {
+            dist = abs(local.x - width * 0.5);
+        }
+
+        float half_width = in.kind == heavy_vertical
+            ? light_half_width * 2.0 : light_half_width;
+        float alpha = 1.0 - smoothstep(half_width,
+                                       half_width + 0.85, dist);
+        if (alpha <= 0.0) discard_fragment();
+        return float4(in.color.rgb, alpha);
+    }
+
     float diagonal_length = length(in.cell_size);
     float dist = 0.0;
 
