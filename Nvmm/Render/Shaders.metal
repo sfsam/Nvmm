@@ -96,6 +96,11 @@ struct cursor_smear_rasterizer_data {
     float corner_speed;
 };
 
+// Maps a position in drawable pixels, with a top-left origin, into clip space.
+static float4 clip_position(constant uniform_data &uniforms, float2 pixel) {
+    return float4(float2(-1, 1) + pixel * uniforms.pixel_size, 0, 1);
+}
+
 // Corner selectors for a rectangle given as origin + size. The vertex offset is
 // the size vector multiplied by the selected transform.
 constant float2 transforms[4] = {
@@ -128,10 +133,10 @@ background_render(uint vertex_id [[vertex_id]],
     uint32_t col = instance_id % uniforms.grid_width;
 
     float2 cell_vertex = float2(col, row) + transforms[vertex_id];
-    float2 position = float2(-1, 1) + (uniforms.cell_size * cell_vertex);
 
     grid_rasterizer_data data;
-    data.position = float4(position.xy, 0, 1);
+    data.position = clip_position(uniforms,
+                                  uniforms.cell_pixel_size * cell_vertex);
     data.color = load_color(cell_colors[instance_id]);
     return data;
 }
@@ -163,10 +168,9 @@ cursor_render(uint vertex_id [[vertex_id]],
     float2 translate = base_translation * cursor_transforms[instance_id][vertex_id];
 
     float2 pixel_position = cell_vertex - translate;
-    float2 position = float2(-1, 1) + (pixel_position * uniforms.pixel_size);
 
     grid_rasterizer_data data;
-    data.position = float4(position.xy, 0.0, 1.0);
+    data.position = clip_position(uniforms, pixel_position);
     data.color = load_color(uniforms.cursor_color);
     return data;
 }
@@ -186,7 +190,6 @@ cursor_smear_render(uint vertex_id [[vertex_id]],
                         + 2.0;
     float2 pixel_position = bounds_min
         + (bounds_max - bounds_min) * transforms[vertex_id];
-    float2 position = float2(-1, 1) + pixel_position * uniforms.pixel_size;
 
     float4 color = unpack_unorm4x8_to_float(smear.color);
     float gray = dot(color.rgb, float3(0.299, 0.587, 0.114));
@@ -196,7 +199,7 @@ cursor_smear_render(uint vertex_id [[vertex_id]],
     color.a = smear.opacity;
 
     cursor_smear_rasterizer_data data;
-    data.position = float4(position, 0, 1);
+    data.position = clip_position(uniforms, pixel_position);
     data.pixel_position = pixel_position;
     data.previous_cursor = previous;
     data.current_cursor = smear.current_cursor;
@@ -223,10 +226,9 @@ line_render(uint vertex_id [[vertex_id]],
     line_offset.y += uniforms.baseline.y - line.ytranslate;
 
     float2 pixel_position = line_offset + (line_size * transforms[vertex_id]);
-    float2 position = float2(-1, 1) + (pixel_position * uniforms.pixel_size);
 
     line_rasterizer_data data;
-    data.position = float4(position.xy, 0, 1);
+    data.position = clip_position(uniforms, pixel_position);
 
     // period == 0xFFFF is the undercurl sentinel, carried to line_fill as the
     // cell width negated: it detects an undercurl by period < 0 and needs no
@@ -282,10 +284,9 @@ glyph_render(uint vertex_id [[vertex_id]],
     float2 texture_offset = vertex_offset - (glyph_offset_raw - glyph_offset);
 
     float2 pixel_position = cell_position + glyph_offset;
-    float2 position = float2(-1, 1) + (pixel_position * uniforms.pixel_size);
 
     glyph_rasterizer_data data;
-    data.position = float4(position.xy, 0, 1);
+    data.position = clip_position(uniforms, pixel_position);
     data.texture_position = float2(glyph.rect.texture_origin.xy) + texture_offset;
     data.pixel_position = pixel_position;
     data.color = load_color(glyph.foreground_color);
@@ -318,10 +319,9 @@ cell_graphic_render(uint vertex_id [[vertex_id]],
     }
 
     float2 pixel_position = draw_position + (draw_size * transforms[vertex_id]);
-    float2 position = float2(-1, 1) + (pixel_position * uniforms.pixel_size);
 
     cell_graphic_rasterizer_data data;
-    data.position = float4(position.xy, 0, 1);
+    data.position = clip_position(uniforms, pixel_position);
     data.cell_position = cell_position;
     data.cell_size = cell_size;
     data.color = load_color(graphic.color);

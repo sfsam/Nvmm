@@ -23,7 +23,7 @@ struct RenderContextOptions {
     var cachePageHeight = 1024
     var cacheInitialCapacity = 1
     var cacheGrowthFactor = 1.5
-    var cacheEvictionThreshold = 8
+    var cacheMaximumPages = 8
     var cacheEvictionPreserve = 2
 }
 
@@ -93,7 +93,7 @@ final class RenderContext {
             pageHeight: options.cachePageHeight,
             initialCapacity: options.cacheInitialCapacity,
             growthFactor: options.cacheGrowthFactor,
-            maximumPages: options.cacheEvictionThreshold) else {
+            maximumPages: options.cacheMaximumPages) else {
             throw RenderContextError.glyphTextureUnavailable
         }
         guard let colorCache = GlyphTextureCache(
@@ -103,14 +103,13 @@ final class RenderContext {
             pageHeight: options.cachePageHeight,
             initialCapacity: options.cacheInitialCapacity,
             growthFactor: options.cacheGrowthFactor,
-            maximumPages: options.cacheEvictionThreshold) else {
+            maximumPages: options.cacheMaximumPages) else {
             throw RenderContextError.glyphTextureUnavailable
         }
 
         glyphManager = GlyphManager(
             rasterizer: rasterizer, maskCache: maskCache,
             colorCache: colorCache,
-            evictThreshold: options.cacheEvictionThreshold,
             evictPreserve: options.cacheEvictionPreserve,
             options: glyphOptions)
     }
@@ -137,10 +136,10 @@ final class RenderContext {
             attachment.isBlendingEnabled = true
             attachment.rgbBlendOperation = .add
             attachment.alphaBlendOperation = .add
-            attachment.sourceRGBBlendFactor = blend == .premultiplied
-                ? .one : .sourceAlpha
-            attachment.sourceAlphaBlendFactor = blend == .premultiplied
-                ? .one : .sourceAlpha
+            let source: MTLBlendFactor =
+                blend == .premultiplied ? .one : .sourceAlpha
+            attachment.sourceRGBBlendFactor = source
+            attachment.sourceAlphaBlendFactor = source
             attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
             attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         }

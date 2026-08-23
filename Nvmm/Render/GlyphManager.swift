@@ -60,7 +60,6 @@ final class GlyphManager {
     private let rasterizer: GlyphRasterizer
     private let maskCache: GlyphTextureCache
     private let colorCache: GlyphTextureCache
-    private let evictThreshold: Int
     private let evictPreserve: Int
     private var options: GlyphRasterizationOptions
     private var maskMap: [MaskKey: CachedGlyph] = [:]
@@ -69,12 +68,11 @@ final class GlyphManager {
     private var colorNeedsEviction = false
 
     init(rasterizer: GlyphRasterizer, maskCache: GlyphTextureCache,
-         colorCache: GlyphTextureCache, evictThreshold: Int,
-         evictPreserve: Int, options: GlyphRasterizationOptions) {
+         colorCache: GlyphTextureCache, evictPreserve: Int,
+         options: GlyphRasterizationOptions) {
         self.rasterizer = rasterizer
         self.maskCache = maskCache
         self.colorCache = colorCache
-        self.evictThreshold = evictThreshold
         self.evictPreserve = evictPreserve
         self.options = options
     }
@@ -182,13 +180,13 @@ final class GlyphManager {
         return glyph(font: font, text: cell.text, foreground: foreground)
     }
 
-    /// Evicts old pages independently from both texture atlases.
+    /// Evicts old pages from an atlas that could not fit its last glyph.
     func evict() {
-        if maskNeedsEviction || maskCache.pagesCapacity > evictThreshold {
+        if maskNeedsEviction {
             maskNeedsEviction = !performEviction(
                 cache: maskCache, map: &maskMap)
         }
-        if colorNeedsEviction || colorCache.pagesCapacity > evictThreshold {
+        if colorNeedsEviction {
             colorNeedsEviction = !performEviction(
                 cache: colorCache, map: &colorMap)
         }

@@ -26,10 +26,6 @@ typedef struct {
     /// The size of a single-width cell in backing pixels.
     simd_float2 cell_pixel_size;
 
-    /// The size of a single-width cell in clip space (cell_pixel_size scaled by
-    /// pixel_size).
-    simd_float2 cell_size;
-
     /// The translation from a cell's top-left corner to the font baseline.
     simd_float2 baseline;
 
@@ -95,21 +91,6 @@ typedef struct {
     uint32_t background_color;
     uint32_t kind;
 } cell_graphic_data;
-
-/// The shape of a line decoration, independent of grid position.
-typedef struct {
-    /// The line's y position as an offset from the font baseline.
-    int16_t ytranslate;
-
-    /// The pattern period for patterned lines; 0 for solid lines.
-    uint16_t period;
-
-    /// The line's thickness in pixels.
-    uint16_t thickness;
-
-    /// 0 = solid, 1 = dashed, 2 = dotted.
-    uint16_t style;
-} line_metrics;
 
 /// One underline, undercurl, overline, or strikethrough segment. A segment is
 /// one cell wide; adjacent segments join into a continuous line. The color's

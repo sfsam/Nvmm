@@ -229,8 +229,7 @@ final class RenderTests: XCTestCase {
         var uniforms = uniform_data(
             pixel_size: SIMD2<Float>(2.0 / Float(width),
                                      -2.0 / Float(height)),
-            cell_pixel_size: SIMD2<Float>(8, 8),
-            cell_size: SIMD2<Float>(1, -1), baseline: .zero,
+            cell_pixel_size: SIMD2<Float>(8, 8), baseline: .zero,
             cursor_position: .zero, cursor_color: 0,
             cursor_line_width: 0, cursor_cell_width: 1, grid_width: 4,
             cursor_xray: 0)
@@ -742,8 +741,7 @@ final class RenderTests: XCTestCase {
         // A block cursor on column 1, fully opaque, with the x-ray active.
         var uniforms = uniform_data(
             pixel_size: SIMD2<Float>(2.0 / Float(side), -2.0 / Float(side)),
-            cell_pixel_size: SIMD2<Float>(8, 8),
-            cell_size: SIMD2<Float>(0.5, -0.5), baseline: .zero,
+            cell_pixel_size: SIMD2<Float>(8, 8), baseline: .zero,
             cursor_position: SIMD2<Int16>(1, 0), cursor_color: 0xFF00_0000,
             cursor_line_width: 0, cursor_cell_width: 1, grid_width: 4,
             cursor_xray: 1)
@@ -992,8 +990,7 @@ final class RenderTests: XCTestCase {
 
         var uniforms = uniform_data(
             pixel_size: SIMD2<Float>(2.0 / Float(side), -2.0 / Float(side)),
-            cell_pixel_size: SIMD2<Float>(16, 16),
-            cell_size: SIMD2<Float>(1, -1), baseline: SIMD2<Float>(0, 8),
+            cell_pixel_size: SIMD2<Float>(16, 16), baseline: SIMD2<Float>(0, 8),
             cursor_position: .zero, cursor_color: 0,
             cursor_line_width: 0, cursor_cell_width: 1, grid_width: 2,
             cursor_xray: 0)
@@ -1057,5 +1054,71 @@ final class RenderTests: XCTestCase {
 
         // The wave itself must not move when only the opacity changes.
         XCTAssertEqual(alpha(faded, 4, 15), 0)
+    }
+
+    /// Backgrounds must land on exact cell boundaries. Nothing else covers the
+    /// background pass, and it is the one vertex function that does not work
+    /// in pixels.
+    func testBackgroundPipelinePaintsWholeCells() throws {
+        try requireDevice()
+        let context = try RenderContextManager().defaultRenderContext()
+        let device = context.device
+        let side = 32
+
+        // A 4x2 grid of 8x16 cells exactly fills the target.
+        var uniforms = uniform_data(
+            pixel_size: SIMD2<Float>(2.0 / Float(side), -2.0 / Float(side)),
+            cell_pixel_size: SIMD2<Float>(8, 16),
+            baseline: .zero, cursor_position: .zero, cursor_color: 0,
+            cursor_line_width: 0, cursor_cell_width: 1, grid_width: 4,
+            cursor_xray: 0)
+        let uniformBuffer = try XCTUnwrap(withUnsafeBytes(of: &uniforms) {
+            device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
+        })
+
+        // Cell 5 is row 1, column 1: pixels x 8..<16, y 16..<32.
+        var colors = [UInt32](repeating: 0, count: 8)
+        colors[5] = 0xFF00_00FF
+        let colorBuffer = try XCTUnwrap(colors.withUnsafeBytes {
+            device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
+        })
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm, width: side, height: side,
+            mipmapped: false)
+        descriptor.usage = [.renderTarget]
+        descriptor.storageMode = .shared
+        let output = try XCTUnwrap(device.makeTexture(descriptor: descriptor))
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = output
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+
+        let command = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        let encoder = try XCTUnwrap(
+            command.makeRenderCommandEncoder(descriptor: pass))
+        encoder.setRenderPipelineState(context.backgroundPipeline)
+        encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 0)
+        encoder.setVertexBuffer(colorBuffer, offset: 0, index: 1)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
+                               vertexCount: 4, instanceCount: 8)
+        encoder.endEncoding()
+        command.commit()
+        command.waitUntilCompleted()
+        XCTAssertEqual(command.status, .completed)
+
+        var pixels = [UInt8](repeating: 0, count: side * side * 4)
+        output.getBytes(&pixels, bytesPerRow: side * 4,
+                        from: MTLRegionMake2D(0, 0, side, side), mipmapLevel: 0)
+        func red(_ x: Int, _ y: Int) -> UInt8 { pixels[(y * side + x) * 4 + 2] }
+
+        // Every corner inside the cell is painted; every neighbour is not.
+        for (x, y) in [(8, 16), (15, 16), (8, 31), (15, 31)] {
+            XCTAssertGreaterThan(red(x, y), 200, "inside (\(x), \(y))")
+        }
+        for (x, y) in [(7, 16), (16, 16), (8, 15), (15, 32 - 1 - 16)] {
+            XCTAssertEqual(red(x, y), 0, "outside (\(x), \(y))")
+        }
     }
 }

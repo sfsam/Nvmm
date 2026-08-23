@@ -109,6 +109,19 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     private(set) var fontFamily: FontFamily?
     private var grid: Grid?
 
+    /// The shape of a line decoration, independent of grid position. Host-only:
+    /// `makeLine` copies these fields into the `line_data` a shader reads.
+    private struct LineMetrics {
+        /// The line's y position as an offset from the font baseline.
+        var ytranslate: Int16 = 0
+        /// The pattern period for patterned lines; 0 for solid lines.
+        var period: UInt16 = 0
+        /// The line's thickness in pixels.
+        var thickness: UInt16 = 0
+        /// 0 = solid, 1 = dashed, 2 = dotted.
+        var style: UInt16 = 0
+    }
+
     // Cell metrics, in backing pixels unless noted.
     private var backingCellSize = NSSize(width: 1, height: 1)
     private var cellSizePixels = SIMD2<Float>(1, 1)
@@ -116,14 +129,14 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     private var cursorLineThickness: UInt32 = 2
 
     // Line-decoration shapes derived from the font metrics.
-    private var underline = line_metrics()
-    private var underdouble = line_metrics()
-    private var underdotted = line_metrics()
-    private var underdashed = line_metrics()
-    private var undercurl = line_metrics()
-    private var overline = line_metrics()
-    private var strikethrough = line_metrics()
-    private var compositionUnderline = line_metrics()
+    private var underline = LineMetrics()
+    private var underdouble = LineMetrics()
+    private var underdotted = LineMetrics()
+    private var underdashed = LineMetrics()
+    private var undercurl = LineMetrics()
+    private var overline = LineMetrics()
+    private var strikethrough = LineMetrics()
+    private var compositionUnderline = LineMetrics()
 
     // A small ring of frame buffers keeps frames from stalling on the GPU.
     private let frameBuffers = [MetalFrameBuffer(), MetalFrameBuffer(),
@@ -372,10 +385,10 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             ? Int16(floor(underlinePosition + 0.5))
             : Int16(floor(underlinePosition - 0.5))
 
-        strikethrough = line_metrics(ytranslate: Int16(ascent / 3), period: 0,
+        strikethrough = LineMetrics(ytranslate: Int16(ascent / 3), period: 0,
                                      thickness: lineThickness, style: 0)
 
-        underline = line_metrics(ytranslate: underlineTranslate, period: 0,
+        underline = LineMetrics(ytranslate: underlineTranslate, period: 0,
                                  thickness: lineThickness, style: 0)
 
         // A preedit underline is heavier than a normal underline so the marked
@@ -397,10 +410,10 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         underdashed.period = UInt16(8 * scaleFactor)
         underdashed.style = 1
 
-        undercurl = line_metrics(ytranslate: underlineTranslate, period: 0xFFFF,
+        undercurl = LineMetrics(ytranslate: underlineTranslate, period: 0xFFFF,
                                  thickness: UInt16(4 * scaleFactor), style: 0)
 
-        overline = line_metrics(ytranslate: Int16(ascent), period: 0,
+        overline = LineMetrics(ytranslate: Int16(ascent), period: 0,
                                 thickness: lineThickness, style: 0)
 
         cursorLineThickness = UInt32(2 * scaleFactor)
@@ -625,13 +638,13 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             return
         }
 
-        renderFrame(grid: grid, font: font, context: context, frame: frame,
-                    index: index)
+        renderFrame(grid: grid, font: font, context: context, frame: frame)
         frameIndex += 1
     }
 
-    private func renderFrame(grid: Grid, font: FontFamily, context: RenderContext,
-                             frame: MetalFrameBuffer, index: Int) {
+    private func renderFrame(grid: Grid, font: FontFamily,
+                             context: RenderContext,
+                             frame: MetalFrameBuffer) {
         let glyphManager = context.glyphManager
         let cursor = grid.cursor
         let drawnShape = renderedCursorShape(grid: grid, cursor: cursor)
@@ -701,7 +714,6 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         uniforms.pointee = uniform_data(
             pixel_size: pixelSize,
             cell_pixel_size: cellSizePixels,
-            cell_size: cellSizePixels * pixelSize,
             baseline: baselineTranslate,
             cursor_position: SIMD2<Int16>(Int16(cursor.column), Int16(cursor.row)),
             cursor_color: cursor.background.rgb | (cursorAlpha << 24),
@@ -919,7 +931,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
 
         guard encode(
             context: context, drawable: metalDrawable, buffer: metalBuffer,
-            frame: frame, index: index, gridSize: gridSize,
+            frame: frame, gridSize: gridSize,
             uniformOffset: uniformRegion.offset,
             backgroundOffset: backgroundRegion.offset,
             glyphOffset: glyphRegion.offset,
@@ -1042,7 +1054,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     }
 
     private func encode(context: RenderContext, drawable: CAMetalDrawable,
-                        buffer: MTLBuffer, frame: MetalFrameBuffer, index: Int,
+                        buffer: MTLBuffer, frame: MetalFrameBuffer,
                         gridSize: Int, uniformOffset: Int, backgroundOffset: Int,
                         glyphOffset: Int, gridGlyphCount: Int,
                         compositionGlyphCount: Int,
@@ -1184,7 +1196,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     }
 
     private func makeLine(_ position: SIMD2<Int16>, _ color: RGBColor,
-                          _ metrics: line_metrics, count: UInt16 = 0,
+                          _ metrics: LineMetrics, count: UInt16 = 0,
                           opacity: UInt8 = 255) -> line_data {
         let packed = (color.rgb & 0x00FF_FFFF) | (UInt32(opacity) << 24)
         return line_data(grid_position: position, color: packed,
