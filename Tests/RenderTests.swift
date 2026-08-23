@@ -386,7 +386,7 @@ final class RenderTests: XCTestCase {
         let first = try XCTUnwrap(cache.add(bitmap))
         let second = try XCTUnwrap(cache.add(bitmap))
         XCTAssertGreaterThan(second.z, first.z)
-        XCTAssertGreaterThan(cache.pagesSize, 0)
+        XCTAssertEqual(cache.pagesUsed, Int(second.z) + 1)
     }
 
     func testTextureCacheRefusesToExceedHardPageLimit() throws {
@@ -451,7 +451,7 @@ final class RenderTests: XCTestCase {
         XCTAssertTrue(cache.reset())
         XCTAssertFalse(cache.texture === original)
         XCTAssertEqual(cache.pagesCapacity, 1)
-        XCTAssertEqual(cache.pagesSize, 0)
+        XCTAssertEqual(cache.pagesUsed, 1)
         XCTAssertNotNil(cache.add(bitmap))
     }
 
@@ -485,12 +485,12 @@ final class RenderTests: XCTestCase {
         XCTAssertNil(cache.add(bitmap))
         XCTAssertTrue(cache.texture === original)
         XCTAssertEqual(cache.pagesCapacity, 1)
-        XCTAssertEqual(cache.pagesSize, 0)
+        XCTAssertEqual(cache.pagesUsed, 1)
         XCTAssertEqual(cache.evict(preserve: 2), 0)
         XCTAssertEqual(attempts, 2)
         XCTAssertNotNil(cache.add(bitmap))
         XCTAssertFalse(cache.texture === original)
-        XCTAssertEqual(cache.pagesSize, 1)
+        XCTAssertEqual(cache.pagesUsed, 2)
         XCTAssertEqual(attempts, 3)
     }
 
@@ -891,5 +891,93 @@ final class RenderTests: XCTestCase {
         // Discarding the cache changes nothing about what shaping returns.
         shaper.reset()
         XCTAssertEqual(shape("->", family: ligatures, shaper: shaper), arrow)
+    }
+
+    // MARK: - Atlas page accounting
+
+    /// A synthetic bitmap of an exact size, so page packing can be reasoned
+    /// about without depending on a font's glyph metrics.
+    private func makeBitmap(
+        width: Int, height: Int, storage: UnsafeMutablePointer<UInt8>
+    ) -> GlyphBitmap {
+        GlyphBitmap(buffer: storage, stride: width, leftBearing: 0,
+                    ascent: Int16(height), width: Int16(width),
+                    height: Int16(height), format: .mask)
+    }
+
+    private func makeCache(width: Int,
+                           height: Int) throws -> GlyphTextureCache {
+        try requireDevice()
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let queue = device.makeCommandQueue() else {
+            throw XCTSkip("No Metal command queue")
+        }
+        return try XCTUnwrap(GlyphTextureCache(
+            queue: queue, pixelFormat: .r8Unorm,
+            pageWidth: width, pageHeight: height,
+            initialCapacity: 1, growthFactor: 2))
+    }
+
+    /// `preserve` equal to the current page index still leaves one page too
+    /// many, because the index is zero-based: the oldest page must go.
+    func testEvictDropsTheOldestPageWhenPreserveEqualsPageIndex() throws {
+        let storage = UnsafeMutablePointer<UInt8>.allocate(capacity: 64)
+        storage.initialize(repeating: 0, count: 64)
+        defer { storage.deallocate() }
+        // One glyph per page: a second never fits beside or below the first.
+        let cache = try makeCache(width: 5, height: 4)
+        let bitmap = makeBitmap(width: 4, height: 4, storage: storage)
+
+        for _ in 0..<3 { XCTAssertNotNil(cache.add(bitmap)) }
+        XCTAssertEqual(cache.pagesUsed, 3)
+
+        XCTAssertEqual(cache.evict(preserve: 2), 1)
+        XCTAssertEqual(cache.pagesUsed, 2)
+        XCTAssertLessThanOrEqual(cache.pagesUsed, cache.pagesCapacity)
+
+        let origin = try XCTUnwrap(cache.add(bitmap))
+        XCTAssertLessThan(Int(origin.z), cache.pagesCapacity)
+    }
+
+    /// Preserving more pages than are in use must keep every one of them, and
+    /// must never leave the current page beyond the texture's slice count.
+    func testEvictKeepsEveryUsedPageWhenPreserveExceedsThem() throws {
+        let storage = UnsafeMutablePointer<UInt8>.allocate(capacity: 64)
+        storage.initialize(repeating: 0, count: 64)
+        defer { storage.deallocate() }
+        let cache = try makeCache(width: 5, height: 4)
+        let bitmap = makeBitmap(width: 4, height: 4, storage: storage)
+
+        for _ in 0..<2 { XCTAssertNotNil(cache.add(bitmap)) }
+        XCTAssertEqual(cache.pagesUsed, 2)
+
+        XCTAssertEqual(cache.evict(preserve: 3), 0)
+        XCTAssertEqual(cache.pagesUsed, 2)
+        XCTAssertLessThanOrEqual(cache.pagesUsed, cache.pagesCapacity)
+
+        let origin = try XCTUnwrap(cache.add(bitmap))
+        XCTAssertLessThan(Int(origin.z), cache.pagesCapacity)
+    }
+
+    /// A reset must forget the previous atlas's row height, or the first row of
+    /// the fresh page reserves space the glyphs in it do not need.
+    func testResetForgetsTheRowHeightOfTheOldAtlas() throws {
+        let storage = UnsafeMutablePointer<UInt8>.allocate(capacity: 256)
+        storage.initialize(repeating: 0, count: 256)
+        defer { storage.deallocate() }
+        // 10 + 1 + 4 exceeds the page height; 4 + 1 + 4 does not. So a stale
+        // row height of 10 forces a new page where 4 would wrap in place.
+        let cache = try makeCache(width: 9, height: 12)
+        let tall = makeBitmap(width: 4, height: 10, storage: storage)
+        let short = makeBitmap(width: 4, height: 4, storage: storage)
+
+        XCTAssertNotNil(cache.add(tall))
+        XCTAssertTrue(cache.reset())
+
+        XCTAssertNotNil(cache.add(short))
+        XCTAssertNotNil(cache.add(short))
+        let wrapped = try XCTUnwrap(cache.add(short))
+        XCTAssertEqual(wrapped.z, 0)
+        XCTAssertEqual(cache.pagesUsed, 1)
     }
 }

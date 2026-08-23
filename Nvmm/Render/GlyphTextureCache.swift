@@ -71,8 +71,9 @@ final class GlyphTextureCache {
     /// The number of cache pages currently allocated.
     var pagesCapacity: Int { pageCount }
 
-    /// The number of cache pages in use.
-    var pagesSize: Int { pageIndex }
+    /// The number of cache pages in use. `pageIndex` is the zero-based index of
+    /// the page being filled, so one more page is in use than its value.
+    var pagesUsed: Int { pageIndex + 1 }
 
     /// Replaces all pages with a fresh empty page. Existing command buffers
     /// retain the old texture until the GPU has finished reading it.
@@ -204,28 +205,28 @@ final class GlyphTextureCache {
             pageIndex = 0
             xUsed = 0
             yUsed = 0
+            rowHeight = 0
             return 0
         }
 
-        if preserve < pageIndex {
-            let begin = pageIndex - preserve + 1
-            guard reallocate(newPageCount: preserve, begin: begin,
-                             count: preserve) else {
-                return nil
-            }
-            pageIndex = preserve - 1
-            return begin
-        }
-
-        if preserve > pageIndex {
-            guard pageIndex > 0 else { return 0 }
-            guard reallocate(newPageCount: pageIndex, begin: 0,
-                             count: pageIndex) else {
+        // Every page in use is worth keeping; hand back only spare capacity,
+        // and only when there is some, so an equal-sized texture is never
+        // allocated and blitted for nothing.
+        if preserve >= pagesUsed {
+            guard pageCount > pagesUsed else { return 0 }
+            guard reallocate(newPageCount: pagesUsed, begin: 0,
+                             count: pagesUsed) else {
                 return nil
             }
             return 0
         }
 
-        return 0
+        let evicted = pagesUsed - preserve
+        guard reallocate(newPageCount: preserve, begin: evicted,
+                         count: preserve) else {
+            return nil
+        }
+        pageIndex = preserve - 1
+        return evicted
     }
 }
