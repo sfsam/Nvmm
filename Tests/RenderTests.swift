@@ -980,4 +980,82 @@ final class RenderTests: XCTestCase {
         XCTAssertEqual(wrapped.z, 0)
         XCTAssertEqual(cache.pagesUsed, 1)
     }
+
+    /// An undercurl must honor the opacity packed into its color. The wave's
+    /// centre travels in its own varying, so nothing needs to be smuggled
+    /// through the alpha channel.
+    func testUndercurlHonorsPackedOpacity() throws {
+        try requireDevice()
+        let context = try RenderContextManager().defaultRenderContext()
+        let device = context.device
+        let side = 32
+
+        var uniforms = uniform_data(
+            pixel_size: SIMD2<Float>(2.0 / Float(side), -2.0 / Float(side)),
+            cell_pixel_size: SIMD2<Float>(16, 16),
+            cell_size: SIMD2<Float>(1, -1), baseline: SIMD2<Float>(0, 8),
+            cursor_position: .zero, cursor_color: 0,
+            cursor_line_width: 0, cursor_cell_width: 1, grid_width: 2,
+            cursor_xray: 0)
+        let uniformBuffer = try XCTUnwrap(withUnsafeBytes(of: &uniforms) {
+            device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
+        })
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm, width: side, height: side,
+            mipmapped: false)
+        descriptor.usage = [.renderTarget]
+        descriptor.storageMode = .shared
+        let output = try XCTUnwrap(device.makeTexture(descriptor: descriptor))
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = output
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+
+        // period 0xFFFF is the undercurl sentinel; the high byte is opacity.
+        func render(opacity: UInt32) throws -> [UInt8] {
+            var line = line_data(
+                grid_position: .zero, color: (opacity << 24) | 0xFF,
+                ytranslate: 0, period: 0xFFFF, thickness: 8, count: 0, style: 0)
+            let lineBuffer = try XCTUnwrap(withUnsafeBytes(of: &line) {
+                device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
+            })
+            let command = try XCTUnwrap(
+                context.commandQueue.makeCommandBuffer())
+            let encoder = try XCTUnwrap(command.makeRenderCommandEncoder(
+                descriptor: pass))
+            encoder.setRenderPipelineState(context.linePipeline)
+            encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 0)
+            encoder.setVertexBuffer(lineBuffer, offset: 0, index: 1)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
+                                   vertexCount: 4, instanceCount: 1)
+            encoder.endEncoding()
+            command.commit()
+            command.waitUntilCompleted()
+            XCTAssertEqual(command.status, .completed)
+
+            var pixels = [UInt8](repeating: 0, count: side * side * 4)
+            output.getBytes(&pixels, bytesPerRow: side * 4,
+                            from: MTLRegionMake2D(0, 0, side, side),
+                            mipmapLevel: 0)
+            return pixels
+        }
+        func alpha(_ pixels: [UInt8], _ x: Int, _ y: Int) -> UInt8 {
+            pixels[(y * side + x) * 4 + 3]
+        }
+
+        // The wave crosses its centre at the left edge of the cell, so (0, 12)
+        // sits on it and (4, 15) is far enough below to be discarded.
+        let opaque = try render(opacity: 255)
+        XCTAssertGreaterThan(alpha(opaque, 0, 12), 200)
+        XCTAssertEqual(alpha(opaque, 4, 15), 0)
+
+        let faded = try render(opacity: 128)
+        XCTAssertGreaterThan(alpha(faded, 0, 12), 0)
+        XCTAssertLessThan(alpha(faded, 0, 12), alpha(opaque, 0, 12) / 2)
+
+        // The wave itself must not move when only the opacity changes.
+        XCTAssertEqual(alpha(faded, 4, 15), 0)
+    }
 }

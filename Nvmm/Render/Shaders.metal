@@ -228,16 +228,15 @@ line_render(uint vertex_id [[vertex_id]],
     line_rasterizer_data data;
     data.position = float4(position.xy, 0, 1);
 
-    // period == 0xFFFF is the undercurl sentinel. Encode the wave's center y in
-    // color.a and the cell width as a negative period; line_fill detects an
-    // undercurl by period < 0.
+    // period == 0xFFFF is the undercurl sentinel, carried to line_fill as the
+    // cell width negated: it detects an undercurl by period < 0 and needs no
+    // other shape data.
     if (line.period == 0xFFFF) {
-        float4 color = load_color(line.color);
-        data.color = float4(color.rgb, line_offset.y + line.thickness * 0.5);
+        data.color = load_color(line.color);
         data.period = -uniforms.cell_pixel_size.x;
-        data.pattern_size = uniforms.cell_pixel_size.x;
+        data.pattern_size = 0;
         data.center_y = line_offset.y + line.thickness * 0.5;
-        data.thickness = line.thickness;
+        data.thickness = 0;
         data.style = 0;
     } else {
         float line_position = line.count + transforms[vertex_id].x;
@@ -338,12 +337,11 @@ fragment float4 background_fill(grid_rasterizer_data in [[stage_in]]) {
 fragment float4 line_fill(line_rasterizer_data in [[stage_in]]) {
     if (in.period < 0) { // undercurl - see line_render above
         float wavelength = -in.period;
-        float wave_center_y = in.color.a;
         float amplitude = wavelength * 0.08;
         float wave_y =
-            wave_center_y + amplitude * sinpi(4.0 * in.position.x / wavelength);
+            in.center_y + amplitude * sinpi(4.0 * in.position.x / wavelength);
         float dist = abs(in.position.y - wave_y);
-        float alpha = 1.0 - smoothstep(0.75, 2.0, dist);
+        float alpha = (1.0 - smoothstep(0.75, 2.0, dist)) * in.color.a;
         if (alpha <= 0.0) discard_fragment();
         return float4(in.color.rgb, alpha);
     }
