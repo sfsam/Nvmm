@@ -107,10 +107,10 @@ constant float2 transforms[4] = {
 constant float cursor_smear_saturation = 1.8;
 
 // Per-shape corner nudges that carve a thin bar out of a full cell rect. Row 0
-// is a right-anchored vertical bar, row 1 a bottom-anchored horizontal bar,
-// row 2 a left-anchored vertical bar, row 3 a top-anchored horizontal bar.
+// is a left vertical bar, row 1 a bottom horizontal bar, row 2 a top horizontal
+// bar, and row 3 a right vertical bar.
 // Drawing all four produces a block outline.
-constant float2 cursor_transforms[5][4] = {
+constant float2 cursor_transforms[4][4] = {
     {{ 0,  0}, { 0,  0}, { 1,  0}, { 1,  0}},
     {{ 0, -1}, { 0,  0}, { 0, -1}, { 0,  0}},
     {{ 0,  0}, { 0,  1}, { 0,  0}, { 0,  1}},
@@ -135,10 +135,10 @@ background_render(uint vertex_id [[vertex_id]],
 }
 
 /// Renders the cursor. The shape is selected by instance_id:
-///   0. A right-anchored vertical bar.
-///   1. A bottom-anchored horizontal bar.
-///   2. A left-anchored vertical bar.
-///   3. A top-anchored horizontal bar.
+///   0. A left vertical bar.
+///   1. A bottom horizontal bar.
+///   2. A top horizontal bar.
+///   3. A right vertical bar.
 /// Draw all four instances to make a block outline.
 vertex grid_rasterizer_data
 cursor_render(uint vertex_id [[vertex_id]],
