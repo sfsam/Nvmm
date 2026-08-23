@@ -70,9 +70,11 @@ struct line_rasterizer_data {
 struct glyph_rasterizer_data {
     float4 position [[position]];
     float2 texture_position;
+    float2 pixel_position;
     float4 color;
     uint32_t texture_index;
     uint32_t atlas;
+    uint32_t flags;
 };
 
 struct cell_graphic_rasterizer_data {
@@ -286,9 +288,11 @@ glyph_render(uint vertex_id [[vertex_id]],
     glyph_rasterizer_data data;
     data.position = float4(position.xy, 0, 1);
     data.texture_position = float2(glyph.rect.texture_origin.xy) + texture_offset;
+    data.pixel_position = pixel_position;
     data.color = load_color(glyph.foreground_color);
     data.texture_index = glyph.rect.texture_origin.z;
     data.atlas = glyph.atlas;
+    data.flags = glyph.flags;
     return data;
 }
 
@@ -358,7 +362,32 @@ fragment float4 line_fill(line_rasterizer_data in [[stage_in]]) {
                   in.color.a * select(0.0, 1.0, sinpi(in.period) > 0));
 }
 
+// Whether this fragment survives the block cursor's x-ray.
+//
+// A ligature spreads one mark across several cells, and its ink for the cursor
+// cell usually belongs to a neighbor's glyph, so recoloring a cell cannot
+// reveal what the cursor sits on. Instead the cursor rect shows only that
+// cell's own character: every ordinary glyph is hidden inside it, and the
+// character is drawn nowhere else. The rest of the ligature is untouched. The
+// split is a clean cut rather than a blend, because the character carries the
+// cursor's fade in its own color, exactly as a recolored cell does.
+static float xray_coverage(constant uniform_data &uniforms,
+                           float2 pixel_position, bool is_xray) {
+    if (uniforms.cursor_xray == 0) {
+        return is_xray ? 0.0 : 1.0;
+    }
+
+    float2 origin = float2(uniforms.cursor_position.xy) * uniforms.cell_pixel_size;
+    float2 size = uniforms.cell_pixel_size
+        * float2(float(uniforms.cursor_cell_width), 1.0);
+    bool inside = all(pixel_position >= origin)
+        && all(pixel_position < origin + size);
+
+    return inside == is_xray ? 1.0 : 0.0;
+}
+
 fragment float4 glyph_fill(glyph_rasterizer_data in [[stage_in]],
+                           constant uniform_data &uniforms [[buffer(0)]],
                            texture2d_array<float> masks [[texture(0)]],
                            texture2d_array<float> colors [[texture(1)]]) {
     constexpr sampler texture_sampler(mag_filter::nearest,
@@ -366,14 +395,18 @@ fragment float4 glyph_fill(glyph_rasterizer_data in [[stage_in]],
                                       address::clamp_to_zero,
                                       coord::pixel);
 
+    float visible = xray_coverage(uniforms, in.pixel_position,
+                                  (in.flags & GLYPH_FLAG_XRAY) != 0);
+
     if (in.atlas == 0) {
         float coverage = masks.sample(
-            texture_sampler, in.texture_position, in.texture_index).r;
+            texture_sampler, in.texture_position, in.texture_index).r * visible;
         return float4(in.color.rgb * coverage, coverage);
     }
 
     // The color atlas is already premultiplied, gamma-encoded Display P3.
-    return colors.sample(texture_sampler, in.texture_position, in.texture_index);
+    return colors.sample(texture_sampler, in.texture_position,
+                         in.texture_index) * visible;
 }
 
 fragment float4 cell_graphic_fill(cell_graphic_rasterizer_data in [[stage_in]]) {

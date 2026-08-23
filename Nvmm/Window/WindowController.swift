@@ -1134,6 +1134,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
                 self?.applyScrollbarVisibility()
                 self?.updateProgressIndicator()
                 self?.gridView.applyCursorTrailSettings()
+                self?.gridView.applyLigatureSettings()
                 self?.applyFontRasterizationSettings()
             }
         }

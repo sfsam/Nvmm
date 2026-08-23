@@ -113,10 +113,53 @@ nonisolated final class GlyphRasterizer {
                    options: GlyphRasterizationOptions) -> GlyphBitmap {
         let line = makeLine(font: font, text: text)
         let format: GlyphBitmapFormat = lineUsesColorGlyphs(line) ? .color : .mask
+        return draw(bounds: CTLineGetBoundsWithOptions(line, .useGlyphPathBounds),
+                    format: format, foreground: foreground, options: options) {
+            CTLineDraw(line, $0)
+        }
+    }
+
+    /// Rasterizes one glyph of `font` by its identifier, bypassing shaping.
+    ///
+    /// Used for the substituted glyphs of a ligature, which a caller has
+    /// already shaped. Such a glyph always comes from `font` itself, so it is
+    /// always a coverage mask and needs no foreground color.
+    func rasterize(font: CTFont, glyph: CGGlyph,
+                   options: GlyphRasterizationOptions) -> GlyphBitmap {
+        var glyph = glyph
+        var bounds = CGRect.zero
+        CTFontGetBoundingRectsForGlyphs(font, .horizontal, &glyph, &bounds, 1)
+        return draw(bounds: bounds, format: .mask, foreground: RGBColor(),
+                    options: options) { context in
+            // Unlike CTLineDraw, this positions glyphs explicitly and draws
+            // through the text matrix already on the context rather than
+            // installing its own. The canvas is shared, so set the identity
+            // this draw needs and restore the matrix CTLineDraw relies on
+            // finding; neither renders under the other's.
+            let matrix = context.textMatrix
+            context.textMatrix = .identity
+            var position = CGPoint(x: self.midx, y: self.midy)
+            CTFontDrawGlyphs(font, &glyph, &position, 1, context)
+            context.textMatrix = matrix
+        }
+    }
+
+    /// Places `bounds` on the canvas and runs `body` to fill it.
+    private func draw(bounds: CGRect, format: GlyphBitmapFormat,
+                      foreground: RGBColor,
+                      options: GlyphRasterizationOptions,
+                      body: (CGContext) -> Void) -> GlyphBitmap {
+        // A glyph with no outline has nothing to rasterize. A ligature font
+        // parks one in every cell whose ink another glyph supplies, so
+        // reporting no pixels lets callers skip it rather than draw a blank.
+        guard !bounds.isEmpty else {
+            return GlyphBitmap(buffer: maskBuffer, stride: midx * 2,
+                               leftBearing: 0, ascent: 0, width: 0, height: 0,
+                               format: format)
+        }
 
         // Pad the metrics to absorb antialiasing, smoothing, and rounding. The
         // constants leave at least the one-pixel expansion used by smoothing.
-        let bounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
         let descent = bounds.origin.y - 2
         let ascent = bounds.size.height + bounds.origin.y + 2
         let leftx = bounds.origin.x - 2
@@ -160,7 +203,7 @@ nonisolated final class GlyphRasterizer {
                 blue: CGFloat(foreground.blue) / 255,
                 alpha: 1))
         }
-        CTLineDraw(line, context)
+        body(context)
         return bitmap
     }
 

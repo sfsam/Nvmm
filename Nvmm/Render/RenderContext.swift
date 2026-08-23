@@ -6,9 +6,10 @@
 //
 //  A render context owns the Metal objects tied to one GPU: the command queue,
 //  the six render pipelines, and a glyph manager (glyphs live in that GPU's
-//  textures, so they are device-specific). The font manager and rasterizer are
-//  shared across devices and owned by the manager. Create contexts through a
-//  `RenderContextManager`, which maps each Metal device to one context.
+//  textures, so they are device-specific). The font manager, rasterizer, and
+//  ligature shaper are shared across devices and owned by the manager. Create
+//  contexts through a `RenderContextManager`, which maps each Metal device to
+//  one context.
 //
 
 import AppKit
@@ -43,13 +44,16 @@ final class RenderContext {
     let cursorSmearPipeline: MTLRenderPipelineState
     let linePipeline: MTLRenderPipelineState
     let fontManager: FontManager
+    let ligatureShaper: LigatureShaper
     let glyphManager: GlyphManager
 
     init(device: MTLDevice, fontManager: FontManager,
-         rasterizer: GlyphRasterizer, options: RenderContextOptions,
+         rasterizer: GlyphRasterizer, ligatureShaper: LigatureShaper,
+         options: RenderContextOptions,
          glyphOptions: GlyphRasterizationOptions) throws {
         self.device = device
         self.fontManager = fontManager
+        self.ligatureShaper = ligatureShaper
         guard let queue = device.makeCommandQueue() else {
             throw RenderContextError.commandQueueUnavailable
         }
@@ -153,11 +157,12 @@ enum RenderContextError: Error {
 
 /// Creates and caches one render context per Metal device.
 ///
-/// All contexts share a font manager and glyph rasterizer so that fonts and
-/// rasterization work are reused across GPUs. Contexts are created lazily and
-/// kept for the manager's lifetime.
+/// All contexts share a font manager, glyph rasterizer, and ligature shaper so
+/// that fonts, rasterization, and shaping work are reused across GPUs. Contexts
+/// are created lazily and kept for the manager's lifetime.
 final class RenderContextManager {
     let fontManager = FontManager()
+    let ligatureShaper = LigatureShaper()
     private let rasterizer: GlyphRasterizer
     private let options: RenderContextOptions
     private var contexts: [ObjectIdentifier: RenderContext] = [:]
@@ -180,7 +185,9 @@ final class RenderContextManager {
         let key = ObjectIdentifier(device)
         if let existing = contexts[key] { return existing }
         let context = try RenderContext(device: device, fontManager: fontManager,
-                                        rasterizer: rasterizer, options: self.options,
+                                        rasterizer: rasterizer,
+                                        ligatureShaper: ligatureShaper,
+                                        options: self.options,
                                         glyphOptions: options)
         contexts[key] = context
         return context

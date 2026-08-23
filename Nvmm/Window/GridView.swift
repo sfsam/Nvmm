@@ -266,6 +266,14 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     /// Builds the text and anchor point for a Look Up gesture.
     private let lookupController = LookupController()
 
+    /// Whether runs of ASCII punctuation are shaped so the font's programming
+    /// ligatures form.
+    private var ligaturesEnabled = Settings.ligatures
+
+    /// Per-row scratch: where each column's ligature glyph sits, or a zero
+    /// placement for a column that renders from its own grapheme.
+    private var ligatureRuns: [LigaturePlacement] = []
+
     // MARK: - Setup
 
     override init(frame frameRect: NSRect) {
@@ -329,6 +337,8 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     func setFont(_ font: FontFamily, lineSpace: Int = 0) {
         clearCursorTrail()
         fontFamily = font
+        // Shaped runs are keyed by face, so drop the ones this font retires.
+        renderContext?.ligatureShaper.reset()
 
         let leading = font.leading.rounded(.down)
         let descent = font.descent.rounded(.down)
@@ -641,7 +651,8 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         let compositionClearCount = compositionRender.valid
             ? max(0, compositionRender.clearEnd - compositionRender.clearStart) : 0
         let compositionBackgroundCount = compositionClearCount + compositionCellCount
-        let renderCellCapacity = gridSize + compositionCellCount
+        // One extra slot holds the block cursor's x-ray character.
+        let renderCellCapacity = gridSize + compositionCellCount + 1
 
         let uniformSize = MemoryLayout<uniform_data>.stride
         let backgroundSize = gridSize * MemoryLayout<UInt32>.stride
@@ -696,7 +707,8 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             cursor_color: cursor.background.rgb | (cursorAlpha << 24),
             cursor_line_width: cursorLineThickness,
             cursor_cell_width: UInt32(cursor.width),
-            grid_width: UInt32(grid.width))
+            grid_width: UInt32(grid.width),
+            cursor_xray: 0)
 
         var glyphCount = 0
         var cellGraphicCount = 0
@@ -710,15 +722,33 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         var underdashedPosition: UInt16 = 0
 
         var backgroundIndex = 0
+        var cursorXray = false
+        let cellWidth = Int(cellSizePixels.x)
         for row in 0..<grid.height {
+            if ligaturesEnabled {
+                let start = row * grid.width
+                context.ligatureShaper.shape(
+                    row: grid.cells[start..<(start + grid.width)],
+                    family: font, into: &ligatureRuns)
+            }
+            // A ligature's ink for the cursor cell can belong to a neighboring
+            // cell's glyph, so recoloring cannot reveal the character
+            // underneath. The glyph pass carves the cursor rect out instead.
+            let xray = ligaturesEnabled && blockCursorApplies
+                && row == cursor.row
+                && cursor.column < ligatureRuns.count
+                && ligatureRuns[cursor.column].glyph != 0
+            if xray { cursorXray = true }
             for col in 0..<grid.width {
                 var cell = grid.cell(row, col)
                 if blockCursorApplies, row == cursor.row,
                    col >= cursor.column, col < cursor.column + cursor.width {
                     // Block cursors invert the cell through the normal grid
-                    // passes, so fade their replacement colors in place.
+                    // passes, so fade their replacement colors in place. An
+                    // x-ray cell keeps its foreground: the ligature draws
+                    // intact and the cursor rect supplies the character.
                     cell = cell.recolored(
-                        foreground: blendCursorColor(
+                        foreground: xray ? cell.foreground : blendCursorColor(
                             cell.foreground, cursor.foreground),
                         background: blendCursorColor(
                             cell.background, cursor.background),
@@ -795,17 +825,63 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                         continue
                     }
 
-                    let glyph = glyphManager.glyph(family: font, cell: cell,
-                                                   foreground: foreground)
-                    glyphs[glyphCount] = glyph_data(
-                        grid_position: gridpos,
-                        cell_width: UInt32(cell.width),
-                        foreground_color: foreground.opaque,
-                        atlas: glyph.format.rawValue, rect: glyph.rect)
-                    glyphCount += 1
+                    // A substituted glyph is already shaped, so it is drawn
+                    // by identifier. One glyph can carry a whole ligature and
+                    // reach back across every cell of the run, so the run is
+                    // anchored at its first cell and declared that many cells
+                    // wide — the extent the glyph pass lets its ink cover.
+                    let placement = ligaturesEnabled
+                        ? ligatureRuns[col] : LigaturePlacement()
+                    let ligated = placement.glyph != 0
+                    let glyph = ligated
+                        ? glyphManager.glyph(
+                            font: font.font(cell.fontAttributes),
+                            glyphID: placement.glyph)
+                        : glyphManager.glyph(family: font, cell: cell,
+                                             foreground: foreground)
+                    var rect = glyph.rect
+                    var anchorCell = gridpos
+                    var cellSpan = cell.width
+                    if ligated {
+                        rect.position.x += Int16(
+                            cellWidth * (col - Int(placement.start)))
+                        anchorCell = SIMD2<Int16>(placement.start, Int16(row))
+                        cellSpan = Int(placement.length)
+                    }
+
+                    // A ligature leaves all but one of its cells empty.
+                    if rect.size.x > 0, rect.size.y > 0 {
+                        glyphs[glyphCount] = glyph_data(
+                            grid_position: anchorCell,
+                            cell_width: UInt32(cellSpan),
+                            foreground_color: foreground.opaque,
+                            atlas: glyph.format.rawValue, rect: rect,
+                            flags: 0)
+                        glyphCount += 1
+                    }
                 }
             }
         }
+
+        // The character the cursor sits on, flagged so the glyph pass draws it
+        // only within the cursor rect and hides the ligature there. It fades
+        // by interpolating its own color, the way a recolored cell does.
+        if cursorXray, !cursor.cell.isEmpty {
+            let foreground = blendCursorColor(cursor.cell.foreground,
+                                              cursor.foreground)
+            let glyph = glyphManager.glyph(family: font, cell: cursor.cell,
+                                           foreground: foreground)
+            glyphs[glyphCount] = glyph_data(
+                grid_position: SIMD2<Int16>(Int16(cursor.column),
+                                            Int16(cursor.row)),
+                cell_width: UInt32(cursor.width),
+                foreground_color: foreground.opaque,
+                atlas: glyph.format.rawValue, rect: glyph.rect,
+                flags: GLYPH_FLAG_XRAY)
+            glyphCount += 1
+        }
+        // Known only once the rows have been scanned for a run under the cursor.
+        uniforms.pointee.cursor_xray = cursorXray ? 1 : 0
 
         let gridGlyphCount = glyphCount
         let gridCellGraphicCount = cellGraphicCount
@@ -908,7 +984,8 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                                                 foreground_color:
                                                     cell.foreground.opaque,
                                                 atlas: glyph.format.rawValue,
-                                                rect: glyph.rect)
+                                                rect: glyph.rect,
+                                                flags: 0)
                 glyphCount += 1
             }
 
@@ -994,6 +1071,9 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
 
         encoder.setRenderPipelineState(context.backgroundPipeline)
         encoder.setVertexBuffer(buffer, offset: uniformOffset, index: 0)
+        // The glyph pass reads the cursor rect per fragment to carve out its
+        // x-ray; the other fragment functions ignore this binding.
+        encoder.setFragmentBuffer(buffer, offset: uniformOffset, index: 0)
         encoder.setVertexBuffer(buffer, offset: backgroundOffset, index: 1)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
                                vertexCount: 4, instanceCount: gridSize)
@@ -1155,6 +1235,16 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         guard size.width > 0, size.height > 0 else { return nil }
         return GridPoint(row: min(max(point.row, 0), size.height - 1),
                          column: min(max(point.column, 0), size.width - 1))
+    }
+
+    // MARK: - Ligatures
+
+    /// Applies the ligature setting, redrawing when it changed.
+    func applyLigatureSettings() {
+        let enabled = Settings.ligatures
+        guard enabled != ligaturesEnabled else { return }
+        ligaturesEnabled = enabled
+        needsDisplay = true
     }
 
     // MARK: - Cursor trail

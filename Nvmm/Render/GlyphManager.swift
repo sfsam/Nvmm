@@ -9,6 +9,10 @@
 //  the foreground because a CoreText grapheme can contain both color and text
 //  runs. After committing a frame, call `evict` to cull old cache pages.
 //
+//  A glyph can be named either by the grapheme CoreText still has to shape or
+//  by an identifier the caller shaped already, which is how the substituted
+//  glyphs of a ligature reach the atlas.
+//
 
 import CoreText
 import Metal
@@ -21,17 +25,24 @@ nonisolated struct CachedGlyph {
 }
 
 final class GlyphManager {
+    /// What a cached glyph was drawn from: a grapheme CoreText still has to
+    /// shape, or a glyph identifier a caller shaped already.
+    private enum GlyphSource: Hashable {
+        case text(String)
+        case glyph(CGGlyph)
+    }
+
     private struct BaseKey: Hashable {
         let font: CTFont
-        let text: String
+        let source: GlyphSource
 
         static func == (lhs: BaseKey, rhs: BaseKey) -> Bool {
-            lhs.font === rhs.font && lhs.text == rhs.text
+            lhs.font === rhs.font && lhs.source == rhs.source
         }
 
         func hash(into hasher: inout Hasher) {
             hasher.combine(ObjectIdentifier(font))
-            hasher.combine(text)
+            hasher.combine(source)
         }
     }
 
@@ -98,7 +109,7 @@ final class GlyphManager {
     /// caching it on first use.
     func glyph(font: CTFont, text: String,
                foreground: RGBColor) -> CachedGlyph {
-        let base = BaseKey(font: font, text: text)
+        let base = BaseKey(font: font, source: .text(text))
         let maskKey = MaskKey(base: base, options: options)
         if let cached = maskMap[maskKey] { return cached }
 
@@ -106,8 +117,40 @@ final class GlyphManager {
                                 options: options)
         if let cached = colorMap[colorKey] { return cached }
 
-        let bitmap = rasterizer.rasterize(
-            font: font, foreground: foreground, text: text, options: options)
+        return store(rasterizer.rasterize(font: font, foreground: foreground,
+                                          text: text, options: options),
+                     maskKey: maskKey, colorKey: colorKey)
+    }
+
+    /// A cached glyph for an already-shaped glyph identifier of `font`, such as
+    /// one substituted for a ligature. Never a color glyph, so it needs no
+    /// foreground and lives only in the mask atlas.
+    func glyph(font: CTFont, glyphID: CGGlyph) -> CachedGlyph {
+        let base = BaseKey(font: font, source: .glyph(glyphID))
+        let maskKey = MaskKey(base: base, options: options)
+        if let cached = maskMap[maskKey] { return cached }
+
+        return store(rasterizer.rasterize(font: font, glyph: glyphID,
+                                          options: options),
+                     maskKey: maskKey, colorKey: nil)
+    }
+
+    /// Adds a freshly rasterized bitmap to the atlas its format requires and
+    /// records it under the matching key.
+    private func store(_ bitmap: GlyphBitmap, maskKey: MaskKey,
+                       colorKey: ColorKey?) -> CachedGlyph {
+        let empty = CachedGlyph(
+            rect: glyph_rect(size: .zero, position: .zero,
+                             texture_origin: .zero),
+            format: bitmap.format)
+
+        // An outline-free glyph never reaches the atlas; caching the empty rect
+        // keeps it from being rasterized again.
+        guard bitmap.width > 0, bitmap.height > 0 else {
+            maskMap[maskKey] = empty
+            return empty
+        }
+
         let cache = bitmap.format == .mask ? maskCache : colorCache
         guard let position = cache.add(bitmap) else {
             if bitmap.format == .mask {
@@ -115,10 +158,7 @@ final class GlyphManager {
             } else {
                 colorNeedsEviction = true
             }
-            return CachedGlyph(
-                rect: glyph_rect(size: .zero, position: .zero,
-                                 texture_origin: .zero),
-                format: bitmap.format)
+            return empty
         }
 
         let cached = CachedGlyph(
@@ -129,7 +169,7 @@ final class GlyphManager {
             format: bitmap.format)
         if bitmap.format == .mask {
             maskMap[maskKey] = cached
-        } else {
+        } else if let colorKey {
             colorMap[colorKey] = cached
         }
         return cached

@@ -26,7 +26,8 @@ final class SettingsTests: XCTestCase {
                     Settings.verticalScrollbarKey,
                     Settings.progressBarKey,
                     Settings.cursorTrailStrengthKey,
-                    Settings.fontThicknessKey]
+                    Settings.fontThicknessKey,
+                    Settings.ligaturesKey]
 
         // The user's own values must not decide the outcome, and must survive
         // the test: only the registration domain is under test here.
@@ -46,6 +47,7 @@ final class SettingsTests: XCTestCase {
         XCTAssertFalse(Settings.verticalScrollbar)
         XCTAssertEqual(Settings.cursorTrailStrength, 0)
         XCTAssertEqual(Settings.fontThickness, 50)
+        XCTAssertFalse(Settings.ligatures)
     }
 
     @MainActor

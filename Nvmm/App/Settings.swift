@@ -44,6 +44,10 @@ enum Settings {
     /// Zero disables thickening; positive values are CoreText strengths.
     static let fontThicknessKey = "NVFontThickness"
 
+    /// Whether runs of ASCII punctuation are shaped together so the font's
+    /// programming ligatures form. Off unless the user turns it on.
+    static let ligaturesKey = "NVEnableLigatures"
+
     nonisolated static let cursorTrailStrengthMinimum = 0
     nonisolated static let cursorTrailStrengthMaximum = 3
     nonisolated static let fontThicknessMinimum = 0
@@ -82,6 +86,10 @@ enum Settings {
     static var fontThickness: Int {
         min(max(UserDefaults.standard.integer(forKey: fontThicknessKey),
                 fontThicknessMinimum), fontThicknessMaximum)
+    }
+
+    static var ligatures: Bool {
+        UserDefaults.standard.bool(forKey: ligaturesKey)
     }
 
     /// The slider detent nearest to an existing thickness default.
@@ -133,6 +141,8 @@ final class SettingsWindowController: NSWindowController {
             String(localized: "Behavior:"))
         let windowLabel = NSTextField(labelWithString:
             String(localized: "Window:"))
+        let textLabel = NSTextField(labelWithString:
+            String(localized: "Text:"))
         let thicknessLabel = NSTextField(labelWithString:
             String(localized: "Text thickness:"))
         let cursorTrailLabel = NSTextField(labelWithString:
@@ -157,6 +167,10 @@ final class SettingsWindowController: NSWindowController {
             key: Settings.verticalScrollbarKey)
         let scrollbarNote = Self.note(String(localized:
             "Scrolls by buffer lines, not visual lines. It may not behave as expected if your text has wrapped lines or folds."))
+
+        let ligatures = Self.checkbox(
+            String(localized: "Programming ligatures"),
+            key: Settings.ligaturesKey)
 
         let thickness = NSSlider(value: 0, minValue: 0, maxValue: 3,
                                  target: nil, action: nil)
@@ -190,6 +204,7 @@ final class SettingsWindowController: NSWindowController {
                                       [windowLabel, titlebar],
                                       [empty, scrollbar],
                                       [empty, scrollbarNote],
+                                      [textLabel, ligatures],
                                       [thicknessLabel, thickness],
                                       [cursorTrailLabel, cursorTrail]])
         grid.translatesAutoresizingMaskIntoConstraints = false
@@ -198,6 +213,7 @@ final class SettingsWindowController: NSWindowController {
         grid.row(at: 2).bottomPadding = 12
         grid.row(at: 5).bottomPadding = 12
         grid.row(at: 6).bottomPadding = 12
+        grid.row(at: 7).bottomPadding = 12
 
         // Indent secondary controls to the checkbox-title column.
         for item in [buffersNote, scrollbarNote, thickness, cursorTrail] {
