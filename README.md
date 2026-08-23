@@ -59,7 +59,7 @@ Apple Development is explicitly enabled for it.
 Download Neovim 0.12 or newer, then build the app:
 
 ```sh
-Scripts/download_nvim.sh v0.12.4
+Scripts/download_nvim.sh v0.12.5
 xcodebuild -project Nvmm.xcodeproj -scheme Nvmm \
   -configuration Release -destination platform=macOS build
 ```
