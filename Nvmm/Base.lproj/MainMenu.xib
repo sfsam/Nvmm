@@ -31,6 +31,11 @@
                                 </connections>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="wFC-TO-SCJ"/>
+                            <menuItem title="Services" id="0Ov-6R-6NC">
+                                <modifierMask key="keyEquivalentModifierMask"/>
+                                <menu key="submenu" title="Services" systemMenu="services" id="Eqv-Ub-8ng"/>
+                            </menuItem>
+                            <menuItem isSeparatorItem="YES" id="jh9-ym-f28"/>
                             <menuItem title="Hide Nvmm" keyEquivalent="h" id="Olw-nP-bQN">
                                 <connections>
                                     <action selector="hide:" target="-1" id="PnN-Uc-m68"/>
