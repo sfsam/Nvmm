@@ -104,8 +104,11 @@ nonisolated enum Spawn {
         if pipe(&fds) != 0 {
             return (Pipe(readEnd: -1, writeEnd: -1), errno)
         }
-        // Racey, but the best we can do: another thread could fork between the
-        // pipe() and the fcntl() calls.
+        // A spawn through `spawn(path:argv:env:workingDirectory:streams:)`
+        // closes these on its own. This covers the rest: any other fork or
+        // exec in the process, from Foundation or a framework, inherits what
+        // is not marked here. It is racey — another thread could fork between
+        // the pipe() and the fcntl() calls — but it is the best available.
         _ = fcntl(fds[0], F_SETFD, FD_CLOEXEC)
         _ = fcntl(fds[1], F_SETFD, FD_CLOEXEC)
         return (Pipe(readEnd: fds[0], writeEnd: fds[1]), 0)
@@ -140,9 +143,16 @@ nonisolated enum Spawn {
         pthread_sigmask(SIG_SETMASK, nil, &signalMask)
         sigdelset(&signalMask, SIGTERM)
         posix_spawnattr_setsigmask(&attributes, &signalMask)
+        // The child gets the descriptors named in the file actions below and
+        // nothing else. Without this every descriptor the process holds that
+        // is not close-on-exec — including ones opened by frameworks, which
+        // Nvmm never sees — reaches Neovim and stays open for as long as it
+        // runs. Every stream the child needs, inherited ones included, must
+        // therefore be named: this closes what a file action does not claim.
         posix_spawnattr_setflags(
             &attributes,
-            Int16(POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK))
+            Int16(POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK
+                  | POSIX_SPAWN_CLOEXEC_DEFAULT))
 
         if let directory = workingDirectory, !directory.isEmpty {
             let code = posix_spawn_file_actions_addchdir_np(&actions, directory)
@@ -150,8 +160,20 @@ nonisolated enum Spawn {
         }
 
         for (source, target) in [(streams.input, 0), (streams.output, 1), (streams.error, 2)] {
-            guard source != -1 else { continue }
-            let code = posix_spawn_file_actions_adddup2(&actions, source, Int32(target))
+            let code: Int32
+            if source == -1 {
+                // Inheriting a stream means naming it, since the spawn closes
+                // what no file action claims. A descriptor already closed in
+                // this process cannot be named — the spawn would fail with
+                // EBADF — and needs no action: left unnamed it stays closed in
+                // the child, which is what inheriting it means here.
+                guard fcntl(Int32(target), F_GETFD) != -1 else { continue }
+                code = posix_spawn_file_actions_addinherit_np(
+                    &actions, Int32(target))
+            } else {
+                code = posix_spawn_file_actions_adddup2(
+                    &actions, source, Int32(target))
+            }
             if code != 0 { return Result(pid: 0, error: code) }
         }
 

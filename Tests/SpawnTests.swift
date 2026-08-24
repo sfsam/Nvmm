@@ -44,6 +44,44 @@ final class SpawnTests: XCTestCase {
         XCTAssertEqual(String(decoding: data, as: UTF8.self), input)
     }
 
+    /// A stream left at -1 is inherited, so the child must still hold it: the
+    /// spawn closes every descriptor no file action names.
+    func testStreamsLeftUnsetAreInheritedByTheChild() async throws {
+        let result = Spawn.spawn(
+            path: "/bin/sh",
+            argv: ["/bin/sh", "-c",
+                   "[ -e /dev/fd/0 ] && [ -e /dev/fd/1 ] && [ -e /dev/fd/2 ]"],
+            env: [], workingDirectory: nil, streams: Spawn.Streams())
+        XCTAssertEqual(result.error, 0)
+
+        let termination = await Spawn.wait(forChild: result.pid)
+
+        XCTAssertEqual(termination, .exited(status: 0))
+    }
+
+    /// A stream inherited from a descriptor this process has already closed
+    /// stays closed in the child, rather than failing the spawn.
+    func testAClosedStreamIsInheritedAsClosed() async throws {
+        let saved = dup(0)
+        defer {
+            if saved != -1 {
+                dup2(saved, 0)
+                close(saved)
+            }
+        }
+        close(0)
+
+        let result = Spawn.spawn(
+            path: "/bin/sh",
+            argv: ["/bin/sh", "-c", "! [ -e /dev/fd/0 ]"],
+            env: [], workingDirectory: nil, streams: Spawn.Streams())
+        XCTAssertEqual(result.error, 0)
+
+        let termination = await Spawn.wait(forChild: result.pid)
+
+        XCTAssertEqual(termination, .exited(status: 0))
+    }
+
     /// An entry replaces the inherited value for its key. Two entries for one
     /// key would leave the inherited one first, which is the one a `getenv`
     /// in the child answers with.
