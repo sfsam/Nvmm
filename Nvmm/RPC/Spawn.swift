@@ -155,8 +155,17 @@ nonisolated enum Spawn {
             if code != 0 { return Result(pid: 0, error: code) }
         }
 
-        // Inherit the parent environment and append the caller's additions.
-        let fullEnv = ProcessInfo.processInfo.environment.map { "\($0.key)=\($0.value)" } + env
+        // Inherit the parent environment, with the caller's entries replacing
+        // the values of the keys they name. Appending them instead would leave
+        // both: a C `getenv` answers with the first of two entries for a key,
+        // which is the inherited one, so the caller's value would be ignored.
+        var environment = ProcessInfo.processInfo.environment
+        for entry in env {
+            guard let separator = entry.firstIndex(of: "=") else { continue }
+            environment[String(entry[..<separator])] =
+                String(entry[entry.index(after: separator)...])
+        }
+        let fullEnv = environment.map { "\($0.key)=\($0.value)" }
 
         var argvC = argv.map { strdup($0) }
         argvC.append(nil)

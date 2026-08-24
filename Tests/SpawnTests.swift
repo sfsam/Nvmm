@@ -44,6 +44,43 @@ final class SpawnTests: XCTestCase {
         XCTAssertEqual(String(decoding: data, as: UTF8.self), input)
     }
 
+    /// An entry replaces the inherited value for its key. Two entries for one
+    /// key would leave the inherited one first, which is the one a `getenv`
+    /// in the child answers with.
+    func testEnvironmentEntryReplacesTheInheritedValue() async throws {
+        // A key the parent exports itself, so an entry that joins the
+        // inherited one rather than replacing it leaves two of them.
+        let key = "HOME"
+        let replacement = "/nvmm-spawn-test"
+        let inherited = try XCTUnwrap(ProcessInfo.processInfo.environment[key])
+        XCTAssertNotEqual(inherited, replacement)
+        // `env` reports what it was handed. A shell would rebuild its own
+        // environment first, and report one entry either way.
+        let output = Spawn.openPipe()
+        XCTAssertEqual(output.error, 0)
+        defer { close(output.pipe.readEnd) }
+        let result = Spawn.spawn(
+            path: "/usr/bin/env", argv: ["/usr/bin/env"],
+            env: ["\(key)=\(replacement)"], workingDirectory: nil,
+            streams: Spawn.Streams(output: output.pipe.writeEnd))
+        close(output.pipe.writeEnd)
+        XCTAssertEqual(result.error, 0)
+
+        var reported = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = read(output.pipe.readEnd, &buffer, buffer.count)
+            if count <= 0 { break }
+            reported.append(contentsOf: buffer[0..<count])
+        }
+        let termination = await Spawn.wait(forChild: result.pid)
+        XCTAssertEqual(termination, .exited(status: 0))
+
+        let entries = String(decoding: reported, as: UTF8.self)
+            .split(separator: "\n").filter { $0.hasPrefix("\(key)=") }
+        XCTAssertEqual(entries, ["\(key)=\(replacement)"])
+    }
+
     func testParsesUnixAndTCPServerAddresses() {
         XCTAssertEqual(parseRPCAddress("/tmp/nvim.sock"),
                        .unix(path: "/tmp/nvim.sock"))
