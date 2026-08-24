@@ -12,6 +12,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let renderManager = RenderContextManager()
     private let terminationCoordinator = TerminationCoordinator()
     private var controlServer: ControlServer?
+
+    // True when the process is a test host rather than the interactive app.
+    // A test host must not take the interactive launch path: it holds no
+    // windows of its own, and the test runner ends it without a quit, so
+    // anything it starts outlives it.
+    private static let isTestHost = ProcessInfo.processInfo
+        .environment["XCTestConfigurationFilePath"] != nil
     // Set when the helper's launch marker is present, and cleared by the first
     // control request. AppKit's untitled window is suppressed while it is true
     // so the request's own window is the only one.
@@ -37,10 +44,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Settings.registerDefaults()
         // A test host must not serve the CLI endpoint. It shares the endpoint
         // path with an interactive build, so whichever binds second runs
-        // without a control channel; and the test runner ends the host without
-        // a quit, so the socket outlives it.
-        let environment = ProcessInfo.processInfo.environment
-        guard environment["XCTestConfigurationFilePath"] == nil else { return }
+        // without a control channel; and the socket would outlive the host.
+        guard !Self.isTestHost else { return }
         do {
             controlServer = try ControlServer { [weak self] request, channel in
                 self?.handleCLIRequest(request, channel: channel)
@@ -166,8 +171,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// The CLI's socket request is authoritative when its private launch marker
     /// is present, so AppKit must not race it with an empty window.
+    ///
+    /// A test host declines outright. Its window would run a Neovim under the
+    /// configuration of whoever is running the tests, and the test runner ends
+    /// the host without a quit, leaving that Neovim behind.
     func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool {
-        !awaitingInitialCLIRequest
+        !awaitingInitialCLIRequest && !Self.isTestHost
     }
 
     /// Recovers from a launch whose control request never arrived — the helper
