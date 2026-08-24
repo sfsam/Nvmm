@@ -844,21 +844,37 @@ final class NeovimProcessTests: XCTestCase {
 
     // MARK: Real-Neovim helper
 
+    /// Runs `body` against a real bundled Neovim and reaps the child.
+    ///
+    /// Closing the transport alone is not enough: a buffer left modified sends
+    /// Neovim to a prompt on its way out, and with no UI to answer it the
+    /// process waits there forever. `terminateChild` escalates to `SIGKILL`,
+    /// which ends it whatever state it stopped in.
+    ///
+    /// A private state directory keeps swap files out of the one the person
+    /// running the tests edits in, so a test that ends abruptly cannot leave
+    /// residue that later runs — or that person's own Neovim — trip over.
     private func withNvim(_ body: (NeovimProcess) async throws -> Void) async throws {
         guard let nvim = await MainActor.run(body: { NeovimBundle.executableURL }) else {
             throw XCTSkip("bundled nvim executable not available")
         }
+        let state = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nvmm-state-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: state) }
         let process = NeovimProcess()
         try await process.spawn(
             path: nvim.path,
-            argv: [nvim.path, "--embed", "-n", "-u", "NONE", "-i", "NONE"])
+            argv: [nvim.path, "--embed", "-n", "-u", "NONE", "-i", "NONE"],
+            env: ["XDG_STATE_HOME=\(state.path)"])
         do {
             try await body(process)
         } catch {
             await process.disconnect()
+            _ = await process.terminateChild()
             throw error
         }
         await process.disconnect()
+        _ = await process.terminateChild()
     }
 
     private func attachLinegridUI(_ process: NeovimProcess) async throws {

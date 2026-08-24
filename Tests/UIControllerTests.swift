@@ -675,12 +675,7 @@ final class UIControllerTests: XCTestCase {
     }
 
     func testRealRestartEmitsHandoffFromNeovim() async throws {
-        guard let nvim = await MainActor.run(body: { NeovimBundle.executableURL }) else {
-            throw XCTSkip("bundled nvim executable not available")
-        }
-        let process = NeovimProcess()
-        try await process.spawn(path: nvim.path,
-                                argv: [nvim.path, "--clean", "--embed"])
+        let process = try await spawnNvim(["--clean", "-n", "--embed"])
         var options = UIOptions()
         options.extLinegrid = true
         let result = await process.uiAttach(width: 80, height: 24, options: options)
@@ -711,21 +706,36 @@ final class UIControllerTests: XCTestCase {
         XCTAssertFalse(handoff?.address.isEmpty ?? true)
 
         // Nothing reconnected to the successor, so quit it rather than leak it.
+        // The successor is not a child of this process, so its identifier has
+        // to come from the successor itself: a `qall!` that does not land
+        // leaves a server nothing else will ever end.
         if let address = handoff?.address, !address.isEmpty {
             let successor = NeovimProcess()
             try? await successor.connect(address)
+            let reply = try? await successor.request(
+                "nvim_eval", [.string("getpid()")])
             _ = try? await successor.request("nvim_command", [.string("qall!")])
+            if let pid = reply?.result.integer?.signed {
+                // The successor's exit closes this connection, so waiting for
+                // the transport to end reports the quit landing. It also keeps
+                // the fallback aimed: a connection still open is the process
+                // still running, and an identifier that cannot yet have been
+                // reused by an unrelated one.
+                let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+                while ContinuousClock.now < deadline {
+                    if await successor.transportTermination() != nil { break }
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+                if await successor.transportTermination() == nil {
+                    kill(pid_t(pid), SIGKILL)
+                }
+            }
             await successor.disconnect()
         }
     }
 
     func testRealDetachEndsUIWhileSpawnedServerKeepsRunning() async throws {
-        guard let nvim = await MainActor.run(body: { NeovimBundle.executableURL }) else {
-            throw XCTSkip("bundled nvim executable not available")
-        }
-        let process = NeovimProcess()
-        try await process.spawn(path: nvim.path,
-                                argv: [nvim.path, "--clean", "--embed"])
+        let process = try await spawnNvim(["--clean", "-n", "--embed"])
         var options = UIOptions()
         options.extLinegrid = true
         let result = await process.uiAttach(width: 80, height: 24,
@@ -791,6 +801,35 @@ final class UIControllerTests: XCTestCase {
 
     // MARK: Live attach
 
+    /// Spawns a real bundled Neovim and reaps the child when the test ends.
+    ///
+    /// Closing the transport alone is not enough: a buffer left modified sends
+    /// Neovim to a prompt on its way out, and with no UI to answer it the
+    /// process waits there forever. `terminateChild` escalates to `SIGKILL`,
+    /// which ends it whatever state it stopped in.
+    ///
+    /// A private state directory keeps swap files out of the one the person
+    /// running the tests edits in, so a test that ends abruptly cannot leave
+    /// residue that later runs — or that person's own Neovim — trip over.
+    private func spawnNvim(
+        _ arguments: [String]
+    ) async throws -> NeovimProcess {
+        guard let nvim = await MainActor.run(body: { NeovimBundle.executableURL }) else {
+            throw XCTSkip("bundled nvim executable not available")
+        }
+        let state = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nvmm-state-\(UUID().uuidString)")
+        let process = NeovimProcess()
+        try await process.spawn(path: nvim.path,
+                                argv: [nvim.path] + arguments,
+                                env: ["XDG_STATE_HOME=\(state.path)"])
+        addTeardownBlock {
+            _ = await process.terminateChild()
+            try? FileManager.default.removeItem(at: state)
+        }
+        return process
+    }
+
     /// Concatenates `count` cells of a row into a string.
     private func rowText(_ grid: Grid, row: Int, count: Int) -> String {
         (0..<count).map { grid.cell(row, $0).text }.joined()
@@ -836,11 +875,7 @@ final class UIControllerTests: XCTestCase {
     }
 
     func testModifiedStatePublishedWhenBufferChanges() async throws {
-        guard let nvim = await MainActor.run(body: { NeovimBundle.executableURL }) else {
-            throw XCTSkip("bundled nvim executable not available")
-        }
-        let process = NeovimProcess()
-        try await process.spawn(path: nvim.path, argv: [nvim.path, "--clean", "--embed"])
+        let process = try await spawnNvim(["--clean", "-n", "--embed"])
 
         var options = UIOptions()
         options.extLinegrid = true
@@ -858,11 +893,7 @@ final class UIControllerTests: XCTestCase {
     }
 
     func testAttachAndTypedTextLandsInGrid() async throws {
-        guard let nvim = await MainActor.run(body: { NeovimBundle.executableURL }) else {
-            throw XCTSkip("bundled nvim executable not available")
-        }
-        let process = NeovimProcess()
-        try await process.spawn(path: nvim.path, argv: [nvim.path, "--clean", "--embed"])
+        let process = try await spawnNvim(["--clean", "-n", "--embed"])
 
         var options = UIOptions()
         options.extLinegrid = true
@@ -896,10 +927,17 @@ final class UIControllerTests: XCTestCase {
         server.executableURL = URL(fileURLWithPath: nvim.path)
         server.arguments = ["--headless", "--clean", "-n", "-i", "NONE",
                             "--listen", socket]
+        let state = NSTemporaryDirectory() + "nvmm-state-\(UUID().uuidString)"
+        server.environment = ProcessInfo.processInfo.environment
+            .merging(["XDG_STATE_HOME": state]) { _, new in new }
         try server.run()
         defer {
-            server.terminate()
+            // The test leaves a modified buffer, and a `SIGTERM` sends Neovim
+            // to a prompt it can never answer without a UI. Kill it outright:
+            // nothing here depends on an orderly exit.
+            kill(server.processIdentifier, SIGKILL)
             try? FileManager.default.removeItem(atPath: socket)
+            try? FileManager.default.removeItem(atPath: state)
         }
 
         // The server creates the socket asynchronously; wait for it to appear.
