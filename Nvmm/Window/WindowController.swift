@@ -132,6 +132,11 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     private var bellTask: Task<Void, Never>?
     private var settingsTask: Task<Void, Never>?
 
+    /// The document URL for the current buffer, resolved once per state
+    /// change so the proxy-icon setting can be reapplied without hitting
+    /// the filesystem again.
+    private var documentURL: URL?
+
     /// True only when Nvmm can guarantee Neovim shares its filesystem.
     private var documentPathsAreLocal = true
 
@@ -1149,8 +1154,17 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     /// Applies the current buffer identity and edited state as one snapshot.
     private func applyDocumentState(_ state: DocumentState) {
         window?.isDocumentEdited = state.isModified
-        window?.representedURL = Self.representedDocumentURL(
+        documentURL = Self.representedDocumentURL(
             for: state, documentPathsAreLocal: documentPathsAreLocal)
+        applyDocumentProxyIcon()
+    }
+
+    /// Attaches or detaches the resolved document URL, which is what puts
+    /// the proxy icon in the title bar.
+    private func applyDocumentProxyIcon() {
+        let url = Settings.documentProxyIcon ? documentURL : nil
+        guard let window, window.representedURL != url else { return }
+        window.representedURL = url
     }
 
     /// Reapplies the settings that are part of this window's state whenever the
@@ -1169,6 +1183,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         settingsTask = Task { [weak self] in
             for await _ in changes {
                 self?.applyTitlebarTransparency()
+                self?.applyDocumentProxyIcon()
                 self?.applyScrollbarVisibility()
                 self?.updateProgressIndicator()
                 self?.gridView.applyCursorTrailSettings()

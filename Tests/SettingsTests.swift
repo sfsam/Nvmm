@@ -23,6 +23,7 @@ final class SettingsTests: XCTestCase {
                     Settings.openFilesInBuffersKey,
                     Settings.terminateAfterLastWindowKey,
                     Settings.titlebarAppearsTransparentKey,
+                    Settings.documentProxyIconKey,
                     Settings.verticalScrollbarKey,
                     Settings.progressBarKey,
                     Settings.cursorTrailStrengthKey,
@@ -44,6 +45,7 @@ final class SettingsTests: XCTestCase {
         XCTAssertFalse(Settings.openFilesInBuffers)
         XCTAssertFalse(Settings.terminateAfterLastWindow)
         XCTAssertFalse(Settings.titlebarAppearsTransparent)
+        XCTAssertFalse(Settings.documentProxyIcon)
         XCTAssertFalse(Settings.verticalScrollbar)
         XCTAssertEqual(Settings.cursorTrailStrength, 0)
         XCTAssertEqual(Settings.fontThickness, 50)
@@ -93,7 +95,7 @@ final class SettingsTests: XCTestCase {
     }
 
     @MainActor
-    func testSettingsWindowContainsBoundDetentSliders() throws {
+    func testSettingsWindowContainsBoundControls() throws {
         let controller = SettingsWindowController()
         let contentView = try XCTUnwrap(controller.window?.contentView)
 
@@ -101,8 +103,8 @@ final class SettingsTests: XCTestCase {
             view.subviews + view.subviews.flatMap(descendants)
         }
 
-        let sliders = descendants(of: contentView)
-            .compactMap { $0 as? NSSlider }
+        let views = descendants(of: contentView)
+        let sliders = views.compactMap { $0 as? NSSlider }
         XCTAssertEqual(sliders.count, 2)
         let cursorSlider = try XCTUnwrap(sliders.first {
             $0.identifier?.rawValue == "cursorTrailStrength"
@@ -113,6 +115,12 @@ final class SettingsTests: XCTestCase {
         XCTAssertTrue(cursorSlider.allowsTickMarkValuesOnly)
         XCTAssertTrue(cursorSlider.isContinuous)
         XCTAssertNotNil(cursorSlider.infoForBinding(.value))
+
+        let buttons = views.compactMap { $0 as? NSButton }
+        let proxyIcon = try XCTUnwrap(buttons.first {
+            $0.title == "Document proxy icon in title bar"
+        })
+        XCTAssertNotNil(proxyIcon.infoForBinding(.value))
     }
 
     @MainActor

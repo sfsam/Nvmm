@@ -26,6 +26,9 @@ enum Settings {
     /// runs behind it.
     static let titlebarAppearsTransparentKey = "NVTitlebarAppearsTransparent"
 
+    /// Whether the window represents its current local file in the title bar.
+    static let documentProxyIconKey = "NVEnableDocumentProxyIcon"
+
     /// Whether the window shows a vertical scrollbar down its trailing edge.
     static let verticalScrollbarKey = "NVEnableVerticalScrollbar"
 
@@ -64,6 +67,10 @@ enum Settings {
 
     static var titlebarAppearsTransparent: Bool {
         UserDefaults.standard.bool(forKey: titlebarAppearsTransparentKey)
+    }
+
+    static var documentProxyIcon: Bool {
+        UserDefaults.standard.bool(forKey: documentProxyIconKey)
     }
 
     static var verticalScrollbar: Bool {
@@ -162,6 +169,10 @@ final class SettingsWindowController: NSWindowController {
             String(localized: "Transparent title bar"),
             key: Settings.titlebarAppearsTransparentKey)
 
+        let documentProxyIcon = Self.checkbox(
+            String(localized: "Document proxy icon in title bar"),
+            key: Settings.documentProxyIconKey)
+
         let scrollbar = Self.checkbox(
             String(localized: "Vertical scrollbar"),
             key: Settings.verticalScrollbarKey)
@@ -202,6 +213,7 @@ final class SettingsWindowController: NSWindowController {
                                       [empty, buffersNote],
                                       [empty, terminate],
                                       [windowLabel, titlebar],
+                                      [empty, documentProxyIcon],
                                       [empty, scrollbar],
                                       [empty, scrollbarNote],
                                       [textLabel, ligatures],
@@ -210,10 +222,11 @@ final class SettingsWindowController: NSWindowController {
         grid.translatesAutoresizingMaskIntoConstraints = false
         grid.rowAlignment = .firstBaseline
         grid.column(at: 0).xPlacement = .trailing
-        grid.row(at: 2).bottomPadding = 12
-        grid.row(at: 5).bottomPadding = 12
-        grid.row(at: 6).bottomPadding = 12
-        grid.row(at: 7).bottomPadding = 12
+
+        // Space below the last control of each group of settings.
+        for item in [terminate, scrollbarNote, ligatures, thickness] {
+            grid.cell(for: item)?.row?.bottomPadding = 12
+        }
 
         // Indent secondary controls to the checkbox-title column.
         for item in [buffersNote, scrollbarNote, thickness, cursorTrail] {
