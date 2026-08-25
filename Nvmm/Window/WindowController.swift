@@ -31,6 +31,12 @@ nonisolated enum WindowStartupOutcome: Sendable, Equatable {
     case failed(String)
 }
 
+private struct ConnectFallback {
+    let address: String
+    let owned: Bool
+    let documentPathsAreLocal: Bool
+}
+
 /// Describes only child exits that should be surfaced to the user.
 nonisolated func abnormalNeovimExitDescription(
     _ termination: Spawn.Termination?
@@ -120,11 +126,14 @@ final class WindowController: NSWindowController, NSWindowDelegate,
 
     private var renderTask: Task<Void, Never>?
     private var inputTask: Task<Void, Never>?
-    private var modifiedTask: Task<Void, Never>?
+    private var documentStateTask: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
     private var recentFileTask: Task<Void, Never>?
     private var bellTask: Task<Void, Never>?
     private var settingsTask: Task<Void, Never>?
+
+    /// True only when Nvmm can guarantee Neovim shares its filesystem.
+    private var documentPathsAreLocal = true
 
     // The ordered channel from main-actor input handlers to the process actor.
     private let commands: AsyncStream<NvimCommand>
@@ -297,7 +306,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     /// detaches the current UI before the new address is known good, so a bad
     /// address would otherwise orphan the old Neovim; instead we reconnect to
     /// it. Set on a connect handoff, cleared once consumed.
-    private var connectFallback: (address: String, owned: Bool)?
+    private var connectFallback: ConnectFallback?
 
     /// The server address this window connects to, or nil when it spawns
     /// its own Neovim. Used to name the address in a connection-failure alert.
@@ -390,6 +399,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     func start(connectingTo address: String) {
         source = .remote(address: address)
         ownsServer = false
+        documentPathsAreLocal = false
         launch()
     }
 
@@ -771,11 +781,13 @@ final class WindowController: NSWindowController, NSWindowDelegate,
             }
         }
 
-        // Mirror the current buffer's modified state into the window's
-        // document-edited dot as Neovim reports transitions.
-        modifiedTask = Task { [weak self] in
-            for await modified in process.modifiedStates {
-                self?.window?.isDocumentEdited = modified
+        // Do not describe the previous process while the new one attaches.
+        applyDocumentState(.empty)
+
+        // Mirror Neovim's current buffer into the native document window.
+        documentStateTask = Task { [weak self] in
+            for await state in process.documentStates {
+                self?.applyDocumentState(state)
             }
         }
 
@@ -949,7 +961,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         // Leave `inputTask` running — it is the window's single command
         // consumer and forwards to the new process once `startNeovim` swaps it
         // in. The per-process stream tasks are rebuilt by `startNeovim`.
-        modifiedTask?.cancel()
+        documentStateTask?.cancel()
         recentFileTask?.cancel()
         // The new session has no tasks of its own yet, so nothing carries over.
         progressTask?.cancel()
@@ -961,13 +973,18 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         // it as a fallback: if the new address fails, we return to it. A
         // `:restart`'s old server exits, so it has no fallback.
         if handoff.kind == .connect, let address = currentServerAddress {
-            connectFallback = (address: address, owned: ownsServer)
+            connectFallback = ConnectFallback(
+                address: address,
+                owned: ownsServer,
+                documentPathsAreLocal: documentPathsAreLocal)
         }
         source = .remote(address: handoff.address)
         // A `:restart` continues our own session, so we still own the new
         // server (closing quits it); a `:connect` attaches to a server someone
         // else runs, so it is borrowed (closing only detaches).
         ownsServer = handoff.kind == .restart
+        documentPathsAreLocal = documentPathsAreLocal
+            && handoff.kind == .restart
         lastHandoffKind = handoff.kind
         startNeovim()
     }
@@ -978,8 +995,10 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     /// reconnects. The fallback is cleared first, so if it too fails to
     /// connect (e.g. `:connect!` stopped the old server) the normal
     /// error-and-close path runs rather than looping.
-    private func recoverToFallback(_ fallback: (address: String, owned: Bool),
-                                   reason: String) {
+    private func recoverToFallback(
+        _ fallback: ConnectFallback,
+        reason: String
+    ) {
         connectFallback = nil
         if let failedAddress = remoteAddress {
             presentError(
@@ -990,6 +1009,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         }
         source = .remote(address: fallback.address)
         ownsServer = fallback.owned
+        documentPathsAreLocal = fallback.documentPathsAreLocal
         lastHandoffKind = nil
         startNeovim()
     }
@@ -1114,6 +1134,24 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     }
 
     // MARK: - Applying window state
+
+    /// Maps a reported path to a native document URL only when the process is
+    /// known to share this Mac's filesystem and the item exists locally.
+    nonisolated static func representedDocumentURL(
+        for state: DocumentState,
+        documentPathsAreLocal: Bool
+    ) -> URL? {
+        guard documentPathsAreLocal, let path = state.path,
+              FileManager.default.fileExists(atPath: path) else { return nil }
+        return URL(fileURLWithPath: path).standardizedFileURL
+    }
+
+    /// Applies the current buffer identity and edited state as one snapshot.
+    private func applyDocumentState(_ state: DocumentState) {
+        window?.isDocumentEdited = state.isModified
+        window?.representedURL = Self.representedDocumentURL(
+            for: state, documentPathsAreLocal: documentPathsAreLocal)
+    }
 
     /// Reapplies the settings that are part of this window's state whenever the
     /// defaults change, so the settings window takes effect as it is clicked.
@@ -1571,7 +1609,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         commandsContinuation.finish()
         renderTask?.cancel()
         inputTask?.cancel()
-        modifiedTask?.cancel()
+        documentStateTask?.cancel()
         progressTask?.cancel()
         recentFileTask?.cancel()
         bellTask?.cancel()

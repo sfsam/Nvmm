@@ -581,7 +581,7 @@ final class NeovimProcessTests: XCTestCase {
 
         let result = await attach.value
         XCTAssertEqual(result.status, .timedOut)
-        XCTAssertEqual(result.message, "Modified-state setup timed out")
+        XCTAssertEqual(result.message, "Document-state setup timed out")
         await process.disconnect()
     }
 
@@ -895,13 +895,13 @@ final class NeovimProcessTests: XCTestCase {
                   and type(_G.nvmm.open_count) == 'function'
                   and type(_G.nvmm.write_as) == 'function'
                   and type(_G.nvmm.drop_text) == 'function'
-                local modified = #vim.api.nvim_get_autocmds(
-                  {group='NvmmModified'}) > 0
+                local document_state = #vim.api.nvim_get_autocmds(
+                  {group='NvmmDocumentState'}) > 0
                 local progress = vim.fn.exists('##Progress') ~= 1
                   or #vim.api.nvim_get_autocmds({group='NvmmProgress'}) > 0
                 local recent = #vim.api.nvim_get_autocmds(
                   {group='NvmmRecentFiles'}) == 2
-                return {helpers, modified, progress, recent}
+                return {helpers, document_state, progress, recent}
                 """
             let response = try await process.request(
                 "nvim_exec_lua", [.string(lua), .array([])])

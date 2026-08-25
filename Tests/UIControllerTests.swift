@@ -625,19 +625,19 @@ final class UIControllerTests: XCTestCase {
         XCTAssertEqual(controller.progressPercent, 10)
     }
 
-    // MARK: Modified
+    // MARK: Document state
 
-    func testSetModifiedReportsOnlyTransitions() {
+    func testSetDocumentStateTracksLatestValue() {
         let controller = UIController()
-        XCTAssertFalse(controller.modified)
+        XCTAssertEqual(controller.documentState, .empty)
 
-        XCTAssertTrue(controller.setModified(true))
-        XCTAssertTrue(controller.modified)
-        XCTAssertFalse(controller.setModified(true))
+        let first = DocumentState(path: "/tmp/first", isModified: false)
+        controller.setDocumentState(first)
+        XCTAssertEqual(controller.documentState, first)
 
-        XCTAssertTrue(controller.setModified(false))
-        XCTAssertFalse(controller.modified)
-        XCTAssertFalse(controller.setModified(false))
+        let second = DocumentState(path: "/tmp/second", isModified: true)
+        controller.setDocumentState(second)
+        XCTAssertEqual(controller.documentState, second)
     }
 
     // MARK: Startup
@@ -835,12 +835,15 @@ final class UIControllerTests: XCTestCase {
         (0..<count).map { grid.cell(row, $0).text }.joined()
     }
 
-    /// Awaits the first published grid matching `predicate`, or nil on timeout.
-    private func awaitGrid(_ process: NeovimProcess, timeout: Duration,
-                           where predicate: @escaping @Sendable (Grid) -> Bool) async -> Grid? {
-        await withTaskGroup(of: Grid?.self) { group in
+    /// Awaits the first stream value matching `predicate`, or nil on timeout.
+    private func awaitFirst<T: Sendable>(
+        _ stream: AsyncStream<T>,
+        timeout: Duration,
+        where predicate: @escaping @Sendable (T) -> Bool
+    ) async -> T? {
+        await withTaskGroup(of: T?.self) { group in
             group.addTask {
-                for await grid in process.grids where predicate(grid) { return grid }
+                for await value in stream where predicate(value) { return value }
                 return nil
             }
             group.addTask {
@@ -853,28 +856,7 @@ final class UIControllerTests: XCTestCase {
         }
     }
 
-    /// Awaits the first `modifiedStates` value matching `predicate`, or nil on
-    /// timeout.
-    private func awaitModified(_ process: NeovimProcess, timeout: Duration,
-                              where predicate: @escaping @Sendable (Bool) -> Bool) async -> Bool? {
-        await withTaskGroup(of: Bool?.self) { group in
-            group.addTask {
-                for await value in process.modifiedStates where predicate(value) {
-                    return value
-                }
-                return nil
-            }
-            group.addTask {
-                try? await Task.sleep(for: timeout)
-                return nil
-            }
-            let result = await group.next() ?? nil
-            group.cancelAll()
-            return result
-        }
-    }
-
-    func testModifiedStatePublishedWhenBufferChanges() async throws {
+    func testDocumentStatePublishedWhenBufferChanges() async throws {
         let process = try await spawnNvim(["--clean", "-n", "--embed"])
 
         var options = UIOptions()
@@ -886,10 +868,73 @@ final class UIControllerTests: XCTestCase {
         }
 
         _ = try await process.request("nvim_input", [.string("ihello")])
-        let modified = await awaitModified(process, timeout: .seconds(5)) { $0 }
+        let state = await awaitFirst(
+            process.documentStates, timeout: .seconds(5)) { $0.isModified }
         await process.disconnect()
 
-        XCTAssertEqual(modified, true)
+        XCTAssertEqual(state, DocumentState(path: nil, isModified: true))
+    }
+
+    func testDocumentStateTracksUnmodifiedBufferSwitches() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = directory.appendingPathComponent("first.txt")
+        let second = directory.appendingPathComponent("second.txt")
+        try Data().write(to: first)
+        try Data().write(to: second)
+
+        let process = try await spawnNvim(["--clean", "-n", "--embed"])
+        var options = UIOptions()
+        options.extLinegrid = true
+        let result = await process.uiAttach(
+            width: 80, height: 24, options: options)
+        guard result.status == .success else {
+            await process.disconnect()
+            return XCTFail("attach failed: \(result.status) \(result.message)")
+        }
+
+        await process.openBuffers([first.path])
+        let firstState = await awaitFirst(
+            process.documentStates, timeout: .seconds(5)) { $0.path != nil }
+
+        await process.openBuffers([second.path])
+        let secondState = await awaitFirst(
+            process.documentStates, timeout: .seconds(5)) {
+                $0.path != nil && $0.path != firstState?.path
+            }
+
+        _ = try await process.request("nvim_command", [.string("enew")])
+        let unnamedState = await awaitFirst(
+            process.documentStates, timeout: .seconds(5)) { $0.path == nil }
+
+        let created = directory.appendingPathComponent("created.txt")
+        await process.openBuffers([created.path])
+        let newFileState = await awaitFirst(
+            process.documentStates, timeout: .seconds(5)) {
+                $0.path.map { URL(fileURLWithPath: $0).lastPathComponent }
+                    == "created.txt"
+            }
+        _ = try await process.request("nvim_command", [.string("write")])
+        let writtenState = await awaitFirst(
+            process.documentStates, timeout: .seconds(5)) {
+                $0 == newFileState
+            }
+        await process.disconnect()
+
+        XCTAssertEqual(firstState?.isModified, false)
+        XCTAssertEqual(firstState?.path.map {
+            URL(fileURLWithPath: $0).lastPathComponent
+        }, "first.txt")
+        XCTAssertEqual(secondState?.isModified, false)
+        XCTAssertEqual(secondState?.path.map {
+            URL(fileURLWithPath: $0).lastPathComponent
+        }, "second.txt")
+        XCTAssertEqual(unnamedState, .empty)
+        XCTAssertNotNil(writtenState)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: created.path))
     }
 
     func testAttachAndTypedTextLandsInGrid() async throws {
@@ -904,7 +949,8 @@ final class UIControllerTests: XCTestCase {
         }
 
         _ = try await process.request("nvim_input", [.string("ihello")])
-        let grid = await awaitGrid(process, timeout: .seconds(5)) { grid in
+        let grid = await awaitFirst(
+            process.grids, timeout: .seconds(5)) { grid in
             grid.width >= 5 && (0..<5).allSatisfy { !grid.cell(0, $0).text.isEmpty }
                 && grid.cell(0, 0).text == "h"
         }
@@ -961,7 +1007,8 @@ final class UIControllerTests: XCTestCase {
         }
 
         _ = try await process.request("nvim_input", [.string("ihello")])
-        let grid = await awaitGrid(process, timeout: .seconds(5)) { grid in
+        let grid = await awaitFirst(
+            process.grids, timeout: .seconds(5)) { grid in
             grid.startupComplete && grid.width >= 5 && grid.cell(0, 0).text == "h"
         }
         await process.disconnect()

@@ -63,6 +63,15 @@ nonisolated struct ProgressUpdate: Sendable, Equatable {
     var isCompletion: Bool
 }
 
+/// The current buffer identity and edited state reported by Neovim.
+nonisolated struct DocumentState: Sendable, Equatable {
+    /// The buffer name, or nil when the current buffer is unnamed.
+    var path: String?
+    var isModified: Bool
+
+    static let empty = DocumentState(path: nil, isModified: false)
+}
+
 /// A completed RPC response. `error` is `.null` on success; otherwise it carries
 /// Neovim's error value and `result` is meaningless.
 nonisolated struct RPCResponse: Sendable, Equatable {

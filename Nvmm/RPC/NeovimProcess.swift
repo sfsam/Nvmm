@@ -214,10 +214,10 @@ actor NeovimProcess {
     nonisolated let bells: AsyncStream<UIBell>
     private let bellsContinuation: AsyncStream<UIBell>.Continuation
 
-    /// The current buffer's `modified` state, published on each transition so
-    /// the window can show a document-edited dot. Finishes on disconnect.
-    nonisolated let modifiedStates: AsyncStream<Bool>
-    private let modifiedStatesContinuation: AsyncStream<Bool>.Continuation
+    /// The current buffer's path and edited state. Finishes on disconnect.
+    nonisolated let documentStates: AsyncStream<DocumentState>
+    private let documentStatesContinuation:
+        AsyncStream<DocumentState>.Continuation
 
     /// What the progress bar should show, published as Neovim's `Progress`
     /// events arrive. Finishes on disconnect.
@@ -256,10 +256,10 @@ actor NeovimProcess {
         bells = bellsPair.stream
         bellsContinuation = bellsPair.continuation
 
-        let modifiedPair = AsyncStream.makeStream(
-            of: Bool.self, bufferingPolicy: .bufferingNewest(1))
-        modifiedStates = modifiedPair.stream
-        modifiedStatesContinuation = modifiedPair.continuation
+        let documentPair = AsyncStream.makeStream(
+            of: DocumentState.self, bufferingPolicy: .bufferingNewest(1))
+        documentStates = documentPair.stream
+        documentStatesContinuation = documentPair.continuation
 
         let progressPair = AsyncStream.makeStream(
             of: ProgressUpdate.self, bufferingPolicy: .bufferingNewest(1))
@@ -777,10 +777,15 @@ actor NeovimProcess {
                     }
                 }
                 return
-            case "modified":
-                if arguments.count == 1, let value = arguments[0].boolValue,
-                   ui.setModified(value) {
-                    modifiedStatesContinuation.yield(value)
+            case "document_state":
+                if arguments.count == 2,
+                   let path = arguments[0].stringValue,
+                   let isModified = arguments[1].boolValue {
+                    let value = DocumentState(
+                        path: path.isEmpty ? nil : path,
+                        isModified: isModified)
+                    ui.setDocumentState(value)
+                    documentStatesContinuation.yield(value)
                 }
                 return
             case "recent_file":
@@ -867,7 +872,7 @@ actor NeovimProcess {
 
         gridsContinuation.finish()
         bellsContinuation.finish()
-        modifiedStatesContinuation.finish()
+        documentStatesContinuation.finish()
         progressUpdatesContinuation.finish()
         recentFilePathsContinuation.finish()
         inboundContinuation.finish()
@@ -1002,8 +1007,8 @@ extension NeovimProcess {
         }
 
         let setupScripts = [
-            (String(localized: "Modified-state setup"),
-             Self.modifiedAutocmdLua),
+            (String(localized: "Document-state setup"),
+             Self.documentStateAutocmdLua),
             (String(localized: "Progress setup"),
              Self.progressAutocmdLua),
             (String(localized: "File-menu setup"),
@@ -1023,23 +1028,35 @@ extension NeovimProcess {
         return result
     }
 
-    /// Installs the autocmd group that reports the current buffer's `modified`
-    /// state back over RPC (consumed on `modifiedStates`), for the window's
-    /// document-edited dot. `BufModifiedSet` fires on the flag's transitions;
-    /// `BufEnter`/`WinEnter` cover the buffer changing without the flag itself
-    /// changing; `OptionSet pattern=modified` covers `:set (no)modified`, which
-    /// `BufModifiedSet` does not fire for. The trailing `notify()` seeds the
-    /// initial state.
-    private static let modifiedAutocmdLua = """
-        local group = vim.api.nvim_create_augroup('NvmmModified', {clear=true})
-        local function notify()
-          vim.rpcnotify(0, 'modified', vim.bo.modified)
+    /// Reports the current buffer's name and edited state. Buffer and window
+    /// entry cover switches, read/new events cover `:edit` reusing the current
+    /// buffer, `BufFilePost` covers a rename in place, and `BufWritePost`
+    /// rechecks whether a newly named item now exists. The trailing call seeds
+    /// the initial state.
+    private static let documentStateAutocmdLua = """
+        local group = vim.api.nvim_create_augroup(
+          'NvmmDocumentState', {clear=true})
+        local sent_path, sent_modified
+        local function notify(force)
+          local path = vim.api.nvim_buf_get_name(0)
+          local modified = vim.bo.modified
+          if not force and path == sent_path
+             and modified == sent_modified then return end
+          sent_path, sent_modified = path, modified
+          vim.rpcnotify(0, 'document_state', path, modified)
         end
-        vim.api.nvim_create_autocmd({'BufModifiedSet', 'BufEnter', 'WinEnter'},
-          {group=group, callback=notify})
+        local function notify_changed()
+          notify(false)
+        end
+        vim.api.nvim_create_autocmd(
+          {'BufModifiedSet', 'BufEnter', 'BufFilePost', 'BufNewFile',
+           'BufReadPost', 'WinEnter'},
+          {group=group, callback=notify_changed})
+        vim.api.nvim_create_autocmd('BufWritePost',
+          {group=group, callback=function() notify(true) end})
         vim.api.nvim_create_autocmd('OptionSet',
-          {group=group, pattern='modified', callback=notify})
-        notify()
+          {group=group, pattern='modified', callback=notify_changed})
+        notify(false)
         """
 
     /// Installs the autocmd that forwards Neovim's `Progress` events over RPC

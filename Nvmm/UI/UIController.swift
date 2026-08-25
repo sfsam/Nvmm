@@ -90,7 +90,7 @@ nonisolated final class UIController {
     private(set) var mousemoveevent = false
     private(set) var ambiguousWidthDouble = false
     private(set) var emojiWidthDouble = true
-    private(set) var modified = false
+    private(set) var documentState = DocumentState.empty
     private(set) var title = "NVIM"
     private(set) var guifont = ""
     private(set) var guifontwide = ""
@@ -750,13 +750,9 @@ nonisolated final class UIController {
     /// marked startup-complete.
     func vimenter() { vimentered = true }
 
-    /// Updates the current buffer's modified state. Returns true when the value
-    /// changed, so the caller can publish only on a transition.
-    @discardableResult
-    func setModified(_ value: Bool) -> Bool {
-        guard value != modified else { return false }
-        modified = value
-        return true
+    /// Updates the current buffer state.
+    func setDocumentState(_ value: DocumentState) {
+        documentState = value
     }
 }
 
