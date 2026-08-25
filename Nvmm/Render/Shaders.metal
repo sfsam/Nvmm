@@ -79,10 +79,12 @@ struct glyph_rasterizer_data {
 
 struct cell_graphic_rasterizer_data {
     float4 position [[position]];
-    float2 cell_position;
-    float2 cell_size;
-    float4 color;
-    float4 background_color;
+    // Every field below is constant across the instance's quad.
+    float2 cell_position [[flat]];
+    float2 cell_size [[flat]];
+    float4 color [[flat]];
+    float4 background_color [[flat]];
+    float box_line_width [[flat]];
     uint32_t kind;
 };
 
@@ -296,6 +298,12 @@ glyph_render(uint vertex_id [[vertex_id]],
     return data;
 }
 
+static bool is_diagonal(uint32_t kind) {
+    return kind == CELL_GRAPHIC_DIAGONAL_DOWN_LEFT ||
+           kind == CELL_GRAPHIC_DIAGONAL_DOWN_RIGHT ||
+           kind == CELL_GRAPHIC_DIAGONAL_CROSS;
+}
+
 vertex cell_graphic_rasterizer_data
 cell_graphic_render(uint vertex_id [[vertex_id]],
                     uint instance_id [[instance_id]],
@@ -312,7 +320,7 @@ cell_graphic_render(uint vertex_id [[vertex_id]],
     float2 draw_size = cell_size;
 
     // Pad diagonal graphics slightly so adjacent cells' lines meet.
-    if (graphic.kind == 5 || graphic.kind == 6) {
+    if (is_diagonal(graphic.kind)) {
         float pad = max(1.0, min(cell_size.x, cell_size.y) * 0.08);
         draw_position -= float2(pad);
         draw_size += float2(pad * 2.0);
@@ -326,6 +334,7 @@ cell_graphic_render(uint vertex_id [[vertex_id]],
     data.cell_size = cell_size;
     data.color = load_color(graphic.color);
     data.background_color = load_color(graphic.background_color);
+    data.box_line_width = float(uniforms.box_line_width);
     data.kind = graphic.kind;
     return data;
 }
@@ -407,79 +416,267 @@ fragment float4 glyph_fill(glyph_rasterizer_data in [[stage_in]],
                          in.texture_index) * visible;
 }
 
-fragment float4 cell_graphic_fill(cell_graphic_rasterizer_data in [[stage_in]]) {
-    constexpr uint32_t full_block = 1;
-    constexpr uint32_t dark_shade = 2;
-    constexpr uint32_t medium_shade = 3;
-    constexpr uint32_t light_shade = 4;
-    constexpr uint32_t diagonal_upper_right_to_lower_left = 5;
-    constexpr uint32_t diagonal_upper_left_to_lower_right = 6;
-    constexpr uint32_t light_vertical = 7;
-    constexpr uint32_t heavy_vertical = 8;
-    constexpr uint32_t double_vertical = 9;
+static bool inside_rect(float2 point, float left, float top,
+                        float right, float bottom) {
+    return point.x >= left && point.x < right &&
+           point.y >= top && point.y < bottom;
+}
 
-    if (in.kind == full_block) {
+static uint32_t box_stroke(uint32_t kind, uint32_t shift) {
+    return (kind >> shift) & CELL_GRAPHIC_STROKE_MASK;
+}
+
+// How far a stroke reaches at the cell centre, where it meets the two
+// strokes crossing it. It stops at the near rail when the crossing pair
+// forms an unbroken line that this stroke only abuts; otherwise it runs
+// past the centre to the far rail matching the crossing weight.
+static float box_junction_reach(uint32_t cross_a, uint32_t cross_b,
+                                uint32_t parallel_a, uint32_t parallel_b,
+                                float heavy_far, float double_far,
+                                float light_far, float near) {
+    if (cross_a == CELL_GRAPHIC_STROKE_HEAVY ||
+        cross_b == CELL_GRAPHIC_STROKE_HEAVY) {
+        return heavy_far;
+    }
+    // A crossing pair that is uneven, absent, or matched by this axis
+    // cannot cap the stroke, so it reaches the far rail.
+    if (cross_a != cross_b || parallel_a == parallel_b ||
+        (cross_a == CELL_GRAPHIC_STROKE_NONE &&
+         cross_b == CELL_GRAPHIC_STROKE_NONE)) {
+        return cross_a == CELL_GRAPHIC_STROKE_DOUBLE ||
+               cross_b == CELL_GRAPHIC_STROKE_DOUBLE
+            ? double_far : light_far;
+    }
+    return near;
+}
+
+static bool box_segments_contain(float2 point, float2 size,
+                                 float light_width, uint32_t kind) {
+    uint32_t up = box_stroke(kind, CELL_GRAPHIC_BOX_UP_SHIFT);
+    uint32_t right = box_stroke(kind, CELL_GRAPHIC_BOX_RIGHT_SHIFT);
+    uint32_t down = box_stroke(kind, CELL_GRAPHIC_BOX_DOWN_SHIFT);
+    uint32_t left = box_stroke(kind, CELL_GRAPHIC_BOX_LEFT_SHIFT);
+    float heavy_width = light_width * 2.0;
+
+    float h_light_top = floor((size.y - light_width) * 0.5);
+    float h_light_bottom = h_light_top + light_width;
+    float h_heavy_top = floor((size.y - heavy_width) * 0.5);
+    float h_heavy_bottom = h_heavy_top + heavy_width;
+    float h_double_top = h_light_top - light_width;
+    float h_double_bottom = h_light_bottom + light_width;
+
+    float v_light_left = floor((size.x - light_width) * 0.5);
+    float v_light_right = v_light_left + light_width;
+    float v_heavy_left = floor((size.x - heavy_width) * 0.5);
+    float v_heavy_right = v_heavy_left + heavy_width;
+    float v_double_left = v_light_left - light_width;
+    float v_double_right = v_light_right + light_width;
+
+    float up_bottom = box_junction_reach(left, right, up, down,
+                                         h_heavy_bottom, h_double_bottom,
+                                         h_light_bottom, h_light_top);
+    float down_top = box_junction_reach(left, right, up, down,
+                                        h_heavy_top, h_double_top,
+                                        h_light_top, h_light_bottom);
+    float left_right = box_junction_reach(up, down, left, right,
+                                          v_heavy_right, v_double_right,
+                                          v_light_right, v_light_left);
+    float right_left = box_junction_reach(up, down, left, right,
+                                          v_heavy_left, v_double_left,
+                                          v_light_left, v_light_right);
+
+    if (up == CELL_GRAPHIC_STROKE_LIGHT || up == CELL_GRAPHIC_STROKE_HEAVY) {
+        bool heavy = up == CELL_GRAPHIC_STROKE_HEAVY;
+        if (inside_rect(point, heavy ? v_heavy_left : v_light_left, 0,
+                        heavy ? v_heavy_right : v_light_right, up_bottom)) {
+            return true;
+        }
+    }
+    if (up == CELL_GRAPHIC_STROKE_DOUBLE) {
+        float left_bottom = left == CELL_GRAPHIC_STROKE_DOUBLE
+            ? h_light_top : up_bottom;
+        float right_bottom = right == CELL_GRAPHIC_STROKE_DOUBLE
+            ? h_light_top : up_bottom;
+        if (inside_rect(point, v_double_left, 0, v_light_left, left_bottom) ||
+            inside_rect(point, v_light_right, 0, v_double_right,
+                        right_bottom)) {
+            return true;
+        }
+    }
+
+    if (right == CELL_GRAPHIC_STROKE_LIGHT ||
+        right == CELL_GRAPHIC_STROKE_HEAVY) {
+        bool heavy = right == CELL_GRAPHIC_STROKE_HEAVY;
+        if (inside_rect(point, right_left, heavy ? h_heavy_top : h_light_top,
+                        size.x, heavy ? h_heavy_bottom : h_light_bottom)) {
+            return true;
+        }
+    }
+    if (right == CELL_GRAPHIC_STROKE_DOUBLE) {
+        float top_left = up == CELL_GRAPHIC_STROKE_DOUBLE
+            ? v_light_right : right_left;
+        float bottom_left = down == CELL_GRAPHIC_STROKE_DOUBLE
+            ? v_light_right : right_left;
+        if (inside_rect(point, top_left, h_double_top, size.x, h_light_top) ||
+            inside_rect(point, bottom_left, h_light_bottom, size.x,
+                        h_double_bottom)) {
+            return true;
+        }
+    }
+
+    if (down == CELL_GRAPHIC_STROKE_LIGHT ||
+        down == CELL_GRAPHIC_STROKE_HEAVY) {
+        bool heavy = down == CELL_GRAPHIC_STROKE_HEAVY;
+        if (inside_rect(point, heavy ? v_heavy_left : v_light_left, down_top,
+                        heavy ? v_heavy_right : v_light_right, size.y)) {
+            return true;
+        }
+    }
+    if (down == CELL_GRAPHIC_STROKE_DOUBLE) {
+        float left_top = left == CELL_GRAPHIC_STROKE_DOUBLE
+            ? h_light_bottom : down_top;
+        float right_top = right == CELL_GRAPHIC_STROKE_DOUBLE
+            ? h_light_bottom : down_top;
+        if (inside_rect(point, v_double_left, left_top, v_light_left, size.y) ||
+            inside_rect(point, v_light_right, right_top, v_double_right,
+                        size.y)) {
+            return true;
+        }
+    }
+
+    if (left == CELL_GRAPHIC_STROKE_LIGHT ||
+        left == CELL_GRAPHIC_STROKE_HEAVY) {
+        bool heavy = left == CELL_GRAPHIC_STROKE_HEAVY;
+        if (inside_rect(point, 0, heavy ? h_heavy_top : h_light_top,
+                        left_right, heavy ? h_heavy_bottom : h_light_bottom)) {
+            return true;
+        }
+    }
+    if (left == CELL_GRAPHIC_STROKE_DOUBLE) {
+        float top_right = up == CELL_GRAPHIC_STROKE_DOUBLE
+            ? v_light_left : left_right;
+        float bottom_right = down == CELL_GRAPHIC_STROKE_DOUBLE
+            ? v_light_left : left_right;
+        if (inside_rect(point, 0, h_double_top, top_right, h_light_top) ||
+            inside_rect(point, 0, h_light_bottom, bottom_right,
+                        h_double_bottom)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// Distance to an axis-aligned segment. `across` is the point's offset
+// from the segment's constant axis; `along` is its coordinate on the
+// varying axis, which the segment spans between `a` and `b`.
+static float axis_segment_distance(float across, float along,
+                                   float a, float b) {
+    float outside = along - clamp(along, min(a, b), max(a, b));
+    return length(float2(across, outside));
+}
+
+static float arc_distance(float2 point, float2 size, float line_width,
+                          uint32_t corner) {
+    float2 middle = floor((size - line_width) * 0.5) + line_width * 0.5;
+    float radius = min(size.x, size.y) * 0.5;
+    float x_sign = corner == CELL_GRAPHIC_ARC_DOWN_LEFT ||
+                   corner == CELL_GRAPHIC_ARC_UP_LEFT ? -1.0 : 1.0;
+    float y_sign = corner == CELL_GRAPHIC_ARC_UP_LEFT ||
+                   corner == CELL_GRAPHIC_ARC_UP_RIGHT ? -1.0 : 1.0;
+    float2 circle_center = middle + float2(x_sign, y_sign) * radius;
+
+    // Both arms are axis-aligned: one runs down the cell's vertical
+    // centre to the arc, the other along its horizontal centre.
+    float vertical_join = middle.y + y_sign * radius;
+    float vertical_edge = y_sign < 0 ? 0.0 : size.y;
+    float horizontal_join = middle.x + x_sign * radius;
+    float horizontal_edge = x_sign < 0 ? 0.0 : size.x;
+    float distance = min(axis_segment_distance(point.x - middle.x, point.y,
+                                               vertical_edge, vertical_join),
+                         axis_segment_distance(point.y - middle.y, point.x,
+                                               horizontal_join,
+                                               horizontal_edge));
+
+    bool inside_x = x_sign < 0 ? point.x >= circle_center.x
+                               : point.x <= circle_center.x;
+    bool inside_y = y_sign < 0 ? point.y >= circle_center.y
+                               : point.y <= circle_center.y;
+    if (inside_x && inside_y) {
+        distance = min(distance,
+                       abs(length(point - circle_center) - radius));
+    }
+    return distance;
+}
+
+fragment float4 cell_graphic_fill(cell_graphic_rasterizer_data in [[stage_in]]) {
+    if (in.kind == CELL_GRAPHIC_FULL_BLOCK) {
         return float4(in.color.rgb, 1.0);
     }
 
-    if (in.kind == dark_shade ||
-        in.kind == medium_shade ||
-        in.kind == light_shade) {
-        float coverage = 0.0;
-
-        if (in.kind == dark_shade) {
-            coverage = 0.57;
-        } else if (in.kind == medium_shade) {
-            coverage = 0.26;
-        } else {
-            coverage = 0.08;
-        }
-
+    if (in.kind == CELL_GRAPHIC_DARK_SHADE ||
+        in.kind == CELL_GRAPHIC_MEDIUM_SHADE ||
+        in.kind == CELL_GRAPHIC_LIGHT_SHADE) {
+        float coverage = in.kind == CELL_GRAPHIC_DARK_SHADE ? 0.57
+                       : in.kind == CELL_GRAPHIC_MEDIUM_SHADE ? 0.26 : 0.08;
         return float4(mix(in.background_color.rgb, in.color.rgb, coverage), 1.0);
     }
 
     float2 local = in.position.xy - in.cell_position;
     float width = in.cell_size.x;
     float height = in.cell_size.y;
+    float light_width = in.box_line_width;
+    uint32_t family = in.kind & CELL_GRAPHIC_FAMILY_MASK;
 
-    if (in.kind == light_vertical ||
-        in.kind == heavy_vertical ||
-        in.kind == double_vertical) {
-        float light_half_width = max(0.65, min(width, height) * 0.045);
-        float dist;
-
-        if (in.kind == double_vertical) {
-            float offset = max(light_half_width * 2.25, width * 0.18);
-            dist = min(abs(local.x - (width * 0.5 - offset)),
-                       abs(local.x - (width * 0.5 + offset)));
-        } else {
-            dist = abs(local.x - width * 0.5);
+    if (family == CELL_GRAPHIC_BOX_SEGMENTS) {
+        if (!box_segments_contain(local, in.cell_size, light_width, in.kind)) {
+            discard_fragment();
         }
-
-        float half_width = in.kind == heavy_vertical
-            ? light_half_width * 2.0 : light_half_width;
-        float alpha = 1.0 - smoothstep(half_width,
-                                       half_width + 0.85, dist);
-        if (alpha <= 0.0) discard_fragment();
-        return float4(in.color.rgb, alpha);
+        return float4(in.color.rgb, 1.0);
     }
 
-    float diagonal_length = length(in.cell_size);
-    float dist = 0.0;
+    if (family == CELL_GRAPHIC_BOX_DASHED) {
+        bool vertical = (in.kind & CELL_GRAPHIC_DASH_VERTICAL) != 0;
+        bool heavy = (in.kind & CELL_GRAPHIC_DASH_HEAVY) != 0;
+        uint32_t count = 2 +
+            ((in.kind >> CELL_GRAPHIC_DASH_COUNT_SHIFT) & 3u);
+        float thickness = heavy ? light_width * 2.0 : light_width;
+        float cross_size = vertical ? width : height;
+        float cross = vertical ? local.x : local.y;
+        float cross_start = floor((cross_size - thickness) * 0.5);
+        float along_size = vertical ? height : width;
+        float along = vertical ? local.y : local.x;
+        float period = along_size / float(count);
+        float half_gap = period * 0.175;
+        float phase = fmod(along, period);
+        if (cross < cross_start || cross >= cross_start + thickness ||
+            phase < half_gap || phase >= period - half_gap) {
+            discard_fragment();
+        }
+        return float4(in.color.rgb, 1.0);
+    }
 
-    if (in.kind == diagonal_upper_right_to_lower_left) {
-        dist = abs(local.x * height + local.y * width - width * height) /
-               diagonal_length;
-    } else if (in.kind == diagonal_upper_left_to_lower_right) {
-        dist = abs(local.x * height - local.y * width) / diagonal_length;
+    float distance = 0.0;
+    if (family == CELL_GRAPHIC_BOX_ARC) {
+        distance = arc_distance(local, in.cell_size, light_width,
+                                in.kind & ~CELL_GRAPHIC_FAMILY_MASK);
+    } else if (is_diagonal(in.kind)) {
+        float inverse_length = 1.0 / length(in.cell_size);
+        float down_left = abs(local.x * height + local.y * width -
+                              width * height) * inverse_length;
+        float down_right = abs(local.x * height - local.y * width) *
+                           inverse_length;
+        distance = in.kind == CELL_GRAPHIC_DIAGONAL_DOWN_LEFT ? down_left
+                 : in.kind == CELL_GRAPHIC_DIAGONAL_DOWN_RIGHT ? down_right
+                 : min(down_left, down_right);
     } else {
         discard_fragment();
     }
 
-    float thickness = max(0.65, min(width, height) * 0.045);
-    float alpha = 1.0 - smoothstep(thickness, thickness + 0.85, dist);
+    float half_width = light_width * 0.5;
+    float alpha = 1.0 - smoothstep(half_width - 0.5,
+                                   half_width + 0.5, distance);
     if (alpha <= 0.0) discard_fragment();
-
     return float4(in.color.rgb, alpha);
 }
 

@@ -33,36 +33,6 @@ private func roundUp(_ value: CGFloat, toMultipleOf multiple: Int) -> CGFloat {
     return (value / mult).rounded(.up) * mult
 }
 
-/// The procedural cell-graphic kinds understood by the cell-graphic shader.
-private enum CellGraphicKind: UInt32 {
-    case fullBlock = 1
-    case darkShade = 2
-    case mediumShade = 3
-    case lightShade = 4
-    case diagonalUpperRightToLowerLeft = 5
-    case diagonalUpperLeftToLowerRight = 6
-    case lightVertical = 7
-    case heavyVertical = 8
-    case doubleVertical = 9
-
-    /// The kind a grapheme maps to, or nil if it is not a cell graphic.
-    init?(grapheme: String) {
-        switch grapheme {
-        case "\u{2588}": self = .fullBlock       // █
-        case "\u{2593}": self = .darkShade        // ▓
-        case "\u{2592}": self = .mediumShade      // ▒
-        case "\u{2591}": self = .lightShade       // ░
-        case "\u{2571}": self = .diagonalUpperRightToLowerLeft // ╱
-        case "\u{2572}": self = .diagonalUpperLeftToLowerRight // ╲
-        // Render vertical box-drawing glyphs at full cell height so adjacent rows join.
-        case "\u{2502}": self = .lightVertical // │
-        case "\u{2503}": self = .heavyVertical // ┃
-        case "\u{2551}": self = .doubleVertical // ║
-        default: return nil
-        }
-    }
-}
-
 /// Suppresses passive mouse movement that does not change Neovim's input.
 nonisolated struct MouseMoveTracker {
     private var lastLocation: GridPoint?
@@ -133,6 +103,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     private var backingCellSize = NSSize(width: 1, height: 1)
     private var cellSizePixels = SIMD2<Float>(1, 1)
     private var baselineTranslate = SIMD2<Float>(0, 0)
+    private var boxLineWidth: UInt32 = 1
     private var cursorLineThickness: UInt32 = 2
 
     // Line-decoration shapes derived from the font metrics.
@@ -387,6 +358,10 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
 
         let underlinePosition = font.underlinePosition
         let lineThickness = UInt16(floor(font.underlineThickness + 1.0))
+        // Cap the box stroke at a third of the cell so that heavy and
+        // double strokes still leave a gap at their junctions.
+        let boxLimit = max(1, Int(min(cellWidth, cellHeight)) / 3)
+        boxLineWidth = UInt32(min(max(1, Int(lineThickness)), boxLimit))
         let scaleFactor = font.scaleFactor
         let underlineTranslate: Int16 = underlinePosition >= 0
             ? Int16(floor(underlinePosition + 0.5))
@@ -721,6 +696,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         uniforms.pointee = uniform_data(
             pixel_size: pixelSize,
             cell_pixel_size: cellSizePixels,
+            box_line_width: boxLineWidth,
             baseline: baselineTranslate,
             cursor_position: SIMD2<Int16>(Int16(cursor.column), Int16(cursor.row)),
             cursor_color: cursor.background.rgb | (cursorAlpha << 24),

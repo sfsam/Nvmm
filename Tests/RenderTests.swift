@@ -23,6 +23,91 @@ final class RenderTests: XCTestCase {
         }
     }
 
+    private struct CellGraphicImage {
+        let pixels: [UInt8]
+        let width: Int
+        let height: Int
+
+        func alpha(_ x: Int, _ y: Int) -> UInt8 {
+            pixels[(y * width + x) * 4 + 3]
+        }
+    }
+
+    private func renderCellGraphics(
+        _ rows: [[String]], cellWidth: Int = 12, cellHeight: Int = 18,
+        lineWidth: UInt32 = 2
+    ) throws -> CellGraphicImage {
+        try requireDevice()
+        let context = try RenderContextManager().defaultRenderContext()
+        let device = context.device
+        let columnCount = try XCTUnwrap(rows.first?.count)
+        XCTAssertTrue(rows.allSatisfy { $0.count == columnCount })
+        let outputWidth = cellWidth * columnCount
+        let outputHeight = cellHeight * rows.count
+
+        var uniforms = uniform_data(
+            pixel_size: SIMD2<Float>(2.0 / Float(outputWidth),
+                                     -2.0 / Float(outputHeight)),
+            cell_pixel_size: SIMD2<Float>(Float(cellWidth), Float(cellHeight)),
+            box_line_width: lineWidth,
+            baseline: .zero, cursor_position: .zero, cursor_color: 0,
+            cursor_line_width: 0, cursor_cell_width: 1,
+            grid_width: UInt32(columnCount), cursor_xray: 0)
+        let uniformBuffer = try XCTUnwrap(withUnsafeBytes(of: &uniforms) {
+            device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
+        })
+
+        var graphics: [cell_graphic_data] = []
+        for (row, graphemes) in rows.enumerated() {
+            for (column, grapheme) in graphemes.enumerated() {
+                guard let kind = CellGraphicKind(grapheme: grapheme) else {
+                    continue
+                }
+                graphics.append(cell_graphic_data(
+                    grid_position: SIMD2<Int16>(Int16(column), Int16(row)),
+                    cell_width: 1, color: UInt32.max, background_color: 0,
+                    kind: kind.rawValue))
+            }
+        }
+        let graphicBuffer = try XCTUnwrap(graphics.withUnsafeBytes {
+            device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
+        })
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm, width: outputWidth,
+            height: outputHeight, mipmapped: false)
+        descriptor.usage = [.renderTarget]
+        descriptor.storageMode = .shared
+        let output = try XCTUnwrap(device.makeTexture(descriptor: descriptor))
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = output
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+
+        let command = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        let encoder = try XCTUnwrap(command.makeRenderCommandEncoder(
+            descriptor: pass))
+        encoder.setRenderPipelineState(context.cellGraphicPipeline)
+        encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 0)
+        encoder.setVertexBuffer(graphicBuffer, offset: 0, index: 1)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
+                               vertexCount: 4,
+                               instanceCount: graphics.count)
+        encoder.endEncoding()
+        command.commit()
+        command.waitUntilCompleted()
+        XCTAssertEqual(command.status, .completed)
+
+        var pixels = [UInt8](repeating: 0,
+                             count: outputWidth * outputHeight * 4)
+        output.getBytes(&pixels, bytesPerRow: outputWidth * 4,
+                        from: MTLRegionMake2D(0, 0, outputWidth, outputHeight),
+                        mipmapLevel: 0)
+        return CellGraphicImage(pixels: pixels, width: outputWidth,
+                                height: outputHeight)
+    }
+
     func testRenderContextBuildsPipelinesAndTexture() throws {
         try requireDevice()
         let manager = RenderContextManager()
@@ -74,77 +159,135 @@ final class RenderTests: XCTestCase {
     }
 
     func testCellGraphicShaderJoinsVerticalSeparatorAcrossRows() throws {
-        try requireDevice()
-        let context = try RenderContextManager().defaultRenderContext()
-        let device = context.device
         let cellWidth = 12
         let cellHeight = 18
-        let outputWidth = cellWidth
-        let outputHeight = cellHeight * 2
-
-        var uniforms = uniform_data(
-            pixel_size: SIMD2<Float>(2.0 / Float(outputWidth),
-                                     -2.0 / Float(outputHeight)),
-            cell_pixel_size: SIMD2<Float>(Float(cellWidth), Float(cellHeight)),
-            baseline: .zero, cursor_position: .zero, cursor_color: 0,
-            cursor_line_width: 0, cursor_cell_width: 1, grid_width: 1,
-            cursor_xray: 0)
-        let uniformBuffer = try XCTUnwrap(withUnsafeBytes(of: &uniforms) {
-            device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
-        })
-
-        // `CellGraphicKind.lightVertical` is private host-side state; 7 is its
-        // wire value consumed by the shader.
-        let lightVertical: UInt32 = 7
-        let graphics = [0, 1].map { row in
-            cell_graphic_data(
-                grid_position: SIMD2<Int16>(0, Int16(row)), cell_width: 1,
-                color: UInt32.max, background_color: 0,
-                kind: lightVertical)
+        for grapheme in ["│", "┃", "║"] {
+            let image = try renderCellGraphics(
+                [[grapheme], [grapheme]], cellWidth: cellWidth,
+                cellHeight: cellHeight)
+            for x in 0..<cellWidth {
+                XCTAssertEqual(image.alpha(x, cellHeight - 1),
+                               image.alpha(x, cellHeight), grapheme)
+            }
+            let edgeInk = (0..<cellWidth).map {
+                image.alpha($0, cellHeight - 1)
+            }.max()
+            XCTAssertGreaterThan(edgeInk ?? 0, 0, grapheme)
         }
-        let graphicBuffer = try XCTUnwrap(graphics.withUnsafeBytes {
-            device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
-        })
+    }
 
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: outputWidth,
-            height: outputHeight, mipmapped: false)
-        descriptor.usage = [.renderTarget]
-        descriptor.storageMode = .shared
-        let output = try XCTUnwrap(device.makeTexture(descriptor: descriptor))
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = output
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+    func testCellGraphicShaderJoinsHorizontalSeparatorsAcrossColumns() throws {
+        let cellWidth = 12
+        let cellHeight = 18
+        for grapheme in ["─", "━", "═"] {
+            let image = try renderCellGraphics(
+                [[grapheme, grapheme]], cellWidth: cellWidth,
+                cellHeight: cellHeight)
+            for y in 0..<cellHeight {
+                XCTAssertEqual(image.alpha(cellWidth - 1, y),
+                               image.alpha(cellWidth, y), grapheme)
+            }
+            let edgeInk = (0..<cellHeight).map {
+                image.alpha(cellWidth - 1, $0)
+            }.max()
+            XCTAssertGreaterThan(edgeInk ?? 0, 0, grapheme)
+        }
+    }
 
-        let command = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
-        let encoder = try XCTUnwrap(command.makeRenderCommandEncoder(
-            descriptor: pass))
-        encoder.setRenderPipelineState(context.cellGraphicPipeline)
-        encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 0)
-        encoder.setVertexBuffer(graphicBuffer, offset: 0, index: 1)
-        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
-                               vertexCount: 4, instanceCount: graphics.count)
-        encoder.endEncoding()
-        command.commit()
-        command.waitUntilCompleted()
-        XCTAssertEqual(command.status, .completed)
+    func testCellGraphicShaderRendersCompleteBoxDrawingBlock() throws {
+        let graphemes = (0x2500...0x257F).map {
+            String(UnicodeScalar($0)!)
+        }
+        let rows = stride(from: 0, to: graphemes.count, by: 16).map {
+            Array(graphemes[$0..<($0 + 16)])
+        }
+        let cellWidth = 12
+        let cellHeight = 18
+        let image = try renderCellGraphics(
+            rows, cellWidth: cellWidth, cellHeight: cellHeight)
 
-        var pixels = [UInt8](repeating: 0,
-                             count: outputWidth * outputHeight * 4)
-        output.getBytes(&pixels, bytesPerRow: outputWidth * 4,
-                        from: MTLRegionMake2D(0, 0, outputWidth, outputHeight),
-                        mipmapLevel: 0)
-        func alpha(_ x: Int, _ y: Int) -> UInt8 {
-            pixels[(y * outputWidth + x) * 4 + 3]
+        for index in graphemes.indices {
+            let column = index % 16
+            let row = index / 16
+            var hasInk = false
+            for y in (row * cellHeight)..<((row + 1) * cellHeight) {
+                for x in (column * cellWidth)..<((column + 1) * cellWidth) {
+                    hasInk = hasInk || image.alpha(x, y) > 0
+                }
+            }
+            XCTAssertTrue(hasInk, graphemes[index])
+        }
+    }
+
+    func testCellGraphicShaderPreservesDoubleLineGap() throws {
+        let image = try renderCellGraphics([["║", "╬"]])
+        let centerX = 6
+        let centerY = 9
+
+        XCTAssertGreaterThan(image.alpha(centerX - 2, centerY), 0)
+        XCTAssertEqual(image.alpha(centerX, centerY), 0)
+        XCTAssertGreaterThan(image.alpha(centerX + 2, centerY), 0)
+
+        let crossCenter = centerX + 12
+        XCTAssertEqual(image.alpha(crossCenter, centerY), 0)
+        XCTAssertGreaterThan(image.alpha(crossCenter - 2, centerY - 3), 0)
+        XCTAssertGreaterThan(image.alpha(crossCenter + 2, centerY - 3), 0)
+        XCTAssertGreaterThan(image.alpha(crossCenter - 4, centerY - 2), 0)
+        XCTAssertGreaterThan(image.alpha(crossCenter + 4, centerY + 2), 0)
+    }
+
+    func testCellGraphicShaderOrientsRoundedCorners() throws {
+        let image = try renderCellGraphics([["╭", "╮", "╯", "╰"]])
+        let centerY = 9
+        let lastY = 17
+
+        XCTAssertGreaterThan(image.alpha(6, lastY), 0)
+        XCTAssertGreaterThan(image.alpha(11, centerY), 0)
+        XCTAssertEqual(image.alpha(6, 0), 0)
+        XCTAssertEqual(image.alpha(0, centerY), 0)
+
+        XCTAssertGreaterThan(image.alpha(18, lastY), 0)
+        XCTAssertGreaterThan(image.alpha(12, centerY), 0)
+        XCTAssertEqual(image.alpha(18, 0), 0)
+        XCTAssertEqual(image.alpha(23, centerY), 0)
+
+        XCTAssertGreaterThan(image.alpha(30, 0), 0)
+        XCTAssertGreaterThan(image.alpha(24, centerY), 0)
+        XCTAssertEqual(image.alpha(30, lastY), 0)
+        XCTAssertEqual(image.alpha(35, centerY), 0)
+
+        XCTAssertGreaterThan(image.alpha(42, 0), 0)
+        XCTAssertGreaterThan(image.alpha(47, centerY), 0)
+        XCTAssertEqual(image.alpha(42, lastY), 0)
+        XCTAssertEqual(image.alpha(36, centerY), 0)
+    }
+
+    func testCellGraphicShaderRoundsCornerWithoutStraightBridges() throws {
+        let image = try renderCellGraphics([["╭"]])
+
+        XCTAssertGreaterThan(image.alpha(6, 16), 0)
+        XCTAssertGreaterThan(image.alpha(6, 14), 0)
+        XCTAssertGreaterThan(image.alpha(8, 11), 0)
+        XCTAssertGreaterThan(image.alpha(10, 9), 0)
+        XCTAssertEqual(image.alpha(9, 14), 0)
+        XCTAssertEqual(image.alpha(6, 9), 0)
+    }
+
+    func testCellGraphicShaderKeepsRoundedCornerWeightLight() throws {
+        let image = try renderCellGraphics([["╭", "┌"]])
+        func coverage(column: Int) -> Int {
+            let xRange = (column * 12)..<((column + 1) * 12)
+            return (0..<18).reduce(into: 0) { total, y in
+                for x in xRange {
+                    total += Int(image.alpha(x, y))
+                }
+            }
         }
 
-        let center = cellWidth / 2
-        XCTAssertGreaterThan(alpha(center, cellHeight - 1), 0)
-        XCTAssertGreaterThan(alpha(center, cellHeight), 0)
-        XCTAssertEqual(alpha(0, cellHeight - 1), 0)
-        XCTAssertEqual(alpha(0, cellHeight), 0)
+        let rounded = coverage(column: 0)
+        let square = coverage(column: 1)
+        XCTAssertGreaterThan(rounded, square * 3 / 4)
+        XCTAssertLessThanOrEqual(rounded, square)
     }
 
     func testFrameBufferRetriesAfterAllocationFailure() throws {
@@ -303,7 +446,8 @@ final class RenderTests: XCTestCase {
         var uniforms = uniform_data(
             pixel_size: SIMD2<Float>(2.0 / Float(width),
                                      -2.0 / Float(height)),
-            cell_pixel_size: SIMD2<Float>(8, 8), baseline: .zero,
+            cell_pixel_size: SIMD2<Float>(8, 8), box_line_width: 2,
+            baseline: .zero,
             cursor_position: .zero, cursor_color: 0,
             cursor_line_width: 0, cursor_cell_width: 1, grid_width: 4,
             cursor_xray: 0)
@@ -815,7 +959,8 @@ final class RenderTests: XCTestCase {
         // A block cursor on column 1, fully opaque, with the x-ray active.
         var uniforms = uniform_data(
             pixel_size: SIMD2<Float>(2.0 / Float(side), -2.0 / Float(side)),
-            cell_pixel_size: SIMD2<Float>(8, 8), baseline: .zero,
+            cell_pixel_size: SIMD2<Float>(8, 8), box_line_width: 2,
+            baseline: .zero,
             cursor_position: SIMD2<Int16>(1, 0), cursor_color: 0xFF00_0000,
             cursor_line_width: 0, cursor_cell_width: 1, grid_width: 4,
             cursor_xray: 1)
@@ -1064,7 +1209,8 @@ final class RenderTests: XCTestCase {
 
         var uniforms = uniform_data(
             pixel_size: SIMD2<Float>(2.0 / Float(side), -2.0 / Float(side)),
-            cell_pixel_size: SIMD2<Float>(16, 16), baseline: SIMD2<Float>(0, 8),
+            cell_pixel_size: SIMD2<Float>(16, 16), box_line_width: 2,
+            baseline: SIMD2<Float>(0, 8),
             cursor_position: .zero, cursor_color: 0,
             cursor_line_width: 0, cursor_cell_width: 1, grid_width: 2,
             cursor_xray: 0)
@@ -1143,6 +1289,7 @@ final class RenderTests: XCTestCase {
         var uniforms = uniform_data(
             pixel_size: SIMD2<Float>(2.0 / Float(side), -2.0 / Float(side)),
             cell_pixel_size: SIMD2<Float>(8, 16),
+            box_line_width: 2,
             baseline: .zero, cursor_position: .zero, cursor_color: 0,
             cursor_line_width: 0, cursor_cell_width: 1, grid_width: 4,
             cursor_xray: 0)

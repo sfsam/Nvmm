@@ -26,6 +26,10 @@ typedef struct {
     /// The size of a single-width cell in backing pixels.
     simd_float2 cell_pixel_size;
 
+    /// The light box-drawing stroke width in backing pixels, already
+    /// capped to a third of the cell. Heavy strokes are twice this.
+    uint32_t box_line_width;
+
     /// The translation from a cell's top-left corner to the font baseline.
     simd_float2 baseline;
 
@@ -81,6 +85,45 @@ typedef struct {
 
 /// `glyph_data.flags`: this glyph is the block cursor's x-ray character.
 #define GLYPH_FLAG_XRAY 1u
+
+/// Fixed cell-graphic kinds.
+#define CELL_GRAPHIC_FULL_BLOCK 1u
+#define CELL_GRAPHIC_DARK_SHADE 2u
+#define CELL_GRAPHIC_MEDIUM_SHADE 3u
+#define CELL_GRAPHIC_LIGHT_SHADE 4u
+#define CELL_GRAPHIC_DIAGONAL_DOWN_LEFT 5u
+#define CELL_GRAPHIC_DIAGONAL_DOWN_RIGHT 6u
+#define CELL_GRAPHIC_DIAGONAL_CROSS 7u
+
+/// Families encoded in the high four bits of `cell_graphic_data.kind`.
+#define CELL_GRAPHIC_FAMILY_MASK 0xF0000000u
+#define CELL_GRAPHIC_BOX_SEGMENTS 0x10000000u
+#define CELL_GRAPHIC_BOX_DASHED 0x20000000u
+#define CELL_GRAPHIC_BOX_ARC 0x30000000u
+
+/// Two-bit box stroke styles.
+#define CELL_GRAPHIC_STROKE_NONE 0u
+#define CELL_GRAPHIC_STROKE_LIGHT 1u
+#define CELL_GRAPHIC_STROKE_HEAVY 2u
+#define CELL_GRAPHIC_STROKE_DOUBLE 3u
+#define CELL_GRAPHIC_STROKE_MASK 3u
+
+/// Directional stroke shifts in a box-segment payload.
+#define CELL_GRAPHIC_BOX_UP_SHIFT 0u
+#define CELL_GRAPHIC_BOX_RIGHT_SHIFT 2u
+#define CELL_GRAPHIC_BOX_DOWN_SHIFT 4u
+#define CELL_GRAPHIC_BOX_LEFT_SHIFT 6u
+
+/// Dashed-line payload fields.
+#define CELL_GRAPHIC_DASH_VERTICAL 1u
+#define CELL_GRAPHIC_DASH_HEAVY 2u
+#define CELL_GRAPHIC_DASH_COUNT_SHIFT 2u
+
+/// Rounded-corner payload values.
+#define CELL_GRAPHIC_ARC_DOWN_RIGHT 0u
+#define CELL_GRAPHIC_ARC_DOWN_LEFT 1u
+#define CELL_GRAPHIC_ARC_UP_LEFT 2u
+#define CELL_GRAPHIC_ARC_UP_RIGHT 3u
 
 /// One procedurally-drawn cell graphic (block, shade, diagonal, or separator)
 /// that the fragment shader renders without a glyph texture.
