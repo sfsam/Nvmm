@@ -16,7 +16,7 @@
 # release ZIP, uploads it to S3, and creates a draft GitHub release. Every step
 # that changes something is confirmed first.
 #
-# Products are left in build/release:
+# Products are left in build/nvmm-release:
 #   Nvmm-VERSION.zip
 #   Nvmm-VERSION.zip.sha256
 
@@ -35,7 +35,7 @@ PUBLIC_URL="https://mowglii.s3.amazonaws.com/nvmm"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 APP_SRC="${APP_SRC:-${HOME}/Desktop/${APP_NAME}.app}"
-RELEASE_DIR="${RELEASE_DIR:-${REPO_DIR}/build/release}"
+RELEASE_DIR="${RELEASE_DIR:-${REPO_DIR}/build/nvmm-release}"
 AWS="${AWS:-aws}"
 GH="${GH:-gh}"
 DITTO="${DITTO:-ditto}"
