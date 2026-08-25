@@ -799,6 +799,12 @@ final class UIControllerTests: XCTestCase {
             .restart, "/tmp/nvim.sock", ECONNREFUSED))
     }
 
+    func testOnlyRestartPreservesLocalHandoffState() {
+        XCTAssertTrue(preservedAcrossHandoff(true, kind: .restart))
+        XCTAssertFalse(preservedAcrossHandoff(true, kind: .connect))
+        XCTAssertFalse(preservedAcrossHandoff(false, kind: .restart))
+    }
+
     // MARK: Live attach
 
     /// Spawns a real bundled Neovim and reaps the child when the test ends.

@@ -35,6 +35,7 @@ private struct ConnectFallback {
     let address: String
     let owned: Bool
     let documentPathsAreLocal: Bool
+    let usesBundledNeovim: Bool
 }
 
 /// Describes only child exits that should be surfaced to the user.
@@ -100,6 +101,14 @@ nonisolated func transportDisconnectDescription(
         return String(localized:
             "Communication with the remote Neovim server failed: \(reason). The server may still be running.")
     }
+}
+
+/// Preserves local session state across a restart, but not a connection to an
+/// arbitrary external server.
+nonisolated func preservedAcrossHandoff(
+    _ current: Bool, kind: UIHandoff.Kind
+) -> Bool {
+    current && kind == .restart
 }
 
 final class WindowController: NSWindowController, NSWindowDelegate,
@@ -300,6 +309,16 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     /// `:restart` the server is reached over a socket yet is still owned.
     var ownsServer = true
 
+    /// Whether the current server was launched from Nvmm's bundled Neovim.
+    /// Bundled help search results may only be sent to such a server because
+    /// an externally connected server can have different built-in help tags.
+    private(set) var usesBundledNeovim = true
+
+    /// Whether this window can accept a bundled help result now.
+    var canOpenBundledHelp: Bool {
+        usesBundledNeovim && !hasExited && isReady && process != nil
+    }
+
     /// The kind of the handoff that produced the current connection, if any, so
     /// a `:restart` whose successor was abandoned (`ENOENT`) is closed quietly
     /// rather than reported as a connection error. Cleared once a reconnection
@@ -409,6 +428,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         source = .remote(address: address)
         ownsServer = false
         documentPathsAreLocal = false
+        usesBundledNeovim = false
         launch()
     }
 
@@ -1001,15 +1021,18 @@ final class WindowController: NSWindowController, NSWindowDelegate,
             connectFallback = ConnectFallback(
                 address: address,
                 owned: ownsServer,
-                documentPathsAreLocal: documentPathsAreLocal)
+                documentPathsAreLocal: documentPathsAreLocal,
+                usesBundledNeovim: usesBundledNeovim)
         }
         source = .remote(address: handoff.address)
         // A `:restart` continues our own session, so we still own the new
         // server (closing quits it); a `:connect` attaches to a server someone
         // else runs, so it is borrowed (closing only detaches).
         ownsServer = handoff.kind == .restart
-        documentPathsAreLocal = documentPathsAreLocal
-            && handoff.kind == .restart
+        documentPathsAreLocal = preservedAcrossHandoff(
+            documentPathsAreLocal, kind: handoff.kind)
+        usesBundledNeovim = preservedAcrossHandoff(
+            usesBundledNeovim, kind: handoff.kind)
         lastHandoffKind = handoff.kind
         startNeovim()
     }
@@ -1035,6 +1058,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         source = .remote(address: fallback.address)
         ownsServer = fallback.owned
         documentPathsAreLocal = fallback.documentPathsAreLocal
+        usesBundledNeovim = fallback.usesBundledNeovim
         lastHandoffKind = nil
         startNeovim()
     }

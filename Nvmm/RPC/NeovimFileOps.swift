@@ -171,6 +171,14 @@ extension NeovimProcess {
         return try? await request("nvim_command", [.string(command)])
     }
 
+    /// Opens an exact help tag and waits for Neovim to accept the command.
+    func openHelpTopic(_ topic: String) async -> Bool {
+        guard let response = await normalCommandResponse("help \(topic)") else {
+            return false
+        }
+        return !response.isError
+    }
+
     /// Whether the current mode permits a save, aborting a command line or a
     /// pending operator first. False when Neovim is busy, at a prompt, in an Ex
     /// mode, or in a terminal buffer — nothing there is a document to write.

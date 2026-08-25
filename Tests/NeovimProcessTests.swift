@@ -998,6 +998,16 @@ final class NeovimProcessTests: XCTestCase {
         }
     }
 
+    func testOpenHelpTopicReportsAcceptanceAndRejection() async throws {
+        try await withNvim { process in
+            let accepted = await process.openHelpTopic("help")
+            let rejected = await process.openHelpTopic(
+                "nvmm-topic-that-cannot-exist")
+            XCTAssertTrue(accepted)
+            XCTAssertFalse(rejected)
+        }
+    }
+
     func testNewBufferPreservesModifiedBufferWithNohidden() async throws {
         try await withNvim { process in
             let oldReply = try await process.request(

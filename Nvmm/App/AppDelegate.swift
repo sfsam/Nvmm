@@ -12,6 +12,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let renderManager = RenderContextManager()
     private let terminationCoordinator = TerminationCoordinator()
     private var controlServer: ControlServer?
+    private lazy var helpSearchController = HelpSearchController(
+        tagsURL: NeovimBundle.helpTagsURL
+    ) { [weak self] topic in
+        self?.openHelp(topic)
+    }
 
     // True when the process is a test host rather than the interactive app.
     // A test host must not take the interactive launch path: it holds no
@@ -42,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // setting sees the registered value rather than a bare `false`.
     func applicationWillFinishLaunching(_ notification: Notification) {
         Settings.registerDefaults()
+        NSApp.registerUserInterfaceItemSearchHandler(helpSearchController)
         // A test host must not serve the CLI endpoint. It shares the endpoint
         // path with an interactive build, so whichever binds second runs
         // without a control channel; and the socket would outlive the host.
@@ -447,6 +453,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: - Help menu
+
+    /// Opens a bundled Help-menu result in the frontmost compatible Neovim, or
+    /// starts a bundled Neovim when the frontmost session cannot accept it.
+    private func openHelp(_ topic: String) {
+        guard let controller = frontmostWindow,
+              controller.canOpenBundledHelp else {
+            openWindow(arguments: ["-c", "help \(topic)"])
+            return
+        }
+        controller.openHelp(topic: topic)
+    }
 
     @IBAction func showHomepage(_ sender: Any?) {
         let url = URL(string: "https://www.mowglii.com/nvmm")!

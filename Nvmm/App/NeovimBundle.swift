@@ -25,6 +25,12 @@ enum NeovimBundle {
         return FileManager.default.isExecutableFile(atPath: url.path) ? url : nil
     }
 
+    /// The built-in help tag index beside the bundled Neovim runtime.
+    static var helpTagsURL: URL {
+        Bundle.main.bundleURL
+            .appendingPathComponent("Contents/share/nvim/runtime/doc/tags")
+    }
+
     /// The executable and argv to launch the embedded nvim with `arguments`
     /// (for example `["--embed"]`).
     ///
