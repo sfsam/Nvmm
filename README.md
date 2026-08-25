@@ -60,8 +60,13 @@ Download Neovim 0.12 or newer, then build the app:
 
 ```sh
 Scripts/download_nvim.sh v0.12.5
-xcodebuild -project Nvmm.xcodeproj -scheme Nvmm \
-  -configuration Release -destination platform=macOS build
+xcodebuild -configuration Release
+```
+
+The built app is located at:
+
+```text
+build/Release/Nvmm.app
 ```
 
 The app bundles Neovim's executable, libraries, and runtime. It does not use a system Neovim installation.
