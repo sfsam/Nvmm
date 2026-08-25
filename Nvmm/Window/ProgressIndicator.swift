@@ -60,9 +60,11 @@ final class ProgressIndicator: NSView {
 
     /// Moves the fill to `value`, continuing smoothly from an interrupted move.
     func setProgress(_ value: Double, animated: Bool = true) {
+        let value = min(max(value, 0), 100)
+        guard value != progress else { return }
         let startingWidth = fillLayer.presentation()?.bounds.width
             ?? fillLayer.bounds.width
-        progress = min(max(value, 0), 100)
+        progress = value
         setAccessibilityValue(progress)
         let endingWidth = targetFillWidth
         setLayerGeometry(fillWidth: endingWidth)

@@ -131,6 +131,9 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     private var recentFileTask: Task<Void, Never>?
     private var bellTask: Task<Void, Never>?
     private var settingsTask: Task<Void, Never>?
+    private var frameSaveTask: Task<Void, Never>?
+
+    private var appliedFontThickness = Settings.fontThickness
 
     /// The document URL for the current buffer, resolved once per state
     /// change so the proxy-icon setting can be reapplied without hitting
@@ -196,6 +199,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     // size, not its pixel size. Recomputing pixels from the grid makes the next
     // first window robust across font and display-scale changes.
     private static let savedFrameKey = "NvmmWindowFrame"
+    private static let frameSaveDebounce = Duration.milliseconds(250)
 
     // Live resizes nest in principle (a second can begin before the first
     // reconciles), so track depth rather than a flag; the window snaps to the
@@ -643,11 +647,27 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     /// No-op until the window is on screen, so incomplete geometry is not
     /// saved.
     private func saveFrame() {
+        frameSaveTask?.cancel()
+        frameSaveTask = nil
         guard hasShownWindow, let window else { return }
         var rect = window.frame
         rect.origin.y += rect.size.height
         rect.size = CGSize(width: lastGridSize.width, height: lastGridSize.height)
         UserDefaults.standard.set(NSStringFromRect(rect), forKey: Self.savedFrameKey)
+    }
+
+    /// Saves the latest position after a run of window-move notifications.
+    private func scheduleFrameSave() {
+        guard hasShownWindow else { return }
+        frameSaveTask?.cancel()
+        frameSaveTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: Self.frameSaveDebounce)
+            } catch {
+                return
+            }
+            self?.saveFrame()
+        }
     }
 
     /// Re-fits the window when Neovim changed the grid size on its own — for
@@ -1196,6 +1216,9 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     /// Synchronizes the shared glyph caches and redraws this window. The
     /// manager makes repeated calls from windows sharing a GPU idempotent.
     private func applyFontRasterizationSettings() {
+        let thickness = Settings.fontThickness
+        guard thickness != appliedFontThickness else { return }
+        appliedFontThickness = thickness
         renderManager.applyFontRasterizationSettings()
         gridView.needsDisplay = true
     }
@@ -1597,7 +1620,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     }
 
     func windowDidMove(_ notification: Notification) {
-        saveFrame()
+        scheduleFrameSave()
     }
 
     // The red close button means the same thing as Close Window, so it is
@@ -1630,6 +1653,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         bellTask?.cancel()
         progressHoldTask?.cancel()
         settingsTask?.cancel()
+        frameSaveTask?.cancel()
         startupTimeoutTask?.cancel()
         hiddenWindowBackstopTask?.cancel()
         // Close the transport so this window's Neovim does not outlive it.
