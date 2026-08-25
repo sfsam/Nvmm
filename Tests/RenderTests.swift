@@ -73,6 +73,80 @@ final class RenderTests: XCTestCase {
         XCTAssertGreaterThan(family.width, 0)
     }
 
+    func testCellGraphicShaderJoinsVerticalSeparatorAcrossRows() throws {
+        try requireDevice()
+        let context = try RenderContextManager().defaultRenderContext()
+        let device = context.device
+        let cellWidth = 12
+        let cellHeight = 18
+        let outputWidth = cellWidth
+        let outputHeight = cellHeight * 2
+
+        var uniforms = uniform_data(
+            pixel_size: SIMD2<Float>(2.0 / Float(outputWidth),
+                                     -2.0 / Float(outputHeight)),
+            cell_pixel_size: SIMD2<Float>(Float(cellWidth), Float(cellHeight)),
+            baseline: .zero, cursor_position: .zero, cursor_color: 0,
+            cursor_line_width: 0, cursor_cell_width: 1, grid_width: 1,
+            cursor_xray: 0)
+        let uniformBuffer = try XCTUnwrap(withUnsafeBytes(of: &uniforms) {
+            device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
+        })
+
+        // `CellGraphicKind.lightVertical` is private host-side state; 7 is its
+        // wire value consumed by the shader.
+        let lightVertical: UInt32 = 7
+        let graphics = [0, 1].map { row in
+            cell_graphic_data(
+                grid_position: SIMD2<Int16>(0, Int16(row)), cell_width: 1,
+                color: UInt32.max, background_color: 0,
+                kind: lightVertical)
+        }
+        let graphicBuffer = try XCTUnwrap(graphics.withUnsafeBytes {
+            device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
+        })
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm, width: outputWidth,
+            height: outputHeight, mipmapped: false)
+        descriptor.usage = [.renderTarget]
+        descriptor.storageMode = .shared
+        let output = try XCTUnwrap(device.makeTexture(descriptor: descriptor))
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = output
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+
+        let command = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        let encoder = try XCTUnwrap(command.makeRenderCommandEncoder(
+            descriptor: pass))
+        encoder.setRenderPipelineState(context.cellGraphicPipeline)
+        encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 0)
+        encoder.setVertexBuffer(graphicBuffer, offset: 0, index: 1)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
+                               vertexCount: 4, instanceCount: graphics.count)
+        encoder.endEncoding()
+        command.commit()
+        command.waitUntilCompleted()
+        XCTAssertEqual(command.status, .completed)
+
+        var pixels = [UInt8](repeating: 0,
+                             count: outputWidth * outputHeight * 4)
+        output.getBytes(&pixels, bytesPerRow: outputWidth * 4,
+                        from: MTLRegionMake2D(0, 0, outputWidth, outputHeight),
+                        mipmapLevel: 0)
+        func alpha(_ x: Int, _ y: Int) -> UInt8 {
+            pixels[(y * outputWidth + x) * 4 + 3]
+        }
+
+        let center = cellWidth / 2
+        XCTAssertGreaterThan(alpha(center, cellHeight - 1), 0)
+        XCTAssertGreaterThan(alpha(center, cellHeight), 0)
+        XCTAssertEqual(alpha(0, cellHeight - 1), 0)
+        XCTAssertEqual(alpha(0, cellHeight), 0)
+    }
+
     func testFrameBufferRetriesAfterAllocationFailure() throws {
         try requireDevice()
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
