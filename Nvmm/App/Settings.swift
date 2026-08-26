@@ -182,6 +182,8 @@ final class SettingsWindowController: NSWindowController {
         let ligatures = Self.checkbox(
             String(localized: "Programming ligatures"),
             key: Settings.ligaturesKey)
+        let ligaturesNote = Self.note(String(localized:
+            "Requires a font with programming ligatures, such as Fira Code."))
 
         let thickness = NSSlider(value: 0, minValue: 0, maxValue: 3,
                                  target: nil, action: nil)
@@ -217,6 +219,7 @@ final class SettingsWindowController: NSWindowController {
                                       [empty, scrollbar],
                                       [empty, scrollbarNote],
                                       [textLabel, ligatures],
+                                      [empty, ligaturesNote],
                                       [thicknessLabel, thickness],
                                       [cursorTrailLabel, cursorTrail]])
         grid.translatesAutoresizingMaskIntoConstraints = false
@@ -224,12 +227,13 @@ final class SettingsWindowController: NSWindowController {
         grid.column(at: 0).xPlacement = .trailing
 
         // Space below the last control of each group of settings.
-        for item in [terminate, scrollbarNote, ligatures, thickness] {
+        for item in [terminate, scrollbarNote, ligaturesNote, thickness] {
             grid.cell(for: item)?.row?.bottomPadding = 12
         }
 
         // Indent secondary controls to the checkbox-title column.
-        for item in [buffersNote, scrollbarNote, thickness, cursorTrail] {
+        for item in [buffersNote, scrollbarNote, ligaturesNote, thickness,
+                     cursorTrail] {
             let cell = grid.cell(for: item)
             cell?.xPlacement = .none
             cell?.customPlacementConstraints = [
