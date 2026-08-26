@@ -122,9 +122,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - File menu (no editor window in the responder chain)
 
-    /// New, with no window to make a document in: a new window is one.
+    /// New, with no window in the responder chain. A miniaturized window is
+    /// still a window to make a document in, so the oldest one that has shown
+    /// itself is restored and used. Only with no window at all is a new
+    /// window the answer.
     @IBAction func newDocument(_ sender: Any?) {
-        openWindow()
+        guard let controller = windows.first(where: { !$0.isAwaitingFirstShow })
+        else {
+            // A window still waiting for its first grid is one on its way,
+            // so it is left to show itself rather than forced on screen.
+            if windows.isEmpty { openWindow() }
+            return
+        }
+        controller.window?.deminiaturize(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+        controller.newDocument(sender)
     }
 
     /// New Window. Always a new window, so it is only implemented here.

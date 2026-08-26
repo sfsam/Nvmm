@@ -5,9 +5,10 @@
 //  The File menu, as it applies to one window's Neovim.
 //
 //  Each of these actions is also implemented by `AppDelegate`, which the
-//  responder chain reaches when no editor window is in it — a new window is
-//  then the answer to every one of them. So "no window" needs no test here:
-//  this file only ever runs with a window to act on.
+//  responder chain reaches when no editor window is in it. New restores a
+//  miniaturized window and works in that one; the rest answer with a new
+//  window. Either way, "no window" needs no test here: this file only ever
+//  runs with a window to act on.
 //
 //  Every action first asks Neovim what mode it is in and refuses if a command
 //  would be swallowed (see `NeovimProcess.prepareForCommand`), which makes them
