@@ -108,6 +108,75 @@ final class CLIProtocolTests: XCTestCase {
         }
     }
 
+    func testRequestCarriesAndValidatesEnvironment() throws {
+        var request = CLIRequest(
+            arguments: [], files: [], workingDirectory: "/tmp",
+            forceNewWindow: false, wait: false)
+        request.environment = ["PATH": "/usr/bin", "EMPTY": ""]
+        try request.validate()
+
+        let data = try JSONEncoder().encode(request)
+        let decoded = try JSONDecoder().decode(CLIRequest.self, from: data)
+        XCTAssertEqual(decoded, request)
+    }
+
+    // A request from an older helper has no environment key. It must still
+    // decode and validate, so the field cannot be required.
+    func testRequestWithoutEnvironmentKeyStillDecodes() throws {
+        let json = """
+        {"version": 1, "arguments": [], "files": [],
+         "workingDirectory": "/tmp", "forceNewWindow": false, "wait": false}
+        """
+        let decoded = try JSONDecoder().decode(CLIRequest.self,
+                                               from: Data(json.utf8))
+        XCTAssertNil(decoded.environment)
+        try decoded.validate()
+    }
+
+    // A real environ cannot hold these shapes, so a request that does was
+    // not built by the helper.
+    func testRequestRejectsMalformedEnvironmentEntries() {
+        let bad: [[String: String]] = [
+            ["": "value"], ["A=B": "value"],
+            ["A\0B": "value"], ["KEY": "a\0b"],
+        ]
+        for environment in bad {
+            var request = CLIRequest(
+                arguments: [], files: [], workingDirectory: "/tmp",
+                forceNewWindow: false, wait: false)
+            request.environment = environment
+            XCTAssertThrowsError(try request.validate()) { error in
+                XCTAssertEqual(error as? CLIProtocolError, .invalidEnvironment)
+            }
+        }
+    }
+
+    func testEncodedLineDropsOnlyAnOversizedEnvironment() throws {
+        var request = CLIRequest(
+            arguments: [], files: [], workingDirectory: "/tmp",
+            forceNewWindow: false, wait: false)
+        request.environment = ["KEY": "value"]
+
+        let kept = try request.encodedLine(
+            maximumBytes: CLIProtocol.maximumRequestBytes)
+        XCTAssertFalse(kept.droppedEnvironment)
+        XCTAssertEqual(kept.data.last, 0x0a)
+
+        request.environment = ["BIG": String(repeating: "x", count: 512)]
+        let dropped = try request.encodedLine(maximumBytes: 256)
+        XCTAssertTrue(dropped.droppedEnvironment)
+        let decoded = try JSONDecoder().decode(
+            CLIRequest.self, from: dropped.data.dropLast())
+        XCTAssertNil(decoded.environment)
+
+        request.environment = nil
+        request.files = [String(repeating: "y", count: 512)]
+        XCTAssertThrowsError(
+            try request.encodedLine(maximumBytes: 256)) { error in
+            XCTAssertEqual(error as? CLIProtocolError, .oversizedRequest)
+        }
+    }
+
     func testFileResolutionIsLexicalAndAllowsMissingPaths() {
         let request = CLIRequest(arguments: [], files: ["a/../new", "/x/../y"],
                                  workingDirectory: "/tmp/project",

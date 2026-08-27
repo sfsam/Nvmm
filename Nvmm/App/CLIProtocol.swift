@@ -165,6 +165,9 @@ nonisolated struct CLIRequest: Codable, Sendable, Equatable {
     var workingDirectory: String
     var forceNewWindow: Bool
     var wait: Bool
+    // The helper's environment, applied to the new window's nvim. Optional:
+    // a request from an older helper has no key and still decodes.
+    var environment: [String: String]? = nil
 
     func validate() throws {
         guard version == CLIProtocol.version else {
@@ -174,6 +177,37 @@ nonisolated struct CLIRequest: Codable, Sendable, Equatable {
             throw CLIProtocolError.invalidWorkingDirectory
         }
         try CLIArguments.validateForwarded(arguments)
+        if let environment {
+            // A real environ cannot hold these shapes: `environ` splits each
+            // entry at the first `=`, and a C string cannot carry NUL.
+            for (key, value) in environment {
+                guard !key.isEmpty, !key.contains("="),
+                      !key.contains("\0"), !value.contains("\0") else {
+                    throw CLIProtocolError.invalidEnvironment
+                }
+            }
+        }
+    }
+
+    /// The request as one newline-terminated JSON line, at most
+    /// `maximumBytes` long. An oversized request drops its environment and
+    /// retries; a request that is still oversized throws.
+    func encodedLine(maximumBytes: Int) throws
+        -> (data: Data, droppedEnvironment: Bool) {
+        var data = try JSONEncoder().encode(self)
+        data.append(0x0a)
+        if data.count <= maximumBytes { return (data, false) }
+        guard environment != nil else {
+            throw CLIProtocolError.oversizedRequest
+        }
+        var trimmed = self
+        trimmed.environment = nil
+        var fallback = try JSONEncoder().encode(trimmed)
+        fallback.append(0x0a)
+        guard fallback.count <= maximumBytes else {
+            throw CLIProtocolError.oversizedRequest
+        }
+        return (fallback, true)
     }
 
     var needsNewWindow: Bool {
@@ -211,6 +245,8 @@ nonisolated enum CLIProtocolError: Error, Sendable, Equatable {
     case incompatibleVersion
     case invalidWorkingDirectory
     case invalidForwardedArguments
+    case invalidEnvironment
+    case oversizedRequest
 
     var message: String {
         switch self {
@@ -220,6 +256,10 @@ nonisolated enum CLIProtocolError: Error, Sendable, Equatable {
             "The working directory must be an absolute path."
         case .invalidForwardedArguments:
             "The request contains an unsupported Neovim argument."
+        case .invalidEnvironment:
+            "The request environment contains an invalid entry."
+        case .oversizedRequest:
+            "The request is too large."
         }
     }
 }
