@@ -78,6 +78,27 @@ final class NeovimBundleTests: XCTestCase {
         XCTAssertEqual(arguments, ["--embed"])
     }
 
+    // A child environment with TERM comes from a terminal. Its PATH is
+    // already correct, and a login shell's profile could shadow it.
+    func testLaunchCommandWithTERMSpawnsNvimDirectly() {
+        let command = NeovimBundle.launchCommand(
+            nvimPath: "/opt/x/nvim", arguments: ["--embed"],
+            environment: ["TERM": "xterm-256color"])
+        XCTAssertEqual(command.path, "/opt/x/nvim")
+        XCTAssertEqual(command.argv, ["/opt/x/nvim", "--embed"])
+    }
+
+    func testLaunchCommandWithoutTERMUsesALoginShell() {
+        let command = NeovimBundle.launchCommand(
+            nvimPath: "/opt/x/nvim", arguments: ["--embed"],
+            environment: [:])
+        XCTAssertNotEqual(command.path, "/opt/x/nvim")
+        XCTAssertEqual(command.argv.count, 3)
+        XCTAssertTrue(command.argv[0].hasPrefix("-"))
+        XCTAssertEqual(command.argv[1], "-c")
+        XCTAssertTrue(command.argv[2].contains("'/opt/x/nvim'"))
+    }
+
     func testLoginShellCommandExecsNvimAsLoginShell() {
         let command = NeovimBundle.loginShellCommand(
             shell: "/bin/zsh", nvimPath: "/Apps/Nvmm.app/Contents/MacOS/nvim",
