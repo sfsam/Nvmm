@@ -339,7 +339,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if request.wait { controller.setCLIResponseChannel(channel) }
         controller.start(files: request.files,
                          directory: request.workingDirectory,
-                         arguments: request.arguments)
+                         arguments: request.arguments,
+                         environment: request.environment)
         Task {
             switch await controller.waitForStartup() {
             case .started:

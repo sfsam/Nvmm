@@ -291,6 +291,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     private var startupFiles: [String] = []
     private var startupArguments: [String] = []
     private var startupDirectory: String?
+    private var startupEnvironment: [String: String]?
 
     /// How this window reaches Neovim: spawn an embedded process, or connect to
     /// one already running (a `:connect`/`:restart` handoff, or the "Connect to
@@ -389,11 +390,16 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     /// `directory` is the working directory Neovim starts in; when nil it is
     /// derived from the first file, falling back to the invoking shell's
     /// working directory and then the home directory.
+    ///
+    /// `environment` is the complete environment Neovim starts with — a
+    /// control request carries the helper's — and nil keeps the app's own.
     func start(files: [String] = [], directory: String? = nil,
-               arguments: [String] = []) {
+               arguments: [String] = [],
+               environment: [String: String]? = nil) {
         startupFiles = files
         startupArguments = arguments
         startupDirectory = directory
+        startupEnvironment = environment
         source = .spawn
         launch()
     }
@@ -778,7 +784,8 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     /// handed to the render task — carrying the spawn arguments resolved here
     /// so the task need not touch the main actor to build them.
     private enum LaunchPlan: Sendable {
-        case spawn(path: String, argv: [String], directory: String)
+        case spawn(path: String, argv: [String], directory: String,
+                   environment: [String: String]?)
         case connect(address: String)
     }
 
@@ -798,10 +805,13 @@ final class WindowController: NSWindowController, NSWindowDelegate,
                 handleDisconnect()
                 return
             }
-            let launch = NeovimBundle.launchCommand(nvimPath: nvimPath,
-                                                    arguments: neovimArguments())
+            let launch = NeovimBundle.launchCommand(
+                nvimPath: nvimPath, arguments: neovimArguments(),
+                environment: startupEnvironment
+                    ?? ProcessInfo.processInfo.environment)
             plan = .spawn(path: launch.path, argv: launch.argv,
-                          directory: workingDirectory())
+                          directory: workingDirectory(),
+                          environment: startupEnvironment)
         case .remote(let address):
             plan = .connect(address: address)
         }
@@ -861,8 +871,14 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         renderTask = Task { [weak self] in
             do {
                 switch plan {
-                case .spawn(let path, let argv, let directory):
+                case .spawn(let path, let argv, let directory,
+                            let environment):
+                    // PWD must name the real working directory. The
+                    // inherited value names the directory of the app's
+                    // first launch.
                     try await process.spawn(path: path, argv: argv,
+                                            env: ["PWD=\(directory)"],
+                                            baseEnvironment: environment,
                                             workingDirectory: directory)
                 case .connect(let address):
                     try await process.connect(address)
