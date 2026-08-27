@@ -116,13 +116,16 @@ nonisolated enum Spawn {
 
     /// Spawns a child process executing `path`.
     ///
-    /// The child inherits the current process environment, extended by `env`
-    /// (each entry a `KEY=VALUE` string). When `workingDirectory` is non-nil
-    /// and non-empty the child changes into it before exec.
+    /// The child environment starts from `base` when one is given, and from
+    /// the current process environment when `base` is nil. The `env` entries
+    /// (each a `KEY=VALUE` string) then replace the values of the keys they
+    /// name. When `workingDirectory` is non-nil and non-empty the child
+    /// changes into it before exec.
     ///
     /// - Returns: A `Result`. When `error` is non-zero no process was created
     ///   and `pid` is undefined.
     static func spawn(path: String, argv: [String], env: [String],
+                      base: [String: String]? = nil,
                       workingDirectory: String?, streams: Streams) -> Result {
         var actions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&actions)
@@ -177,11 +180,12 @@ nonisolated enum Spawn {
             if code != 0 { return Result(pid: 0, error: code) }
         }
 
-        // Inherit the parent environment, with the caller's entries replacing
-        // the values of the keys they name. Appending them instead would leave
-        // both: a C `getenv` answers with the first of two entries for a key,
-        // which is the inherited one, so the caller's value would be ignored.
-        var environment = ProcessInfo.processInfo.environment
+        // Start from the base, or from the parent environment, with the
+        // caller's entries replacing the values of the keys they name.
+        // Appending them instead would leave both: a C `getenv` answers with
+        // the first of two entries for a key, which is the inherited one, so
+        // the caller's value would be ignored.
+        var environment = base ?? ProcessInfo.processInfo.environment
         for entry in env {
             guard let separator = entry.firstIndex(of: "=") else { continue }
             environment[String(entry[..<separator])] =
