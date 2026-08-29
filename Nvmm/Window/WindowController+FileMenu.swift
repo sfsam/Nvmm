@@ -29,14 +29,7 @@ extension WindowController {
     @IBAction func newDocument(_ sender: Any?) {
         guard let process else { return }
         Task {
-            switch await process.newDocument(
-                inBuffers: Settings.openFilesInBuffers) {
-            case .opened: break
-            case .unavailable: NSSound.beep()
-            case .failed(let detail):
-                await process.perform(.errorWriteln(detail))
-                NSSound.beep()
-            }
+            await process.newDocument(inBuffers: Settings.openFilesInBuffers)
         }
     }
 
@@ -89,10 +82,13 @@ extension WindowController {
         guard let process else { return }
         Task {
             guard await process.canSave() else { return NSSound.beep() }
-            switch await process.writeCurrentBuffer() {
+            let outcome = await process.writeCurrentBuffer()
+            switch outcome {
             case .written: break
             case .needsFilename: _ = await showSavePanelAndWrite()
             case .failed(let detail): await presentSaveError(detail)
+            case .awaitingInput:
+                await presentSaveAwaitingInput()
             }
         }
     }
@@ -118,7 +114,8 @@ extension WindowController {
             NSSound.beep()
             return .failed
         }
-        switch await process.writeAs(path) {
+        let outcome = await process.writeAs(path)
+        switch outcome {
         case .written:
             return .saved
         case .needsFilename:
@@ -128,19 +125,43 @@ extension WindowController {
         case .failed(let detail):
             await presentSaveError(detail)
             return .failed
+        case .awaitingInput:
+            await presentSaveAwaitingInput()
+            return .failed
         }
     }
 
     /// Reports a failed write as a sheet on the document that remains unsaved.
     private func presentSaveError(_ detail: String) async {
-        Log.app.error("Could not save document: \(detail)")
+        await presentSaveAlert(
+            message: String(localized: "Could Not Save Document"),
+            detail: detail)
+    }
+
+    /// Reports a save that was never sent, because Neovim is waiting for
+    /// input. Nothing failed and nothing is queued: the save is made again
+    /// once the editor is free.
+    private func presentSaveAwaitingInput() async {
+        await presentSaveAlert(
+            message: String(localized: "Neovim Is Waiting for Input"),
+            detail: String(localized:
+                "Finish or cancel the pending input, then save again."),
+            style: .informational)
+    }
+
+    /// Sheets a save report on the document it concerns.
+    private func presentSaveAlert(
+        message: String, detail: String,
+        style: NSAlert.Style = .warning
+    ) async {
+        Log.app.error("Save reported: \(message): \(detail)")
         guard let window else {
             NSSound.beep()
             return
         }
         let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = String(localized: "Could Not Save Document")
+        alert.alertStyle = style
+        alert.messageText = message
         alert.informativeText = detail
         alert.addButton(withTitle: String(localized: "OK"))
         await alert.beginSheetModal(for: window)
@@ -234,6 +255,11 @@ extension WindowController {
         // prompting about or quitting buffers that belong to that session.
         if !ownsServer { window?.close(); return }
         guard let process else { return }
+        // Neovim blocked awaiting input answers no requests, so the
+        // modified-buffer query would time out and the close would do nothing.
+        // Terminal Neovim refuses to quit in this state too: report the block,
+        // and let the user cancel the pending input first.
+        guard await !refuseIfBlocked(process) else { return }
         guard var pending = await process.modifiedBuffers() else { return NSSound.beep() }
         var discarded: [ModifiedBuffer] = []
 
@@ -255,7 +281,21 @@ extension WindowController {
             pending = unexpected
         }
 
+        // The sheets let the user keep typing, so Neovim can have entered a
+        // blocked input state since the entry check — a quit issued now would
+        // queue until the user cancels it, leaving the window open for no
+        // visible reason. Re-check and report instead.
+        guard await !refuseIfBlocked(process) else { return }
         beginQuit(force: true)
+    }
+
+    /// Reports the awaiting-input alert and returns true when Neovim is
+    /// blocked awaiting input, so close and delete paths refuse to act rather
+    /// than send commands that would queue behind the block.
+    private func refuseIfBlocked(_ process: NeovimProcess) async -> Bool {
+        guard await process.isBlockedAwaitingInput() else { return false }
+        await presentAwaitingInputAlert()
+        return true
     }
 
     /// Closes the current buffer. The last buffer means closing the window,
@@ -263,6 +303,10 @@ extension WindowController {
     /// at stake, so only it is asked about.
     private func deleteCurrentBuffer() async {
         guard let process else { return }
+        // Neovim blocked awaiting input answers no requests, so the buffer
+        // query would time out into an unexplained beep. Report instead, as
+        // Close Window does for the same state.
+        guard await !refuseIfBlocked(process) else { return }
         guard let info = await process.currentBufferInfo() else { return NSSound.beep() }
 
         if info.isOnlyBuffer {
@@ -285,10 +329,14 @@ extension WindowController {
         default: break
         }
 
-        switch await process.writeBuffer(buffer.bufnr) {
+        let outcome = await process.writeBuffer(buffer.bufnr)
+        switch outcome {
         case .written: return .saved
         case .failed(let detail):
             await presentSaveError(detail)
+            return .failed
+        case .awaitingInput:
+            await presentSaveAwaitingInput()
             return .failed
         case .needsFilename:
             // An unnamed buffer needs a filename before it can be written, and
@@ -318,11 +366,19 @@ extension WindowController {
 
         if info.name.isEmpty {
             // Switch to the buffer first, so the save panel names the buffer
-            // the user was asked about rather than whichever is current.
-            guard await process.switchToBuffer(info.bufnr) else { return NSSound.beep() }
+            // the user was asked about rather than whichever is current. The
+            // switch reports false only once it is known not to have landed,
+            // so proceeding would name the save panel wrong: stop with an
+            // explanation instead of a bare beep.
+            guard await process.switchToBuffer(info.bufnr) else {
+                await presentSaveError(String(localized:
+                    "Neovim could not switch to the buffer, so it was not deleted. Check which buffer is current, then try again."))
+                return
+            }
             guard await showSavePanelAndWrite() == .saved else { return }
         } else {
-            switch await process.writeBuffer(info.bufnr) {
+            let outcome = await process.writeBuffer(info.bufnr)
+            switch outcome {
             case .written:
                 break
             case .needsFilename:
@@ -330,9 +386,38 @@ extension WindowController {
             case .failed(let detail):
                 await presentSaveError(detail)
                 return
+            case .awaitingInput:
+                await presentSaveAwaitingInput()
+                return
             }
         }
         await process.deleteBuffer(info.bufnr, force: false)
+    }
+
+    /// Reports that this window's Neovim is blocked awaiting input, as part
+    /// of a deferred app quit or close-all. Brings the window to the front —
+    /// a miniaturized window would otherwise stay in the Dock while the
+    /// report tells the user to act in a window they cannot see — and sheets
+    /// the report on it, so it is frontmost and keyed relative to the window
+    /// the input is pending in.
+    func presentAwaitingInputReport() async {
+        NSApp.activate(ignoringOtherApps: true)
+        window?.deminiaturize(nil)
+        window?.makeKeyAndOrderFront(nil)
+        await presentAwaitingInputAlert()
+    }
+
+    /// Reports that a close was abandoned because this window's Neovim is
+    /// blocked awaiting input — for example the register name after `q`.
+    private func presentAwaitingInputAlert() async {
+        guard let window else { return NSSound.beep() }
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = String(localized: "Neovim Is Waiting for Input")
+        alert.informativeText = String(localized:
+            "Complete or cancel the pending input and try again.")
+        alert.addButton(withTitle: String(localized: "OK"))
+        _ = await alert.beginSheetModal(for: window)
     }
 
     /// Runs the standard unsaved-changes sheet for a buffer. An unnamed buffer

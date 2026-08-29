@@ -39,7 +39,8 @@ nonisolated enum NvimMode: Sendable, Equatable {
     case insert, insertCompletion, insertCompletionCtrlX
     case replace, replaceCompletion, replaceCompletionCtrlX, replaceVirtual
 
-    /// True when Neovim is blocked or unreachable, so no command can be sent.
+    /// True when Neovim did not report a usable mode, so no command can be
+    /// sent with any knowledge of where it would land.
     var isBusy: Bool {
         self == .cancelled || self == .timedOut || self == .unknown
     }
@@ -116,6 +117,13 @@ nonisolated func classifyNvimMode(_ shortname: String) -> NvimMode {
 
 /// Extracts the mode from an `nvim_get_mode` response. An RPC error, or a
 /// reply without a usable `mode` entry, is `.unknown`.
+///
+/// The reply's `blocking` flag is deliberately not consulted here. A mode
+/// read answers where a command would land; whether Neovim is waiting on the
+/// user is a separate question, asked only where it changes an outcome (see
+/// `parseBlockedAwaitingInput`). Reading it here would refuse ordinary
+/// commands during the brief `'timeoutlen'` wait after a mapping prefix,
+/// which is a blocking wait that ends on its own.
 nonisolated func parseNvimMode(_ response: RPCResponse) -> NvimMode {
     guard !response.isError,
           let shortname = response.result.mapValue(for: .string("mode"))?.stringValue
@@ -130,4 +138,23 @@ nonisolated func parseNvimMode(_ result: RPCRequestResult) -> NvimMode {
     case .timedOut: .timedOut
     case .transport: .cancelled
     }
+}
+
+/// Whether an `nvim_get_mode` reply says Neovim is blocked waiting for input
+/// only the user can supply — the register name after `q`, a `getchar()`
+/// prompt. While blocked Neovim answers no other request, so this reply is
+/// the one that still arrives.
+///
+/// No answer at all is not a block: a Neovim too slow to reply, or gone, is
+/// not waiting on the user, and reporting it as waiting would tell the user
+/// to act on input that does not exist and would hide a dead session behind
+/// a report instead of a beep.
+///
+/// The flag also covers Neovim's own bounded waits, such as the
+/// `'timeoutlen'` wait after a mapping prefix, so a single reading can name
+/// a block that ends on its own. Callers use it only where refusing costs a
+/// dismissible report and a retry.
+nonisolated func parseBlockedAwaitingInput(_ result: RPCRequestResult) -> Bool {
+    guard case .response(let response) = result else { return false }
+    return response.result.mapValue(for: .string("blocking"))?.boolValue == true
 }

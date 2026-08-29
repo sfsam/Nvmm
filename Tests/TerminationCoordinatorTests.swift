@@ -23,25 +23,39 @@ final class TerminationCoordinatorTests: XCTestCase {
         var quitCount = 0
         var lastForce = false
         let unsaved: Bool
+        /// Whether the session's Neovim is blocked awaiting input.
+        let awaitingInput: Bool
         /// Whether a forced quit makes it exit.
         let exitsOnForce: Bool
         /// Whether an orderly quit request receives any response.
         let respondsToQuit: Bool
         var forceTerminateCount = 0
         var unsavedQueryCount = 0
+        var awaitingQueryCount = 0
+        var reportCount = 0
 
         /// A clean session (`unsaved: false`) exits on any quit; an unsaved one
         /// exits only when forced (unless `exitsOnForce` is overridden).
         init(unsaved: Bool, exitsOnForce: Bool = true,
-             respondsToQuit: Bool = true) {
+             respondsToQuit: Bool = true, awaitingInput: Bool = false) {
             self.unsaved = unsaved
             self.exitsOnForce = exitsOnForce
             self.respondsToQuit = respondsToQuit
+            self.awaitingInput = awaitingInput
         }
 
         func hasUnsavedBuffers() async -> Bool {
             unsavedQueryCount += 1
             return unsaved
+        }
+
+        func isAwaitingInput() async -> Bool {
+            awaitingQueryCount += 1
+            return awaitingInput
+        }
+
+        func presentAwaitingInputReport() async {
+            reportCount += 1
         }
 
         func beginQuit(force: Bool) {
@@ -178,6 +192,32 @@ final class TerminationCoordinatorTests: XCTestCase {
         XCTAssertEqual(exitedNormally.forceTerminateCount, 0)
         XCTAssertEqual(hung.forceTerminateCount, 1)
         XCTAssertTrue(hung.hasExited)
+    }
+
+    func testAwaitingInputSessionDefersQuit() async {
+        let coordinator = TerminationCoordinator()
+        let blocked = FakeSession(unsaved: false, awaitingInput: true)
+        coordinator.register(blocked)
+        // A blocked session answers no requests, so the unsaved check would
+        // time out into a false "unsaved". The quit is deferred instead: the
+        // session is told to report the block, and no prompt or quit follows.
+        let exited = await coordinator.requestApplicationQuit(
+            timeout: .milliseconds(25),
+            confirmDiscard: {
+                XCTFail("blocked session must not ask to discard")
+                return false
+            },
+            confirmForceTermination: {
+                XCTFail("blocked session must not be force-terminated")
+                return false
+            })
+
+        XCTAssertFalse(exited)
+        XCTAssertEqual(blocked.reportCount, 1)
+        XCTAssertEqual(blocked.awaitingQueryCount, 1)
+        XCTAssertEqual(blocked.unsavedQueryCount, 0)
+        XCTAssertEqual(blocked.quitCount, 0)
+        XCTAssertFalse(blocked.hasExited)
     }
 
     func testDeregisterRemovesSession() async {

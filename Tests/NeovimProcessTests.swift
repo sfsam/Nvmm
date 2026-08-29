@@ -437,44 +437,66 @@ final class NeovimProcessTests: XCTestCase {
         await process.disconnect()
     }
 
+    /// A write is not sent to a Neovim blocked awaiting input. Sent, it
+    /// would be answered after its deadline, and an error it raised — E32
+    /// for an unnamed buffer, which the save panel exists to answer — would
+    /// arrive in a reply no longer being read, failing invisibly.
+    func testWriteIsNotSentWhileBlockedAwaitingInput() async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+
+        let write = Task { await process.writeBuffer(3) }
+
+        var unpacker = MessagePackUnpacker()
+        let probeID = try readRequest(pair.peer, method: "nvim_get_mode",
+                                      unpacker: &unpacker)
+        try writeResponse(
+            pair.peer, id: probeID,
+            result: .map([(.string("mode"), .string("n")),
+                          (.string("blocking"), .bool(true))]))
+
+        let outcome = await write.value
+        XCTAssertEqual(outcome, .awaitingInput)
+        // Nothing followed the probe: no `:write` is left to fail unseen.
+        XCTAssertThrowsError(try readMessage(pair.peer, unpacker: &unpacker))
+        await process.disconnect()
+    }
+
     private func assertNewDocumentCommand(
-        inBuffers: Bool, expectedCommand: String
+        inBuffers: Bool, expectedKeys: String
     ) async throws {
         let pair = try makeSocketPair()
         defer { close(pair.peer) }
         let process = NeovimProcess()
         await process.attach(readFD: pair.client, writeFD: pair.client)
 
-        let operation = Task {
-            await process.newDocument(inBuffers: inBuffers)
-        }
-        var unpacker = MessagePackUnpacker()
-        var id = try readRequest(
-            pair.peer, method: "nvim_get_mode", unpacker: &unpacker)
-        try writeResponse(
-            pair.peer, id: id,
-            result: .map([
-                (.string("mode"), .string("n")),
-                (.string("blocking"), .bool(false)),
-            ]))
-        id = try readRequest(
-            pair.peer, method: "nvim_command",
-            arguments: [.string(expectedCommand)], unpacker: &unpacker)
-        try writeResponse(pair.peer, id: id)
+        await process.newDocument(inBuffers: inBuffers)
 
-        let outcome = await operation.value
-        XCTAssertEqual(outcome, .opened)
+        var unpacker = MessagePackUnpacker()
+        let message = try readMessage(pair.peer, unpacker: &unpacker)
+        guard let values = message.arrayValue, values.count == 3,
+              values[0].integer?.unsigned == 2,
+              values[1].stringValue == "nvim_input",
+              let arguments = values[2].arrayValue, arguments.count == 1
+        else {
+            return XCTFail("expected an nvim_input notification: \(message)")
+        }
+        // The mode is never queried: the keys leave any pending state
+        // themselves, which is what makes this work while Neovim is blocked.
+        XCTAssertEqual(arguments[0].stringValue, expectedKeys)
         await process.disconnect()
     }
 
     func testNewDocumentUsesHideEnewForBuffers() async throws {
         try await assertNewDocumentCommand(
-            inBuffers: true, expectedCommand: "hide enew")
+            inBuffers: true, expectedKeys: "<Esc><C-\\><C-N>:hide enew<CR>")
     }
 
     func testNewDocumentUsesTabnewForTabs() async throws {
         try await assertNewDocumentCommand(
-            inBuffers: false, expectedCommand: "tabnew")
+            inBuffers: false, expectedKeys: "<Esc><C-\\><C-N>:tabnew<CR>")
     }
 
     func testServerAddressReturnsNilForEmptyAddress() async throws {
@@ -644,6 +666,78 @@ final class NeovimProcessTests: XCTestCase {
         XCTAssertEqual(pasteChunks("", maximumBytes: 4), [""])
     }
 
+    /// A paste into a Neovim blocked awaiting input is refused rather than
+    /// sent: `nvim_paste` is deferred while blocked, and awaiting it in the
+    /// serialized command consumer would park every later keystroke behind
+    /// it — including the Esc that cancels the block. The refusal is
+    /// reported, so the clipboard does not vanish without a sign.
+    func testPasteIsRefusedWhileNeovimIsBlocked() async throws {
+        let (client, peer) = try makeSocketPair()
+        defer { close(peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: client, writeFD: client)
+
+        let refused = expectation(description: "the paste was reported")
+        let paste = Task {
+            await process.perform(
+                .paste("hello", refused: { refused.fulfill() }))
+        }
+
+        var unpacker = MessagePackUnpacker()
+        let probeID = try readRequest(peer, method: "nvim_get_mode",
+                                      unpacker: &unpacker)
+        try writeResponse(
+            peer, id: probeID,
+            result: .map([(.string("mode"), .string("n")),
+                          (.string("blocking"), .bool(true))]))
+
+        await fulfillment(of: [refused], timeout: 2)
+        await paste.value
+        // Nothing followed the probe: no chunk reached the blocked editor.
+        XCTAssertThrowsError(try readMessage(peer, unpacker: &unpacker))
+    }
+
+    /// A chunk that goes unanswered abandons the paste, but the chunks
+    /// already sent still run whenever Neovim reaches them. An empty final
+    /// chunk closes the stream, so the dot-repeat register is finished and a
+    /// terminal buffer leaves streamed-paste mode.
+    func testAbandonedPasteTerminatesTheStream() async throws {
+        let (client, peer) = try makeSocketPair()
+        defer { close(peer) }
+        // The abandoned chunk is bounded at two seconds; wait past that.
+        var timeout = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(peer, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                   socklen_t(MemoryLayout<timeval>.size))
+        let process = NeovimProcess()
+        await process.attach(readFD: client, writeFD: client)
+
+        let text = String(repeating: "a", count: nvimPasteChunkBytes + 1)
+        let paste = Task { await process.perform(.paste(text, refused: {})) }
+
+        var unpacker = MessagePackUnpacker()
+        let probeID = try readRequest(peer, method: "nvim_get_mode",
+                                      unpacker: &unpacker)
+        try writeResponse(
+            peer, id: probeID,
+            result: .map([(.string("mode"), .string("n")),
+                          (.string("blocking"), .bool(false))]))
+
+        // Read the opening chunk and never answer it.
+        _ = try readRequest(peer, method: "nvim_paste", unpacker: &unpacker)
+
+        let message = try readMessage(peer, unpacker: &unpacker)
+        guard let values = message.arrayValue, values.count == 3,
+              values[0].integer?.unsigned == 2,
+              values[1].stringValue == "nvim_paste",
+              let arguments = values[2].arrayValue, arguments.count == 3
+        else {
+            return XCTFail("expected a terminating notification: \(message)")
+        }
+        XCTAssertEqual(arguments[0].stringValue, "")
+        XCTAssertEqual(arguments[2].integer?.signed, 3)
+        await paste.value
+    }
+
     func testLargePasteUsesSequentialRequests() async throws {
         let (client, peer) = try makeSocketPair()
         defer { close(peer) }
@@ -657,7 +751,24 @@ final class NeovimProcessTests: XCTestCase {
             (text.utf8.count + nvimPasteChunkBytes - 1)
             / nvimPasteChunkBytes
 
-        let paste = Task { await process.perform(.paste(text)) }
+        let paste = Task { await process.perform(.paste(text, refused: {})) }
+
+        // The paste probes the input-block state first; answer it so the
+        // chunked nvim_paste requests proceed.
+        let probe = try readMessage(peer)
+        guard case .array(let probeValues) = probe, probeValues.count == 4,
+              let probeID = probeValues[1].integer?.unsigned,
+              probeValues[2].stringValue == "nvim_get_mode"
+        else {
+            return XCTFail("expected a leading nvim_get_mode probe: \(probe)")
+        }
+        var probeReply = MessagePackWriter()
+        probeReply.encodeResponse(
+            id: probeID, error: .null,
+            result: .map([(.string("mode"), .string("n")),
+                          (.string("blocking"), .bool(false))]))
+        try writeAll(peer, probeReply.bytes)
+
         var received: [String] = []
         var phases: [Int64] = []
         for _ in 0..<chunkCount {
@@ -972,6 +1083,51 @@ final class NeovimProcessTests: XCTestCase {
         return false
     }
 
+    /// Polls a Vimscript condition until it holds. Typed keys are consumed by
+    /// Neovim's main loop rather than answered like a request, so the state
+    /// they produce arrives after the call that sent them.
+    private func waitUntilTrue(
+        _ process: NeovimProcess, _ expr: String,
+        timeout: Duration = .seconds(3)
+    ) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            let reply = try? await process.request(
+                "nvim_eval", [.string(expr)])
+            if let reply, !reply.isError,
+               reply.result.integer?.signed == 1 {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        return false
+    }
+
+    /// Puts Neovim into the block every one of these cases starts from: `q`
+    /// in Normal mode waits for a register name, which only the user can
+    /// give. False if the wait never took hold.
+    private func blockOnRegisterWait(_ process: NeovimProcess) async -> Bool {
+        await process.perform(.input("q"))
+        return await waitFor(process) { await $0.isBlockedAwaitingInput() }
+    }
+
+    /// Waits for a block to lift, after the pending input has been answered.
+    private func waitUntilUnblocked(_ process: NeovimProcess) async -> Bool {
+        await waitFor(process) { await !$0.isBlockedAwaitingInput() }
+    }
+
+    private func waitFor(
+        _ process: NeovimProcess, timeout: Duration = .seconds(2),
+        _ condition: (NeovimProcess) async -> Bool
+    ) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            if await condition(process) { return true }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        return false
+    }
+
     // MARK: Real-Neovim cases
 
     func testEvalRoundTrip() async throws {
@@ -979,6 +1135,49 @@ final class NeovimProcessTests: XCTestCase {
             let response = try await process.request("nvim_eval", [.string("1 + 2")])
             XCTAssertTrue(response.error.isNull)
             XCTAssertEqual(response.result, .int(3))
+        }
+    }
+
+    /// While Neovim is blocked waiting for input it answers `nvim_get_mode`
+    /// with `blocking` set and nothing else: requests time out, and a quit
+    /// command issued then queues behind the block instead of running.
+    /// Cancelling the pending input lifts the block, and the queued quit then
+    /// runs — which is why nothing may be issued into a blocked Neovim.
+    func testBlockedInputIsDetectedAndDefersCommands() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            let blockedAtStart = await process.isBlockedAwaitingInput()
+            XCTAssertFalse(blockedAtStart)
+
+            let blocked = await blockOnRegisterWait(process)
+            XCTAssertTrue(blocked)
+
+            // A quit issued now queues behind the block: Neovim stays
+            // blocked and alive, where a quit that ran would have ended the
+            // connection.
+            await process.perform(.quit(force: false))
+            let watch = ContinuousClock.now.advanced(by: .milliseconds(500))
+            while ContinuousClock.now < watch {
+                let stillBlocked = await process.isBlockedAwaitingInput()
+                XCTAssertTrue(stillBlocked)
+                if !stillBlocked { break }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+
+            // Esc through `nvim_input` is what reaches a blocked Neovim. It
+            // cancels the wait, the queued quit then runs, and the connection
+            // ends.
+            await process.perform(.input("\u{1b}"))
+            let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+            var exited = false
+            while ContinuousClock.now < deadline {
+                if (try? await process.request("nvim_get_mode")) == nil {
+                    exited = true
+                    break
+                }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            XCTAssertTrue(exited)
         }
     }
 
@@ -998,18 +1197,61 @@ final class NeovimProcessTests: XCTestCase {
         }
     }
 
-    func testOpenHelpTopicReportsAcceptanceAndRejection() async throws {
+    /// The reported flow: `q` waits for a register name, Cmd-S reports that
+    /// Neovim is waiting, and once the register name is given the save works
+    /// normally — including offering a filename for an unnamed buffer, which
+    /// is what a write sent into the block would have lost.
+    func testUnnamedBufferSaveIsOfferedAfterTheBlockClears() async throws {
         try await withNvim { process in
-            let accepted = await process.openHelpTopic("help")
-            let rejected = await process.openHelpTopic(
-                "nvmm-topic-that-cannot-exist")
-            XCTAssertTrue(accepted)
-            XCTAssertFalse(rejected)
+            try await attachLinegridUI(process)
+            let changed = try await process.request(
+                "nvim_buf_set_lines",
+                [.int(0), .int(0), .int(-1), .bool(true),
+                 .array([.string("hello")])])
+            XCTAssertFalse(changed.isError)
+
+            let blocked = await blockOnRegisterWait(process)
+            XCTAssertTrue(blocked)
+
+            let refused = await process.writeCurrentBuffer()
+            XCTAssertEqual(refused, .awaitingInput)
+
+            // Give the register name, as the user does after the report.
+            await process.perform(.input("q"))
+            let cleared = await waitUntilUnblocked(process)
+            XCTAssertTrue(cleared)
+
+            // E32 now reaches the caller, which is what puts up a save panel.
+            let outcome = await process.writeCurrentBuffer()
+            XCTAssertEqual(outcome, .needsFilename)
+        }
+    }
+
+    /// The Help menu types its command rather than issuing it, so it reaches
+    /// a Neovim blocked awaiting input — where an `nvim_command` would queue
+    /// behind the block instead. The leading keys answer the pending wait.
+    func testOpenHelpTopicWorksWhileBlockedAwaitingInput() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+
+            let blocked = await blockOnRegisterWait(process)
+            XCTAssertTrue(blocked)
+
+            await process.openHelpTopic("help")
+            let opened = await waitUntilTrue(process, "&buftype ==# 'help'")
+            XCTAssertTrue(opened)
+            // The block is gone: the typed keys cleared the pending wait.
+            let stillBlocked = await process.isBlockedAwaitingInput()
+            XCTAssertFalse(stillBlocked)
         }
     }
 
     func testNewBufferPreservesModifiedBufferWithNohidden() async throws {
         try await withNvim { process in
+            // The command is typed, and Neovim reads typed input only once a
+            // UI is attached: `--embed` waits for one before entering its
+            // main loop.
+            try await attachLinegridUI(process)
             let oldReply = try await process.request(
                 "nvim_eval", [.string("bufnr('%')")])
             XCTAssertFalse(oldReply.isError)
@@ -1023,8 +1265,10 @@ final class NeovimProcessTests: XCTestCase {
                 "nvim_command", [.string("set nohidden")])
             XCTAssertFalse(nohidden.isError)
 
-            let outcome = await process.newDocument(inBuffers: true)
-            XCTAssertEqual(outcome, .opened)
+            await process.newDocument(inBuffers: true)
+            let created = await waitUntilTrue(
+                process, "bufnr('%') != \(old)")
+            XCTAssertTrue(created)
 
             let lua = """
                 local old = ...
@@ -1153,3 +1397,4 @@ final class NeovimProcessTests: XCTestCase {
         }
     }
 }
+

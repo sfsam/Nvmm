@@ -20,6 +20,16 @@ import Foundation
     /// before an app-modal quit or close-all prompt.
     func hasUnsavedBuffers() async -> Bool
 
+    /// Whether this window's Neovim is blocked awaiting input. In that state
+    /// Neovim answers no requests, so an unsaved check would time out and a
+    /// quit command would queue until the user cancels the input.
+    func isAwaitingInput() async -> Bool
+
+    /// Reports that quitting is deferred because this window's Neovim is
+    /// blocked awaiting input. Brings the window to the front, so the user is
+    /// told to act where the input is actually pending.
+    func presentAwaitingInputReport() async
+
     /// Asks Neovim to quit all buffers. A forced quit discards unsaved changes.
     /// The unsaved check and the user's confirmation happen centrally, so the
     /// caller has already decided `force`; this simply issues the quit. Returns
@@ -69,6 +79,14 @@ import Foundation
         return false
     }
 
+    /// The first live window whose Neovim is blocked awaiting input, if any.
+    func firstAwaitingInput() async -> QuitSession? {
+        for session in sessions where !session.hasExited {
+            if await session.isAwaitingInput() { return session }
+        }
+        return nil
+    }
+
     /// Asks every window to quit and waits, up to `timeout`, for them all to
     /// exit. Returns true only if they did; a false result means at least one
     /// window did not quit (a non-forced quit blocked by unsaved buffers, or a
@@ -95,14 +113,22 @@ import Foundation
         return draining.allSatisfy { $0.hasExited }
     }
 
-    /// Drives the complete application-quit policy. Modified buffers require
-    /// confirmation before an orderly forced quit. A timed-out orderly quit
-    /// requires a second confirmation before terminating remaining sessions.
+    /// Drives the complete application-quit policy. A window blocked awaiting
+    /// input defers the whole quit: Neovim answers no requests in that state,
+    /// so its unsaved check would time out into a false "unsaved" and a
+    /// discard prompt the session may not need. Modified buffers then require
+    /// confirmation before an orderly forced quit, and a timed-out orderly
+    /// quit requires a second confirmation before terminating remaining
+    /// sessions.
     func requestApplicationQuit(
         timeout: Duration = .seconds(3),
         confirmDiscard: () -> Bool,
         confirmForceTermination: () -> Bool
     ) async -> Bool {
+        if let session = await firstAwaitingInput() {
+            await session.presentAwaitingInputReport()
+            return false
+        }
         let force: Bool
         if await anyUnsavedBuffers() {
             guard confirmDiscard() else { return false }

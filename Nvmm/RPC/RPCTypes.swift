@@ -26,8 +26,10 @@ nonisolated enum NvimCommand: Sendable {
     case resize(width: Int, height: Int)
     /// A focus change for `nvim_ui_set_focus`.
     case focus(Bool)
-    /// Text pasted at the cursor via `nvim_paste`.
-    case paste(String)
+    /// Text pasted at the cursor via `nvim_paste`. The main-actor callback
+    /// reports a paste refused because Neovim is blocked awaiting input,
+    /// which would otherwise drop the clipboard with no sign to the user.
+    case paste(String, refused: @MainActor @Sendable () -> Void)
     /// A key sequence fed to Neovim via `nvim_feedkeys`, used for mode-aware
     /// Edit menu actions. The string holds raw control bytes (e.g. `\u{03}` for
     /// CTRL-C), not `<C-c>`-style notation.
@@ -120,6 +122,24 @@ nonisolated enum RPCRequestResult: Sendable {
     case timedOut
     /// The connection failed before a response arrived.
     case transport(RPCTransportError)
+}
+
+/// The result of a bounded request that changes Neovim's state.
+///
+/// A deadline bounds the wait, never the command: a request Neovim did not
+/// answer in time was still sent, and runs whenever Neovim reaches it. So
+/// `unknown` never means the command did not happen, and callers must not
+/// report it as failure — they resolve it by asking Neovim what its state
+/// now is, or say plainly that the outcome is unknown.
+nonisolated enum CommandResult: Sendable {
+    /// Neovim answered. The response still carries any Ex error it raised.
+    case done(RPCResponse)
+    /// The command was never sent, because the mode did not allow it. This
+    /// is the only case that means "did not run".
+    case refused
+    /// No answer within the deadline, or the transport failed. The command
+    /// may still take effect.
+    case unknown
 }
 
 /// The outcome of an inbound RPC request handler: a result value returned to

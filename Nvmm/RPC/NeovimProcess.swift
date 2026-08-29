@@ -480,7 +480,7 @@ actor NeovimProcess {
     /// The attached Neovim's RPC address (`v:servername`), or nil when it has
     /// none. `server_start` can fail, and Neovim then reports an empty address.
     func serverAddress(timeout: Duration = .seconds(5)) async -> String? {
-        switch await requestBounded(
+        switch await queryBounded(
             "nvim_eval", [.string("v:servername")], timeout: timeout
         ) {
         case .response(let response):
@@ -526,8 +526,8 @@ actor NeovimProcess {
                    [.int(MPInteger(width)), .int(MPInteger(height))])
         case .focus(let focused):
             notify("nvim_ui_set_focus", [.bool(focused)])
-        case .paste(let data):
-            await paste(data)
+        case .paste(let data, let refused):
+            if await !paste(data) { await refused() }
         case .feedkeys(let keys):
             // Mode "n" (no remapping) with K_SPECIAL escaping, so the raw
             // control bytes in `keys` are fed literally.
@@ -563,7 +563,16 @@ actor NeovimProcess {
     /// Streams a paste through result-bearing requests. Keeping each request
     /// bounded and awaiting its response prevents a large clipboard value from
     /// overflowing the transport's finite outbound queue.
-    private func paste(_ data: String) async {
+    ///
+    /// False when the paste was refused outright, so the caller can say so.
+    @discardableResult
+    private func paste(_ data: String) async -> Bool {
+        // Neovim blocked awaiting input defers `nvim_paste` indefinitely, and
+        // this runs in the serialized command consumer: an unanswered paste
+        // would park every later keystroke behind it, including the Esc that
+        // cancels the block. Refuse instead — nothing can be pasted into a
+        // blocked editor anyway.
+        guard await !isBlockedAwaitingInput() else { return false }
         let chunks = pasteChunks(data, maximumBytes: nvimPasteChunkBytes)
         for (index, chunk) in chunks.enumerated() {
             let phase: Int
@@ -577,12 +586,41 @@ actor NeovimProcess {
                 phase = 2
             }
 
-            guard let response = try? await request(
+            // Bounded: a wedged Neovim must not park the consumer forever.
+            // Chunks after an answer-less one are dropped, since a late
+            // reply says nothing about what the buffer now holds.
+            guard case .response(let response) = await queryBounded(
                 "nvim_paste",
-                [.string(chunk), false, .int(MPInteger(phase))]),
-                  !response.isError, response.result.boolValue == true
-            else { return }
+                [.string(chunk), false, .int(MPInteger(phase))],
+                timeout: .seconds(2))
+            else {
+                endAbandonedPaste(phase: phase)
+                return true
+            }
+            // Neovim ends the stream itself when it refuses a chunk: the
+            // refusal is decided inside that same call, which finalizes the
+            // paste and leaves a terminal buffer's streamed-paste mode off.
+            guard !response.isError, response.result.boolValue == true
+            else { return true }
         }
+        return true
+    }
+
+    /// Closes a paste stream abandoned because a chunk went unanswered.
+    ///
+    /// The unanswered chunk was still sent, so it runs whenever Neovim gets
+    /// to it, leaving the stream open: the dot-repeat register stays
+    /// unfinished, and a terminal buffer stays in streamed-paste mode, so
+    /// what the user types next is treated as pasted text. An empty final
+    /// chunk closes it — requests are answered in order, so this arrives
+    /// after the chunk it terminates. Sent without waiting, since a Neovim
+    /// that is already late must not park the consumer any further.
+    ///
+    /// A single-chunk (-1) or final (3) paste is its own terminator and
+    /// needs nothing.
+    private func endAbandonedPaste(phase: Int) {
+        guard phase == 1 || phase == 2 else { return }
+        notify("nvim_paste", [.string(""), false, .int(MPInteger(3))])
     }
 
     /// Runs one mode-aware Undo or Redo and observes whether Neovim moved in
@@ -596,7 +634,10 @@ actor NeovimProcess {
         let arguments: [MPValue] = [
             .string(keys), .string("n"), .bool(true),
         ]
-        guard let response = try? await request("nvim_feedkeys", arguments),
+        // Bounded: a wedged Neovim must not park the caller forever, and a
+        // command that arrives late is reported as unavailable.
+        guard case .response(let response) = await queryBounded(
+                  "nvim_feedkeys", arguments, timeout: .seconds(2)),
               !response.isError,
               let after = await undoSequence()
         else { return .unavailable }
@@ -606,8 +647,9 @@ actor NeovimProcess {
 
     /// The current position in the current buffer's undo tree.
     private func undoSequence() async -> MPInteger? {
-        guard let response = try? await request(
-                  "nvim_eval", [.string("undotree().seq_cur")]),
+        guard case .response(let response) = await queryBounded(
+                  "nvim_eval", [.string("undotree().seq_cur")],
+                  timeout: .seconds(2)),
               !response.isError
         else { return nil }
         return response.result.integer
@@ -622,7 +664,7 @@ actor NeovimProcess {
         // answer, and this runs before the quit drain's own deadline, leaving
         // the app terminating forever. A timeout counts as unsaved so the quit
         // path prompts rather than discards.
-        guard case .response(let response) = await requestBounded(
+        guard case .response(let response) = await queryBounded(
                   "nvim_eval", [.string(expr)], timeout: .seconds(1)),
               !response.isError,
               let count = response.result.integer?.signed else { return true }
@@ -660,7 +702,7 @@ actor NeovimProcess {
             screenpos(0, line('.'), col('.')), \
             getregion(getpos('v'), getpos('.'), {'type': mode()})]
             """
-        guard case .response(let response) = await requestBounded(
+        guard case .response(let response) = await queryBounded(
                 "nvim_eval", [.string(expr)], timeout: timeout),
               !response.isError else { return nil }
         return parseVisualSelection(response.result)

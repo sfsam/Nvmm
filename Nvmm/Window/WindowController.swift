@@ -491,7 +491,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
                                  modifiers: modifiers, row: row, col: col))
         }
         gridView.sendPaste = { [weak self] text in
-            self?.enqueue(.paste(text))
+            self?.enqueue(.paste(text, refused: { NSSound.beep() }))
         }
         gridView.sendFeedkeys = { [weak self] keys in
             self?.enqueue(.feedkeys(keys))
@@ -1072,6 +1072,13 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         // view never discards them, so they do not gate a quit.
         guard ownsServer, let process else { return false }
         return await process.hasUnsavedBuffers()
+    }
+
+    /// Whether this window's Neovim is blocked awaiting input. False for a
+    /// borrowed Neovim too: detaching it needs nothing from the session.
+    func isAwaitingInput() async -> Bool {
+        guard ownsServer, let process else { return false }
+        return await process.isBlockedAwaitingInput()
     }
 
     /// Asks Neovim to quit all buffers. A forced quit discards unsaved changes.

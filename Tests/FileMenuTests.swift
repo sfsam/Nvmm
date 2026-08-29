@@ -87,6 +87,42 @@ final class NvimModeTests: XCTestCase {
         let wrongType = RPCResponse(error: .null, result: .string("n"))
         XCTAssertEqual(parseNvimMode(wrongType), .unknown)
     }
+
+    /// The `blocking` flag of an `nvim_get_mode` reply says whether Neovim is
+    /// waiting for input, and is read separately from the mode: the reply
+    /// still names the underlying mode — Normal, say — and a command issued
+    /// while blocked would land there once the block lifts.
+    func testParsesBlockingFlagSeparatelyFromMode() {
+        let blocked = RPCResponse(error: .null,
+                                  result: .map([(.string("mode"), .string("n")),
+                                                (.string("blocking"), .bool(true))]))
+        XCTAssertTrue(parseBlockedAwaitingInput(.response(blocked)))
+        // The mode read is unaffected: gating ordinary commands on the flag
+        // would refuse them during Neovim's own bounded waits, such as the
+        // `'timeoutlen'` wait after a mapping prefix.
+        XCTAssertEqual(parseNvimMode(blocked), .normal)
+        XCTAssertFalse(parseNvimMode(blocked).isBusy)
+
+        let unblocked = RPCResponse(error: .null,
+                                    result: .map([(.string("mode"), .string("n")),
+                                                  (.string("blocking"), .bool(false))]))
+        XCTAssertFalse(parseBlockedAwaitingInput(.response(unblocked)))
+        XCTAssertEqual(parseNvimMode(unblocked), .normal)
+
+        // A reply proves Neovim is processing requests, so one without a
+        // usable flag is not blocked.
+        XCTAssertFalse(parseBlockedAwaitingInput(
+            .response(RPCResponse(error: .null, result: .map([])))))
+    }
+
+    /// No answer is not a block. A Neovim too slow to reply, or gone, is not
+    /// waiting on the user, and refusing on that basis would report input
+    /// that does not exist.
+    func testUnansweredModeQueryIsNotABlock() {
+        XCTAssertFalse(parseBlockedAwaitingInput(.timedOut))
+        XCTAssertFalse(
+            parseBlockedAwaitingInput(.transport(.connectionClosed)))
+    }
 }
 
 final class ModifiedBufferTests: XCTestCase {
@@ -102,31 +138,6 @@ final class ModifiedBufferTests: XCTestCase {
         XCTAssertFalse([discarded].contains(editedAgain))
         XCTAssertTrue([discarded].contains(
             ModifiedBuffer(bufnr: 2, name: "/tmp/a", changedtick: 7)))
-    }
-}
-
-final class NewDocumentOutcomeTests: XCTestCase {
-
-    func testSuccessAndUnavailableResponses() {
-        let success = RPCResponse(error: .null, result: .null)
-        XCTAssertEqual(classifyNewDocumentResponse(success), .opened)
-        XCTAssertEqual(classifyNewDocumentResponse(nil), .unavailable)
-    }
-
-    func testFailurePreservesNeovimMessage() {
-        let message = "Vim(enew):E37: No write since last change"
-        let response = RPCResponse(
-            error: .array([.int(0), .string(message)]), result: .null)
-
-        XCTAssertEqual(
-            classifyNewDocumentResponse(response), .failed(message))
-    }
-
-    func testMalformedFailureUsesFallback() {
-        let response = RPCResponse(error: .string("bad"), result: .null)
-        XCTAssertEqual(
-            classifyNewDocumentResponse(response),
-            .failed("Neovim could not create a new document."))
     }
 }
 

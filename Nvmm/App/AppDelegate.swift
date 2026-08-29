@@ -377,7 +377,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Quits every window, confirming discarded changes first and confirming
-    /// process termination separately if an orderly quit times out.
+    /// process termination separately if an orderly quit times out. A window
+    /// whose Neovim is blocked awaiting input defers the whole quit and is
+    /// brought to the front with the report sheeted on it.
     private func drainForQuit() async -> Bool {
         await terminationCoordinator.requestApplicationQuit {
             confirmDiscard(
@@ -405,6 +407,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         closeAllInFlight = true
         Task {
             defer { self.closeAllInFlight = false }
+            if let session = await terminationCoordinator.firstAwaitingInput() {
+                await session.presentAwaitingInputReport()
+                return
+            }
             if await terminationCoordinator.anyUnsavedBuffers() {
                 guard confirmDiscard(
                     message: String(localized: "Close all windows without saving?"),

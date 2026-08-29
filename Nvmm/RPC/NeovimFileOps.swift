@@ -37,36 +37,17 @@ nonisolated struct CurrentBufferInfo: Sendable, Equatable {
     var name: String
 }
 
-/// The outcome of creating an empty document in the current session.
-nonisolated enum NewDocumentOutcome: Sendable, Equatable {
-    /// Neovim created the buffer or tab page.
-    case opened
-    /// The mode or connection did not permit a command.
-    case unavailable
-    /// Neovim rejected the command with this user-facing reason.
-    case failed(String)
-}
-
-/// Classifies a New response while preserving Neovim's error message.
-nonisolated func classifyNewDocumentResponse(
-    _ response: RPCResponse?
-) -> NewDocumentOutcome {
-    guard let response else { return .unavailable }
-    guard response.isError else { return .opened }
-    guard let fields = response.error.arrayValue, fields.count == 2,
-          let message = fields[1].stringValue else {
-        return .failed(String(localized:
-            "Neovim could not create a new document."))
-    }
-    return .failed(message)
-}
-
 /// The outcome of writing a buffer.
 nonisolated enum WriteOutcome: Sendable, Equatable {
     /// The buffer was written.
     case written
     /// The buffer has no name; the caller must ask for one (E32).
     case needsFilename
+    /// Neovim is blocked awaiting input, so nothing was written and nothing
+    /// was sent: a write issued now would be answered after its deadline,
+    /// and an error it raised — E32 for an unnamed buffer — would arrive in
+    /// a reply no longer being read, failing where nobody could see it.
+    case awaitingInput
     /// The write failed with the reason that should be shown to the user.
     case failed(String)
 }
@@ -98,25 +79,66 @@ extension NeovimProcess {
     private static let escapeToNormal = "\u{1c}\u{0e}"
     private static let abort = "\u{03}"
 
-    /// Creates an empty document according to Nvmm's buffer/tab preference.
+    /// Creates an empty document according to Nvmm's buffer/tab preference,
+    /// by typing the command rather than issuing it.
+    ///
     /// `:hide` sets `'hidden'` only while `:enew` runs, so a modified current
     /// buffer is preserved without changing the user's option afterward.
-    func newDocument(inBuffers: Bool) async -> NewDocumentOutcome {
-        let command = inBuffers ? "hide enew" : "tabnew"
-        return classifyNewDocumentResponse(
-            await normalCommandResponse(command))
+    func newDocument(inBuffers: Bool) {
+        typeExCommand(inBuffers ? "hide enew" : "tabnew")
+    }
+
+    /// Types an Ex command as the user would, through `nvim_input`.
+    ///
+    /// This is the one channel that still reaches a Neovim blocked awaiting
+    /// input, and the leading keys clear whatever is pending, so a menu
+    /// command works in states where `nvim_command` would queue behind the
+    /// block instead. Esc answers a pending wait — the register name after
+    /// `q`, say — which would otherwise swallow the next key; CTRL-\ CTRL-N
+    /// then returns to Normal mode from wherever the editor was.
+    ///
+    /// Nothing is reported back: an error is Neovim's to show, exactly as
+    /// when the command is typed.
+    private func typeExCommand(_ command: String) {
+        notify("nvim_input",
+               [.string("<Esc><C-\\><C-N>:\(command)<CR>")])
     }
 
     /// The current mode, bounded by a short deadline. A query that times out or
     /// fails is reported as such and reads as busy, so callers refuse to act
     /// rather than send a command into an unknown state.
     func mode(timeout: Duration = .milliseconds(100)) async -> NvimMode {
-        parseNvimMode(await requestBounded("nvim_get_mode", [], timeout: timeout))
+        parseNvimMode(await queryBounded("nvim_get_mode", [], timeout: timeout))
     }
 
-    /// Issues a request bounded by a deadline, cancelling it if the deadline
-    /// passes first.
-    func requestBounded(_ method: String, _ arguments: [MPValue],
+    /// Whether Neovim is blocked waiting for input that only the user can
+    /// give. See `parseBlockedAwaitingInput` for what the answer means, and
+    /// for why no answer reads as "not blocked".
+    func isBlockedAwaitingInput() async -> Bool {
+        parseBlockedAwaitingInput(
+            await queryBounded("nvim_get_mode", [],
+                               timeout: .milliseconds(250)))
+    }
+
+    /// Issues a request that changes Neovim, bounded by a deadline.
+    ///
+    /// Use this rather than `queryBounded` whenever a late reply would leave
+    /// the editor different from before: the result type then carries the
+    /// unknown case, so a caller cannot quietly read "no answer" as "nothing
+    /// happened". `refused` is for callers that gate on the mode first and so
+    /// know the command was never sent.
+    func commandBounded(_ method: String, _ arguments: [MPValue],
+                        timeout: Duration) async -> CommandResult {
+        switch await queryBounded(method, arguments, timeout: timeout) {
+        case .response(let response): .done(response)
+        case .timedOut, .transport: .unknown
+        }
+    }
+
+    /// Issues a request that only asks, bounded by a deadline and cancelled
+    /// if the deadline passes first. A late answer to a question changes
+    /// nothing, so callers may treat no answer as no information.
+    func queryBounded(_ method: String, _ arguments: [MPValue],
                         timeout: Duration) async -> RPCRequestResult {
         await withTaskGroup(of: RPCRequestResult.self) { group in
             group.addTask {
@@ -164,19 +186,24 @@ extension NeovimProcess {
     }
 
     /// Runs an Ex command from Normal mode and waits for its response, so the
-    /// caller can inspect the error. Returns nil when the mode did not allow
-    /// the command, or the connection failed.
-    private func normalCommandResponse(_ command: String) async -> RPCResponse? {
-        guard await prepareForCommand() else { return nil }
-        return try? await request("nvim_command", [.string(command)])
+    /// caller can inspect the error. The deadline keeps a wedged Neovim from
+    /// parking the caller forever, so the outcome may be unknown: the command
+    /// was still sent, and runs whenever Neovim reaches it.
+    private func normalCommandResponse(_ command: String) async -> CommandResult {
+        guard await prepareForCommand() else { return .refused }
+        return await commandBounded("nvim_command", [.string(command)],
+                                    timeout: .seconds(2))
     }
 
-    /// Opens an exact help tag and waits for Neovim to accept the command.
-    func openHelpTopic(_ topic: String) async -> Bool {
-        guard let response = await normalCommandResponse("help \(topic)") else {
-            return false
-        }
-        return !response.isError
+    /// Opens an exact help tag, typed as the user would type it.
+    ///
+    /// `nvim_input` reads `<` as the start of key notation, so a literal one
+    /// is sent as `<lt>`; tags like `<C-a>` then reach the command line
+    /// unchanged. Everything else passes through as typed, which is what
+    /// makes tags holding backslashes work.
+    func openHelpTopic(_ topic: String) {
+        typeExCommand(
+            "help \(topic.replacingOccurrences(of: "<", with: "<lt>"))")
     }
 
     /// Whether the current mode permits a save, aborting a command line or a
@@ -223,7 +250,7 @@ extension NeovimProcess {
                    timeout: Duration = .milliseconds(250)) async -> Int? {
         let lua = "return _G.nvmm.open_count(...)"
         let arguments: [MPValue] = [.string(lua), .array([mpStrings(paths)])]
-        guard case .response(let response) = await requestBounded(
+        guard case .response(let response) = await queryBounded(
                   "nvim_exec_lua", arguments, timeout: timeout),
               !response.isError else { return nil }
         guard let count = response.result.integer?.signed else { return nil }
@@ -286,29 +313,51 @@ extension NeovimProcess {
         // Neovim's own UI layer is active, leaving its command window expanded
         // over the statusline. Suppress the message only in that case; errors
         // still reach this response either way.
+        guard await !isBlockedAwaitingInput() else { return .awaitingInput }
         let command =
             "if exists('#nvim.ui2#OptionSet') | silent write | else | write | endif"
-        return classifyWriteResponse(await normalCommandResponse(command))
+        return classifyWrite(await normalCommandResponse(command))
     }
 
     /// Switches to a buffer and writes it. Used by the save prompts, which name
     /// the buffer they asked about rather than trusting the current one.
     func writeBuffer(_ bufnr: Int) async -> WriteOutcome {
-        classifyWriteResponse(
+        guard await !isBlockedAwaitingInput() else { return .awaitingInput }
+        return classifyWrite(
             await normalCommandResponse("buffer \(bufnr) | write"))
+    }
+
+    /// Turns a command result into a write outcome. An unanswered write was
+    /// still sent and may yet complete, so it is never reported as a failed
+    /// save — only as one nobody can confirm.
+    private nonisolated func classifyWrite(
+        _ result: CommandResult
+    ) -> WriteOutcome {
+        switch result {
+        case .done(let response): classifyWriteResponse(response)
+        case .refused: classifyWriteResponse(nil)
+        case .unknown: .failed(String(localized:
+            "Neovim did not answer in time. The save may still complete."))
+        }
     }
 
     /// Switches to a buffer without writing it, so a save panel names the
     /// buffer the user was asked about.
     func switchToBuffer(_ bufnr: Int) async -> Bool {
-        guard let response = await normalCommandResponse("buffer \(bufnr)") else {
-            return false
+        switch await normalCommandResponse("buffer \(bufnr)") {
+        case .done(let response): !response.isError
+        case .refused: false
+        // An unanswered switch may still land, but the caller needs a
+        // current buffer it can name now, and this is not it.
+        case .unknown: false
         }
-        return !response.isError
     }
 
     /// Force-writes the current buffer to a literal path.
     func writeAs(_ path: String) async -> WriteOutcome {
+        // A blocked Neovim would never answer this request, and it is not
+        // bounded: refusing keeps the caller from waiting forever.
+        guard await !isBlockedAwaitingInput() else { return .awaitingInput }
         let lua = "_G.nvmm.write_as(...)"
         let response = try? await request(
             "nvim_exec_lua", [.string(lua), .array([.string(path)])])
@@ -332,7 +381,7 @@ extension NeovimProcess {
         timeout: Duration = .milliseconds(250)) async -> [ModifiedBuffer]? {
         let expr = "map(filter(getbufinfo(), 'v:val.changed'), "
             + "'[v:val.bufnr, v:val.name, v:val.changedtick]')"
-        guard case .response(let response) = await requestBounded(
+        guard case .response(let response) = await queryBounded(
                   "nvim_eval", [.string(expr)], timeout: timeout),
               !response.isError,
               let entries = response.result.arrayValue else { return nil }
@@ -355,7 +404,7 @@ extension NeovimProcess {
         timeout: Duration = .milliseconds(250)) async -> CurrentBufferInfo? {
         let expr = "[len(filter(range(1, bufnr('$')), 'buflisted(v:val)')) == 1, "
             + "&modified, bufnr('%'), bufname('%')]"
-        guard case .response(let response) = await requestBounded(
+        guard case .response(let response) = await queryBounded(
                   "nvim_eval", [.string(expr)], timeout: timeout),
               !response.isError,
               let fields = response.result.arrayValue, fields.count == 4,
