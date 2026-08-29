@@ -1435,19 +1435,22 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         }
         guard let screen = window?.screen ?? NSScreen.main else { return }
 
-        let descriptor: CTFontDescriptor
-        let size: CGFloat
+        let font: FontFamily
         if !primaryChanged, let current = gridView.fontFamily {
-            descriptor = CTFontCopyFontDescriptor(current.regular)
-            size = current.unscaledSize
+            let wideEntry = resolveWideFont(
+                guifontwide, defaultSize: current.unscaledSize)
+            font = renderManager.fontManager.family(
+                reusing: current, wideEntry: wideEntry,
+                scaleFactor: screen.backingScaleFactor)
         } else {
-            (descriptor, size) = resolveFont(resolvedGuifont)
+            let resolvedEntries = resolveFont(resolvedGuifont)
+            let wideEntry = resolveWideFont(
+                guifontwide, defaultSize: resolvedEntries[0].unscaledSize)
+            font = renderManager.fontManager.family(
+                resolvedEntries: resolvedEntries,
+                scaleFactor: screen.backingScaleFactor,
+                wideEntry: wideEntry)
         }
-        let wide = resolveWideFont(guifontwide, defaultSize: size)
-        let font = renderManager.fontManager.family(
-            descriptor: descriptor, size: size,
-            scaleFactor: screen.backingScaleFactor,
-            wideDescriptor: wide?.0, wideSize: wide?.1)
         setFont(font)
         if window?.isMainWindow == true {
             updateFontManagerSelection()
@@ -1505,34 +1508,29 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         [.collection, .face, .size]
     }
 
-    /// Resolves a `guifont` list to a descriptor and size: the first installed
-    /// face wins. When the list is non-empty but none of its fonts exist, the
-    /// error is reported to Neovim and the default monospaced font is used at
-    /// the default size. An empty list quietly uses the default.
-    private func resolveFont(_ guifont: String) -> (CTFontDescriptor, CGFloat) {
+    /// Resolves `guifont` to an ordered list: primary, then fallbacks.
+    /// Missing entries are skipped. When none are installed, a non-empty list
+    /// reports an error and the default monospaced font is used instead.
+    private func resolveFont(_ guifont: String) -> [ResolvedGuifontEntry] {
         let fonts = parseGuifont(guifont, defaultSize: defaultFontSize)
-        for entry in fonts {
-            if let descriptor = FontManager.makeDescriptor(entry.name) {
-                return (descriptor, entry.size)
-            }
-        }
+        let installed = FontManager.makeResolvedGuifontEntries(fonts)
+        if !installed.isEmpty { return installed }
         if !fonts.isEmpty {
             enqueue(.errorWriteln("Error: Invalid font(s): guifont=\(guifont)"))
         }
-        return (FontManager.defaultDescriptor(), defaultFontSize)
+        return [ResolvedGuifontEntry(
+            descriptor: FontManager.defaultDescriptor(),
+            unscaledSize: defaultFontSize)]
     }
 
     /// Resolves the optional double-width font. An empty value retains
     /// CoreText's automatic fallback from the primary face.
     private func resolveWideFont(
         _ guifontwide: String, defaultSize: CGFloat
-    ) -> (CTFontDescriptor, CGFloat)? {
+    ) -> ResolvedGuifontEntry? {
         let fonts = parseGuifont(guifontwide, defaultSize: defaultSize)
-        for entry in fonts {
-            if let descriptor = FontManager.makeDescriptor(entry.name) {
-                return (descriptor, entry.size)
-            }
-        }
+        let installed = FontManager.makeResolvedGuifontEntries(fonts)
+        if let first = installed.first { return first }
         if !fonts.isEmpty {
             enqueue(.errorWriteln(
                 "Error: Invalid font(s): guifontwide=\(guifontwide)"))

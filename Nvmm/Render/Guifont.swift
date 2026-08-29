@@ -6,8 +6,8 @@
 //
 //  `guifont` is a comma-separated list of fonts, each optionally suffixed with
 //  `:h<size>` (a point size). Commas inside a font name are backslash-escaped.
-//  The list is tried in order; the window uses the first face installed on the
-//  system. This is pure value logic with no AppKit dependency.
+//  Installed entries retain their order as primary and fallback fonts. This is
+//  pure value logic with no AppKit dependency.
 //
 
 import CoreGraphics

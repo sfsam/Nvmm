@@ -14,6 +14,12 @@
 import AppKit
 import CoreText
 
+/// One configured font at its user-facing, unscaled point size.
+struct ResolvedGuifontEntry {
+    let descriptor: CTFontDescriptor
+    let unscaledSize: CGFloat
+}
+
 /// The four faces of one typeface at a fixed size, plus layout metrics.
 struct FontFamily {
     /// Faces indexed by `FontAttributes` raw order: none, bold, italic,
@@ -21,20 +27,25 @@ struct FontFamily {
     private var fonts: [CTFont]
     private var wideFonts: [CTFont]?
 
-    /// The size before applying `scaleFactor`, in points.
-    let unscaledSize: CGFloat
-    fileprivate let wideUnscaledSize: CGFloat?
+    /// The ordered source descriptors and sizes used to build this family.
+    /// The first entry is primary; later entries are explicit fallbacks.
+    fileprivate let resolvedEntries: [ResolvedGuifontEntry]
+    fileprivate let wideEntry: ResolvedGuifontEntry?
+
+    /// The primary size before applying `scaleFactor`, in points.
+    var unscaledSize: CGFloat { resolvedEntries[0].unscaledSize }
 
     /// The backing-scale multiplier applied to `unscaledSize`.
     let scaleFactor: CGFloat
 
     fileprivate init(fonts: [CTFont], wideFonts: [CTFont]?,
-                     unscaledSize: CGFloat, wideUnscaledSize: CGFloat?,
+                     resolvedEntries: [ResolvedGuifontEntry],
+                     wideEntry: ResolvedGuifontEntry?,
                      scaleFactor: CGFloat) {
         self.fonts = fonts
         self.wideFonts = wideFonts
-        self.unscaledSize = unscaledSize
-        self.wideUnscaledSize = wideUnscaledSize
+        self.resolvedEntries = resolvedEntries
+        self.wideEntry = wideEntry
         self.scaleFactor = scaleFactor
     }
 
@@ -90,7 +101,7 @@ final class FontManager {
 
     private struct Entry {
         let font: CTFont
-        let name: String
+        let descriptor: CTFontDescriptor
         let size: CGFloat
     }
 
@@ -117,11 +128,22 @@ final class FontManager {
         return CTFontDescriptorCreateMatchingFontDescriptor(descriptor, nil)
     }
 
-    private func font(for descriptor: CTFontDescriptor, size: CGFloat) -> CTFont {
-        let name = (CTFontDescriptorCopyAttribute(descriptor, kCTFontNameAttribute)
-            as? String) ?? ""
+    /// Resolves installed entries while preserving their configured order.
+    static func makeResolvedGuifontEntries(
+        _ entries: [GuifontEntry]
+    ) -> [ResolvedGuifontEntry] {
+        entries.compactMap { entry -> ResolvedGuifontEntry? in
+            guard let descriptor = makeDescriptor(entry.name) else {
+                return nil
+            }
+            return ResolvedGuifontEntry(
+                descriptor: descriptor, unscaledSize: entry.size)
+        }
+    }
 
-        for entry in usedFonts where entry.size == size && entry.name == name {
+    private func font(for descriptor: CTFontDescriptor, size: CGFloat) -> CTFont {
+        for entry in usedFonts where entry.size == size
+            && CFEqual(entry.descriptor, descriptor) {
             return entry.font
         }
 
@@ -130,7 +152,8 @@ final class FontManager {
         if usedFonts.count >= Self.maximumCachedFonts {
             usedFonts.removeFirst()
         }
-        usedFonts.append(Entry(font: font, name: name, size: size))
+        usedFonts.append(Entry(
+            font: font, descriptor: descriptor, size: size))
         return font
     }
 
@@ -139,46 +162,79 @@ final class FontManager {
                 scaleFactor: CGFloat,
                 wideDescriptor: CTFontDescriptor? = nil,
                 wideSize: CGFloat? = nil) -> FontFamily {
-        let fonts = faces(for: descriptor, size: size * scaleFactor)
-        let resolvedWideSize = wideDescriptor.map { _ in wideSize ?? size }
+        let primary = ResolvedGuifontEntry(
+            descriptor: descriptor, unscaledSize: size)
+        let wideEntry = wideDescriptor.map {
+            ResolvedGuifontEntry(
+                descriptor: $0, unscaledSize: wideSize ?? size)
+        }
+        return family(resolvedEntries: [primary], scaleFactor: scaleFactor,
+                      wideEntry: wideEntry)
+    }
+
+    /// A family built from a nonempty ordered list: primary, then fallbacks.
+    func family(resolvedEntries: [ResolvedGuifontEntry], scaleFactor: CGFloat,
+                wideEntry: ResolvedGuifontEntry? = nil) -> FontFamily {
+        precondition(!resolvedEntries.isEmpty)
+        let primary = resolvedEntries[0]
+        let fonts = faces(
+            for: primary.descriptor,
+            size: primary.unscaledSize * scaleFactor,
+            fallbacks: Array(resolvedEntries.dropFirst()),
+            scaleFactor: scaleFactor)
         let wideFonts: [CTFont]?
-        if let wideDescriptor, let resolvedWideSize {
+        if let wideEntry {
             wideFonts = faces(
-                for: wideDescriptor, size: resolvedWideSize * scaleFactor)
+                for: wideEntry.descriptor,
+                size: wideEntry.unscaledSize * scaleFactor)
         } else {
             wideFonts = nil
         }
         return FontFamily(fonts: fonts, wideFonts: wideFonts,
-                          unscaledSize: size,
-                          wideUnscaledSize: resolvedWideSize,
+                          resolvedEntries: resolvedEntries,
+                          wideEntry: wideEntry,
                           scaleFactor: scaleFactor)
+    }
+
+    /// A copy of `family` with a new wide-font entry, reusing its existing
+    /// primary and fallback descriptors unchanged.
+    ///
+    /// This still rebuilds the cascaded descriptor and goes through
+    /// `font(for:size:)`; the non-wide faces come back identical only
+    /// because that cache matches on `CFEqual(descriptor)` + size, not
+    /// because construction is skipped. If the cache key ever changes,
+    /// this stops being a no-op for those faces.
+    func family(reusing family: FontFamily, wideEntry: ResolvedGuifontEntry?,
+                scaleFactor: CGFloat) -> FontFamily {
+        self.family(resolvedEntries: family.resolvedEntries,
+                    scaleFactor: scaleFactor, wideEntry: wideEntry)
     }
 
     /// A copy of `family` at a new unscaled size, otherwise equivalent.
     func resized(_ family: FontFamily, size: CGFloat,
                  scaleFactor: CGFloat) -> FontFamily {
-        let faces: [FontAttributes] = [.none, .bold, .italic, .boldItalic]
-        let fonts = faces.map {
-            font(for: CTFontCopyFontDescriptor(family.font($0)),
-                 size: size * scaleFactor)
+        let delta = size - family.unscaledSize
+        let resolvedEntries = family.resolvedEntries.map {
+            ResolvedGuifontEntry(
+                descriptor: $0.descriptor,
+                unscaledSize: max(1, $0.unscaledSize + delta))
         }
-        let wideSize = family.wideUnscaledSize.map {
-            max(1, $0 + size - family.unscaledSize)
+        let wideEntry = family.wideEntry.map {
+            ResolvedGuifontEntry(
+                descriptor: $0.descriptor,
+                unscaledSize: max(1, $0.unscaledSize + delta))
         }
-        let wideFonts = wideSize.map { wideSize in
-            faces.map {
-                font(for: CTFontCopyFontDescriptor(
-                    family.font($0, wide: true)),
-                     size: wideSize * scaleFactor)
-            }
-        }
-        return FontFamily(fonts: fonts, wideFonts: wideFonts,
-                          unscaledSize: size, wideUnscaledSize: wideSize,
-                          scaleFactor: scaleFactor)
+        return self.family(
+            resolvedEntries: resolvedEntries,
+            scaleFactor: scaleFactor, wideEntry: wideEntry)
     }
 
     private func faces(for descriptor: CTFontDescriptor,
-                       size: CGFloat) -> [CTFont] {
+                       size: CGFloat,
+                       fallbacks: [ResolvedGuifontEntry] = [],
+                       scaleFactor: CGFloat = 1) -> [CTFont] {
+        let descriptor = cascadedDescriptor(
+            descriptor, fallbacks: fallbacks, scaleFactor: scaleFactor)
         let mask: CTFontSymbolicTraits = [.traitBold, .traitItalic]
         let boldDescriptor = CTFontDescriptorCreateCopyWithSymbolicTraits(
             descriptor, .traitBold, mask)
@@ -193,5 +249,32 @@ final class FontManager {
             font(for: $0, size: size)
         } ?? regular
         return [regular, bold, italic, boldItalic]
+    }
+
+    /// Attaches an ordered CoreText cascade to `descriptor`.
+    ///
+    /// Each fallback's own size attribute is set here for completeness, but
+    /// CoreText does not honor it when substituting a glyph: a face picked
+    /// from the cascade list is always sized to match the primary face,
+    /// not its own configured size. Fallback fonts only ever contribute a
+    /// choice of typeface, never an independent size.
+    private func cascadedDescriptor(
+        _ descriptor: CTFontDescriptor,
+        fallbacks: [ResolvedGuifontEntry],
+        scaleFactor: CGFloat
+    ) -> CTFontDescriptor {
+        guard !fallbacks.isEmpty else { return descriptor }
+        let cascade = fallbacks.map { fallback in
+            let attributes = [
+                kCTFontSizeAttribute as String:
+                    fallback.unscaledSize * scaleFactor,
+            ] as CFDictionary
+            return CTFontDescriptorCreateCopyWithAttributes(
+                fallback.descriptor, attributes)
+        }
+        let attributes = [
+            kCTFontCascadeListAttribute as String: cascade,
+        ] as CFDictionary
+        return CTFontDescriptorCreateCopyWithAttributes(descriptor, attributes)
     }
 }
