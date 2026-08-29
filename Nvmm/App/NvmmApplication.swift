@@ -39,7 +39,7 @@ final class NvmmApplication: NSApplication {
         // Set small system font and centered text.
         let range = NSRange(location: 0, length: credits.length)
         let fontSize = NSFont.systemFontSize(for: .small)
-        let font = NSFont.systemFont(ofSize: fontSize, weight: .regular)
+        let font = NSFont.systemFont(ofSize: fontSize, weight: .bold)
         let para = NSMutableParagraphStyle()
         para.alignment = .center
         credits.addAttribute(.font, value: font, range: range)
