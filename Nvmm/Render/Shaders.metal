@@ -436,6 +436,10 @@ static bool inside_rect(float2 point, float left, float top,
            point.y >= top && point.y < bottom;
 }
 
+static float block_boundary(float length, uint32_t eighth) {
+    return floor(length * float(eighth) / 8.0 + 0.5);
+}
+
 static uint32_t box_stroke(uint32_t kind, uint32_t shift) {
     return (kind >> shift) & CELL_GRAPHIC_STROKE_MASK;
 }
@@ -651,6 +655,36 @@ fragment float4 cell_graphic_fill(
     float height = in.cell_size.y;
     float light_width = in.box_line_width;
     uint32_t family = in.kind & CELL_GRAPHIC_FAMILY_MASK;
+
+    if (family == CELL_GRAPHIC_BLOCK_RECT) {
+        float left = block_boundary(
+            width, (in.kind >> CELL_GRAPHIC_BLOCK_LEFT_SHIFT)
+                   & CELL_GRAPHIC_BLOCK_BOUNDARY_MASK);
+        float top = block_boundary(
+            height, (in.kind >> CELL_GRAPHIC_BLOCK_TOP_SHIFT)
+                    & CELL_GRAPHIC_BLOCK_BOUNDARY_MASK);
+        float right = block_boundary(
+            width, (in.kind >> CELL_GRAPHIC_BLOCK_RIGHT_SHIFT)
+                   & CELL_GRAPHIC_BLOCK_BOUNDARY_MASK);
+        float bottom = block_boundary(
+            height, (in.kind >> CELL_GRAPHIC_BLOCK_BOTTOM_SHIFT)
+                    & CELL_GRAPHIC_BLOCK_BOUNDARY_MASK);
+        if (!inside_rect(local, left, top, right, bottom)) {
+            discard_fragment();
+        }
+        return float4(color.rgb, 1.0);
+    }
+
+    if (family == CELL_GRAPHIC_BLOCK_QUADRANTS) {
+        float middle_x = block_boundary(width, 4u);
+        float middle_y = block_boundary(height, 4u);
+        uint32_t quadrant = local.y < middle_y ? 0u : 2u;
+        quadrant += local.x < middle_x ? 0u : 1u;
+        if ((in.kind & (1u << quadrant)) == 0) {
+            discard_fragment();
+        }
+        return float4(color.rgb, 1.0);
+    }
 
     if (family == CELL_GRAPHIC_BOX_SEGMENTS) {
         if (!box_segments_contain(local, in.cell_size, light_width, in.kind)) {

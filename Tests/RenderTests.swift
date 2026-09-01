@@ -31,6 +31,10 @@ final class RenderTests: XCTestCase {
         func alpha(_ x: Int, _ y: Int) -> UInt8 {
             pixels[(y * width + x) * 4 + 3]
         }
+
+        func red(_ x: Int, _ y: Int) -> UInt8 {
+            pixels[(y * width + x) * 4 + 2]
+        }
     }
 
     private func renderCellGraphics(
@@ -219,6 +223,138 @@ final class RenderTests: XCTestCase {
                 }
             }
             XCTAssertTrue(hasInk, graphemes[index])
+        }
+    }
+
+    func testCellGraphicShaderRendersCompleteBlockElementsRange() throws {
+        let graphemes = (0x2580...0x259F).map {
+            String(UnicodeScalar($0)!)
+        }
+        let rows = stride(from: 0, to: graphemes.count, by: 16).map {
+            Array(graphemes[$0..<($0 + 16)])
+        }
+        let cellWidth = 13
+        let cellHeight = 19
+        let image = try renderCellGraphics(
+            rows, cellWidth: cellWidth, cellHeight: cellHeight)
+
+        for index in graphemes.indices {
+            let column = index % 16
+            let row = index / 16
+            var hasInk = false
+            for y in (row * cellHeight)..<((row + 1) * cellHeight) {
+                for x in (column * cellWidth)..<((column + 1) * cellWidth) {
+                    hasInk = hasInk || image.alpha(x, y) > 0
+                }
+            }
+            XCTAssertTrue(hasInk, graphemes[index])
+        }
+    }
+
+    func testBlockElementsUseSharedRoundedBoundaries() throws {
+        let width = 13
+        let height = 19
+        let image = try renderCellGraphics(
+            [["▀", "▄", "▌", "▐"]], cellWidth: width,
+            cellHeight: height)
+        let middleX = Int(floor(Double(width) / 2.0 + 0.5))
+        let middleY = Int(floor(Double(height) / 2.0 + 0.5))
+
+        for y in 0..<height {
+            let upper = image.alpha(0, y) > 0
+            let lower = image.alpha(width, y) > 0
+            XCTAssertEqual(upper, y < middleY)
+            XCTAssertEqual(lower, y >= middleY)
+        }
+        for x in 0..<width {
+            let left = image.alpha(2 * width + x, 0) > 0
+            let right = image.alpha(3 * width + x, 0) > 0
+            XCTAssertEqual(left, x < middleX)
+            XCTAssertEqual(right, x >= middleX)
+        }
+    }
+
+    func testBlockElementEighthsUseFullCellDimensions() throws {
+        let width = 13
+        let height = 27
+        let image = try renderCellGraphics(
+            [["▅", "▋"]], cellWidth: width, cellHeight: height)
+        let top = Int(floor(Double(height) * 3.0 / 8.0 + 0.5))
+        let right = Int(floor(Double(width) * 5.0 / 8.0 + 0.5))
+
+        for y in 0..<height {
+            XCTAssertEqual(image.alpha(0, y) > 0, y >= top)
+        }
+        for y in 0..<height {
+            for x in 0..<width {
+                XCTAssertEqual(image.alpha(width + x, y) > 0, x < right)
+            }
+        }
+    }
+
+    func testBlockElementQuadrantMasks() throws {
+        let graphemes = ["▖", "▗", "▘", "▙", "▚",
+                         "▛", "▜", "▝", "▞", "▟"]
+        let masks: [UInt32] = [
+            CELL_GRAPHIC_QUADRANT_BOTTOM_LEFT,
+            CELL_GRAPHIC_QUADRANT_BOTTOM_RIGHT,
+            CELL_GRAPHIC_QUADRANT_TOP_LEFT,
+            CELL_GRAPHIC_QUADRANT_TOP_LEFT
+                | CELL_GRAPHIC_QUADRANT_BOTTOM_LEFT
+                | CELL_GRAPHIC_QUADRANT_BOTTOM_RIGHT,
+            CELL_GRAPHIC_QUADRANT_TOP_LEFT
+                | CELL_GRAPHIC_QUADRANT_BOTTOM_RIGHT,
+            CELL_GRAPHIC_QUADRANT_TOP_LEFT
+                | CELL_GRAPHIC_QUADRANT_TOP_RIGHT
+                | CELL_GRAPHIC_QUADRANT_BOTTOM_LEFT,
+            CELL_GRAPHIC_QUADRANT_TOP_LEFT
+                | CELL_GRAPHIC_QUADRANT_TOP_RIGHT
+                | CELL_GRAPHIC_QUADRANT_BOTTOM_RIGHT,
+            CELL_GRAPHIC_QUADRANT_TOP_RIGHT,
+            CELL_GRAPHIC_QUADRANT_TOP_RIGHT
+                | CELL_GRAPHIC_QUADRANT_BOTTOM_LEFT,
+            CELL_GRAPHIC_QUADRANT_TOP_RIGHT
+                | CELL_GRAPHIC_QUADRANT_BOTTOM_LEFT
+                | CELL_GRAPHIC_QUADRANT_BOTTOM_RIGHT,
+        ]
+        let width = 13
+        let height = 19
+        let middleX = Int(floor(Double(width) / 2.0 + 0.5))
+        let middleY = Int(floor(Double(height) / 2.0 + 0.5))
+        let image = try renderCellGraphics(
+            [graphemes], cellWidth: width, cellHeight: height)
+
+        for (column, mask) in masks.enumerated() {
+            for y in 0..<height {
+                for x in 0..<width {
+                    let quadrant = (y < middleY ? 0 : 2)
+                        + (x < middleX ? 0 : 1)
+                    let expected = mask & (1 << UInt32(quadrant)) != 0
+                    XCTAssertEqual(
+                        image.alpha(column * width + x, y) > 0,
+                        expected, graphemes[column])
+                }
+            }
+        }
+    }
+
+    func testBlockElementShadesFillSpacedCell() throws {
+        let width = 13
+        let height = 27
+        let image = try renderCellGraphics(
+            [["░", "▒", "▓"]], cellWidth: width, cellHeight: height)
+        let shades = (0..<3).map { image.red($0 * width, 0) }
+
+        XCTAssertLessThan(shades[0], shades[1])
+        XCTAssertLessThan(shades[1], shades[2])
+
+        for column in 0..<3 {
+            for y in 0..<height {
+                for x in 0..<width {
+                    XCTAssertEqual(image.red(column * width + x, y),
+                                   shades[column])
+                }
+            }
         }
     }
 

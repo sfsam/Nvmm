@@ -48,6 +48,69 @@ nonisolated struct CellGraphicKind: Equatable {
         Self(rawValue: CELL_GRAPHIC_BOX_ARC | corner)
     }
 
+    private static func block(_ left: UInt32, _ top: UInt32,
+                              _ right: UInt32, _ bottom: UInt32) -> Self {
+        Self(rawValue: CELL_GRAPHIC_BLOCK_RECT
+             | (left << CELL_GRAPHIC_BLOCK_LEFT_SHIFT)
+             | (top << CELL_GRAPHIC_BLOCK_TOP_SHIFT)
+             | (right << CELL_GRAPHIC_BLOCK_RIGHT_SHIFT)
+             | (bottom << CELL_GRAPHIC_BLOCK_BOTTOM_SHIFT))
+    }
+
+    private static func quadrants(_ mask: UInt32) -> Self {
+        Self(rawValue: CELL_GRAPHIC_BLOCK_QUADRANTS | mask)
+    }
+
+    private static func blockElement(_ codepoint: UInt32) -> Self? {
+        switch codepoint {
+        case 0x2580: return Self.block(0, 0, 8, 4)
+        case 0x2581...0x2587:
+            return Self.block(0, 8 - (codepoint - 0x2580), 8, 8)
+        // Full block also serves internal full-cell fills. Shades blend the
+        // foreground and background instead of describing solid geometry.
+        case 0x2588: return Self(rawValue: CELL_GRAPHIC_FULL_BLOCK)
+        case 0x2589...0x258F:
+            return Self.block(0, 0, 0x2590 - codepoint, 8)
+        case 0x2590: return Self.block(4, 0, 8, 8)
+        case 0x2591: return Self(rawValue: CELL_GRAPHIC_LIGHT_SHADE)
+        case 0x2592: return Self(rawValue: CELL_GRAPHIC_MEDIUM_SHADE)
+        case 0x2593: return Self(rawValue: CELL_GRAPHIC_DARK_SHADE)
+        case 0x2594: return Self.block(0, 0, 8, 1)
+        case 0x2595: return Self.block(7, 0, 8, 8)
+        case 0x2596:
+            return Self.quadrants(CELL_GRAPHIC_QUADRANT_BOTTOM_LEFT)
+        case 0x2597:
+            return Self.quadrants(CELL_GRAPHIC_QUADRANT_BOTTOM_RIGHT)
+        case 0x2598:
+            return Self.quadrants(CELL_GRAPHIC_QUADRANT_TOP_LEFT)
+        case 0x2599:
+            return Self.quadrants(CELL_GRAPHIC_QUADRANT_TOP_LEFT
+                                  | CELL_GRAPHIC_QUADRANT_BOTTOM_LEFT
+                                  | CELL_GRAPHIC_QUADRANT_BOTTOM_RIGHT)
+        case 0x259A:
+            return Self.quadrants(CELL_GRAPHIC_QUADRANT_TOP_LEFT
+                                  | CELL_GRAPHIC_QUADRANT_BOTTOM_RIGHT)
+        case 0x259B:
+            return Self.quadrants(CELL_GRAPHIC_QUADRANT_TOP_LEFT
+                                  | CELL_GRAPHIC_QUADRANT_TOP_RIGHT
+                                  | CELL_GRAPHIC_QUADRANT_BOTTOM_LEFT)
+        case 0x259C:
+            return Self.quadrants(CELL_GRAPHIC_QUADRANT_TOP_LEFT
+                                  | CELL_GRAPHIC_QUADRANT_TOP_RIGHT
+                                  | CELL_GRAPHIC_QUADRANT_BOTTOM_RIGHT)
+        case 0x259D:
+            return Self.quadrants(CELL_GRAPHIC_QUADRANT_TOP_RIGHT)
+        case 0x259E:
+            return Self.quadrants(CELL_GRAPHIC_QUADRANT_TOP_RIGHT
+                                  | CELL_GRAPHIC_QUADRANT_BOTTOM_LEFT)
+        case 0x259F:
+            return Self.quadrants(CELL_GRAPHIC_QUADRANT_TOP_RIGHT
+                                  | CELL_GRAPHIC_QUADRANT_BOTTOM_LEFT
+                                  | CELL_GRAPHIC_QUADRANT_BOTTOM_RIGHT)
+        default: return nil
+        }
+    }
+
     /// The kind a grapheme maps to, or nil if it is not a cell graphic.
     init?(grapheme: String) {
         // This runs for every cell of every frame, so reject the common
@@ -59,12 +122,12 @@ nonisolated struct CellGraphicKind: Equatable {
         }
         let codepoint = scalar.value
 
-        switch codepoint {
-        case 0x2588: self.init(rawValue: CELL_GRAPHIC_FULL_BLOCK)
-        case 0x2593: self.init(rawValue: CELL_GRAPHIC_DARK_SHADE)
-        case 0x2592: self.init(rawValue: CELL_GRAPHIC_MEDIUM_SHADE)
-        case 0x2591: self.init(rawValue: CELL_GRAPHIC_LIGHT_SHADE)
+        if let block = Self.blockElement(codepoint) {
+            self = block
+            return
+        }
 
+        switch codepoint {
         case 0x2500: self = Self.box(.none, .light, .none, .light)
         case 0x2501: self = Self.box(.none, .heavy, .none, .heavy)
         case 0x2502: self = Self.box(.light, .none, .light, .none)

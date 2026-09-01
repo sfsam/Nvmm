@@ -104,6 +104,8 @@ typedef struct {
 #define CELL_GRAPHIC_BOX_SEGMENTS 0x10000000u
 #define CELL_GRAPHIC_BOX_DASHED 0x20000000u
 #define CELL_GRAPHIC_BOX_ARC 0x30000000u
+#define CELL_GRAPHIC_BLOCK_RECT 0x40000000u
+#define CELL_GRAPHIC_BLOCK_QUADRANTS 0x50000000u
 
 /// Two-bit box stroke styles.
 #define CELL_GRAPHIC_STROKE_NONE 0u
@@ -128,6 +130,19 @@ typedef struct {
 #define CELL_GRAPHIC_ARC_DOWN_LEFT 1u
 #define CELL_GRAPHIC_ARC_UP_LEFT 2u
 #define CELL_GRAPHIC_ARC_UP_RIGHT 3u
+
+/// Block-rectangle boundaries, in eighths of the cell.
+#define CELL_GRAPHIC_BLOCK_LEFT_SHIFT 0u
+#define CELL_GRAPHIC_BLOCK_TOP_SHIFT 4u
+#define CELL_GRAPHIC_BLOCK_RIGHT_SHIFT 8u
+#define CELL_GRAPHIC_BLOCK_BOTTOM_SHIFT 12u
+#define CELL_GRAPHIC_BLOCK_BOUNDARY_MASK 0xFu
+
+/// Filled quadrants in a block-quadrant payload.
+#define CELL_GRAPHIC_QUADRANT_TOP_LEFT 1u
+#define CELL_GRAPHIC_QUADRANT_TOP_RIGHT 2u
+#define CELL_GRAPHIC_QUADRANT_BOTTOM_LEFT 4u
+#define CELL_GRAPHIC_QUADRANT_BOTTOM_RIGHT 8u
 
 /// One procedurally-drawn cell graphic (block, shade, diagonal, or separator)
 /// that the fragment shader renders without a glyph texture.

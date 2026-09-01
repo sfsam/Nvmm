@@ -21,6 +21,15 @@ final class CellGraphicTests: XCTestCase {
         | (left << CELL_GRAPHIC_BOX_LEFT_SHIFT)
     }
 
+    private func block(_ left: UInt32, _ top: UInt32,
+                       _ right: UInt32, _ bottom: UInt32) -> UInt32 {
+        CELL_GRAPHIC_BLOCK_RECT
+        | (left << CELL_GRAPHIC_BLOCK_LEFT_SHIFT)
+        | (top << CELL_GRAPHIC_BLOCK_TOP_SHIFT)
+        | (right << CELL_GRAPHIC_BLOCK_RIGHT_SHIFT)
+        | (bottom << CELL_GRAPHIC_BLOCK_BOTTOM_SHIFT)
+    }
+
     func testCompleteBoxDrawingBlockUsesNativeGraphics() throws {
         var families: [UInt32: Int] = [:]
         for value in 0x2500...0x257F {
@@ -35,6 +44,47 @@ final class CellGraphicTests: XCTestCase {
         XCTAssertEqual(families[CELL_GRAPHIC_BOX_DASHED], 12)
         XCTAssertEqual(families[CELL_GRAPHIC_BOX_ARC], 4)
         XCTAssertEqual(families[0], 3)
+    }
+
+    func testCompleteBlockElementsRangeUsesNativeGraphics() throws {
+        var families: [UInt32: Int] = [:]
+        for value in 0x2580...0x259F {
+            let grapheme = String(UnicodeScalar(value)!)
+            let graphic = try XCTUnwrap(CellGraphicKind(grapheme: grapheme),
+                                        "U+\(String(value, radix: 16))")
+            families[graphic.rawValue & CELL_GRAPHIC_FAMILY_MASK,
+                     default: 0] += 1
+        }
+
+        XCTAssertEqual(families[CELL_GRAPHIC_BLOCK_RECT], 18)
+        XCTAssertEqual(families[CELL_GRAPHIC_BLOCK_QUADRANTS], 10)
+        XCTAssertEqual(families[0], 4)
+    }
+
+    func testRepresentativeBlockElementEncodings() throws {
+        XCTAssertEqual(try kind("▀"), block(0, 0, 8, 4))
+        XCTAssertEqual(try kind("▁"), block(0, 7, 8, 8))
+        XCTAssertEqual(try kind("▇"), block(0, 1, 8, 8))
+        XCTAssertEqual(try kind("▋"), block(0, 0, 5, 8))
+        XCTAssertEqual(try kind("▏"), block(0, 0, 1, 8))
+        XCTAssertEqual(try kind("▐"), block(4, 0, 8, 8))
+        XCTAssertEqual(try kind("▔"), block(0, 0, 8, 1))
+        XCTAssertEqual(try kind("▕"), block(7, 0, 8, 8))
+
+        XCTAssertEqual(try kind("█"), CELL_GRAPHIC_FULL_BLOCK)
+        XCTAssertEqual(try kind("░"), CELL_GRAPHIC_LIGHT_SHADE)
+        XCTAssertEqual(try kind("▒"), CELL_GRAPHIC_MEDIUM_SHADE)
+        XCTAssertEqual(try kind("▓"), CELL_GRAPHIC_DARK_SHADE)
+
+        XCTAssertEqual(try kind("▖"), CELL_GRAPHIC_BLOCK_QUADRANTS
+                       | CELL_GRAPHIC_QUADRANT_BOTTOM_LEFT)
+        XCTAssertEqual(try kind("▚"), CELL_GRAPHIC_BLOCK_QUADRANTS
+                       | CELL_GRAPHIC_QUADRANT_TOP_LEFT
+                       | CELL_GRAPHIC_QUADRANT_BOTTOM_RIGHT)
+        XCTAssertEqual(try kind("▟"), CELL_GRAPHIC_BLOCK_QUADRANTS
+                       | CELL_GRAPHIC_QUADRANT_TOP_RIGHT
+                       | CELL_GRAPHIC_QUADRANT_BOTTOM_LEFT
+                       | CELL_GRAPHIC_QUADRANT_BOTTOM_RIGHT)
     }
 
     func testRepresentativeDirectionalEncodings() throws {
