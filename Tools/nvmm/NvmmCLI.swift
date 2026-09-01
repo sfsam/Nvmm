@@ -46,12 +46,14 @@ private struct CLIClient {
     }
 
     func send(_ request: CLIRequest) throws {
-        var data = try JSONEncoder().encode(request)
-        data.append(0x0a)
-        guard data.count <= CLIProtocol.maximumRequestBytes else {
-            throw CLIError("Request is too large.")
+        let encoded = try request.encodedLine(
+            maximumBytes: CLIProtocol.maximumRequestBytes)
+        if encoded.droppedEnvironment {
+            FileHandle.standardError.write(Data(
+                "nvmm: The environment is too large and was not sent.\n"
+                    .utf8))
         }
-        try data.withUnsafeBytes { bytes in
+        try encoded.data.withUnsafeBytes { bytes in
             var offset = 0
             while offset < bytes.count {
                 let count = Darwin.write(descriptor,
@@ -117,10 +119,11 @@ private struct NvmmCLI {
                 return
             }
             let directory = try workingDirectory()
-            let request = CLIRequest(
+            var request = CLIRequest(
                 arguments: parsed.arguments, files: parsed.files,
                 workingDirectory: directory,
                 forceNewWindow: parsed.forceNewWindow, wait: parsed.wait)
+            request.environment = ProcessInfo.processInfo.environment
             try request.validate()
             try CLIEndpoint.prepareDirectory()
 

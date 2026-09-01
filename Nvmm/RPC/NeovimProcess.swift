@@ -276,6 +276,7 @@ actor NeovimProcess {
     /// Spawns a Neovim process and connects to it over pipes.
     /// - Throws: `NeovimSpawnError` if a pipe or the process could not be created.
     func spawn(path: String, argv: [String], env: [String] = [],
+               baseEnvironment: [String: String]? = nil,
                workingDirectory: String? = nil) throws {
         guard state == .idle else {
             throw NeovimSpawnError(code: EISCONN, operation: "spawn")
@@ -306,6 +307,7 @@ actor NeovimProcess {
                                     output: read.pipe.writeEnd,
                                     error: standardError.pipe.writeEnd)
         let result = Spawn.spawn(path: path, argv: argv, env: env,
+                                 base: baseEnvironment,
                                  workingDirectory: workingDirectory,
                                  streams: streams)
 

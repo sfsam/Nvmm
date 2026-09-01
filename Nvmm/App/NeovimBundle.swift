@@ -34,17 +34,21 @@ enum NeovimBundle {
     /// The executable and argv to launch the embedded nvim with `arguments`
     /// (for example `["--embed"]`).
     ///
-    /// Launched from a terminal (`TERM` set) nvim is spawned directly,
-    /// inheriting the shell environment. Launched from the GUI — Finder,
-    /// Spotlight, the Dock, Xcode — there is no shell environment, so nvim is
-    /// exec'd from the user's login shell, which sources the login profile.
-    /// That gives nvim the same `PATH`, exports, and tools an interactive
-    /// shell has, so `init.lua` and anything it shells out to (LSP servers,
-    /// plugin managers, providers) behave as they do in a terminal.
+    /// `environment` is the environment the child will start from: a control
+    /// request's environment, or the app's own. With `TERM` set it comes
+    /// from a shell, its `PATH` is already correct, and nvim is spawned
+    /// directly — a login shell's profile could shadow that `PATH`. Without
+    /// `TERM` — Finder, Spotlight, the Dock, Xcode — there is no shell
+    /// environment, so nvim is exec'd from the user's login shell, which
+    /// sources the login profile. That gives nvim the same `PATH`, exports,
+    /// and tools an interactive shell has, so `init.lua` and anything it
+    /// shells out to (LSP servers, plugin managers, providers) behave as
+    /// they do in a terminal.
     nonisolated static func launchCommand(
-        nvimPath: String, arguments: [String]
+        nvimPath: String, arguments: [String],
+        environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> (path: String, argv: [String]) {
-        if ProcessInfo.processInfo.environment["TERM"] != nil {
+        if environment["TERM"] != nil {
             return (nvimPath, [nvimPath] + arguments)
         }
         return loginShellCommand(shell: loginShell(),
