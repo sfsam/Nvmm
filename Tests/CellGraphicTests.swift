@@ -9,7 +9,8 @@ import XCTest
 
 final class CellGraphicTests: XCTestCase {
     private func kind(_ grapheme: String) throws -> UInt32 {
-        try XCTUnwrap(CellGraphicKind(grapheme: grapheme)).rawValue
+        try XCTUnwrap(CellGraphicKind(
+            grapheme: grapheme, nativePowerlineSymbols: true)).rawValue
     }
 
     private func box(_ up: UInt32, _ right: UInt32,
@@ -30,12 +31,19 @@ final class CellGraphicTests: XCTestCase {
         | (bottom << CELL_GRAPHIC_BLOCK_BOTTOM_SHIFT)
     }
 
+    private func powerline(_ shape: UInt32,
+                           mirror: Bool = false) -> UInt32 {
+        CELL_GRAPHIC_POWERLINE | shape
+        | (mirror ? CELL_GRAPHIC_POWERLINE_MIRROR : 0)
+    }
+
     func testCompleteBoxDrawingBlockUsesNativeGraphics() throws {
         var families: [UInt32: Int] = [:]
         for value in 0x2500...0x257F {
             let grapheme = String(UnicodeScalar(value)!)
-            let graphic = try XCTUnwrap(CellGraphicKind(grapheme: grapheme),
-                                        "U+\(String(value, radix: 16))")
+            let graphic = try XCTUnwrap(CellGraphicKind(
+                grapheme: grapheme, nativePowerlineSymbols: true),
+                "U+\(String(value, radix: 16))")
             families[graphic.rawValue & CELL_GRAPHIC_FAMILY_MASK,
                      default: 0] += 1
         }
@@ -50,8 +58,9 @@ final class CellGraphicTests: XCTestCase {
         var families: [UInt32: Int] = [:]
         for value in 0x2580...0x259F {
             let grapheme = String(UnicodeScalar(value)!)
-            let graphic = try XCTUnwrap(CellGraphicKind(grapheme: grapheme),
-                                        "U+\(String(value, radix: 16))")
+            let graphic = try XCTUnwrap(CellGraphicKind(
+                grapheme: grapheme, nativePowerlineSymbols: true),
+                "U+\(String(value, radix: 16))")
             families[graphic.rawValue & CELL_GRAPHIC_FAMILY_MASK,
                      default: 0] += 1
         }
@@ -85,6 +94,55 @@ final class CellGraphicTests: XCTestCase {
                        | CELL_GRAPHIC_QUADRANT_TOP_RIGHT
                        | CELL_GRAPHIC_QUADRANT_BOTTOM_LEFT
                        | CELL_GRAPHIC_QUADRANT_BOTTOM_RIGHT)
+    }
+
+    func testCompletePowerlineSetUsesNativeGraphics() throws {
+        let values = Array(0xE0B0...0xE0BF)
+            + [0xE0D2, 0xE0D4, 0xE0D6, 0xE0D7]
+        var families: [UInt32: Int] = [:]
+        for value in values {
+            let grapheme = String(UnicodeScalar(value)!)
+            let graphic = try XCTUnwrap(CellGraphicKind(
+                grapheme: grapheme, nativePowerlineSymbols: true),
+                "U+\(String(value, radix: 16))")
+            families[graphic.rawValue & CELL_GRAPHIC_FAMILY_MASK,
+                     default: 0] += 1
+            XCTAssertNil(CellGraphicKind(
+                grapheme: grapheme, nativePowerlineSymbols: false))
+        }
+
+        XCTAssertEqual(families[CELL_GRAPHIC_POWERLINE], 16)
+        XCTAssertEqual(families[0], 4)
+
+        let supported = Set(values)
+        for value in 0xE0B0...0xE0D7 {
+            let grapheme = String(UnicodeScalar(value)!)
+            XCTAssertEqual(CellGraphicKind(
+                grapheme: grapheme,
+                nativePowerlineSymbols: true) != nil,
+                           supported.contains(value),
+                           "U+\(String(value, radix: 16))")
+        }
+    }
+
+    func testRepresentativePowerlineEncodings() throws {
+        XCTAssertEqual(try kind(""),
+                       powerline(CELL_GRAPHIC_POWERLINE_WEDGE))
+        XCTAssertEqual(try kind(""),
+                       powerline(CELL_GRAPHIC_POWERLINE_CHEVRON,
+                                 mirror: true))
+        XCTAssertEqual(try kind(""),
+                       powerline(CELL_GRAPHIC_POWERLINE_ROUNDED_OUTLINE))
+        XCTAssertEqual(try kind(""),
+                       powerline(CELL_GRAPHIC_POWERLINE_CORNER_BOTTOM,
+                                 mirror: true))
+        XCTAssertEqual(try kind(""), CELL_GRAPHIC_DIAGONAL_DOWN_RIGHT)
+        XCTAssertEqual(try kind(""), CELL_GRAPHIC_DIAGONAL_DOWN_LEFT)
+        XCTAssertEqual(try kind(""),
+                       powerline(CELL_GRAPHIC_POWERLINE_TRAPEZOID,
+                                 mirror: true))
+        XCTAssertEqual(try kind(""),
+                       powerline(CELL_GRAPHIC_POWERLINE_TRIANGLES))
     }
 
     func testRepresentativeDirectionalEncodings() throws {
@@ -128,8 +186,11 @@ final class CellGraphicTests: XCTestCase {
     }
 
     func testUnrelatedGraphemesRemainFontRendered() {
-        XCTAssertNil(CellGraphicKind(grapheme: "A"))
-        XCTAssertNil(CellGraphicKind(grapheme: "🙂"))
-        XCTAssertNil(CellGraphicKind(grapheme: "ab"))
+        XCTAssertNil(CellGraphicKind(
+            grapheme: "A", nativePowerlineSymbols: true))
+        XCTAssertNil(CellGraphicKind(
+            grapheme: "🙂", nativePowerlineSymbols: true))
+        XCTAssertNil(CellGraphicKind(
+            grapheme: "ab", nativePowerlineSymbols: true))
     }
 }

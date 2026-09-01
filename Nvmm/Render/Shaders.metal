@@ -627,6 +627,117 @@ static float arc_distance(float2 point, float2 size, float line_width,
     return distance;
 }
 
+static float cross_product(float2 a, float2 b) {
+    return a.x * b.y - a.y * b.x;
+}
+
+static float triangle_coverage(float2 point, float2 a, float2 b, float2 c) {
+    float direction = cross_product(b - a, c - a) < 0.0 ? -1.0 : 1.0;
+    float ab = direction * cross_product(b - a, point - a) / length(b - a);
+    float bc = direction * cross_product(c - b, point - b) / length(c - b);
+    float ca = direction * cross_product(a - c, point - c) / length(a - c);
+    return smoothstep(-0.5, 0.5, min(ab, min(bc, ca)));
+}
+
+static float quadrilateral_coverage(float2 point, float2 a, float2 b,
+                                    float2 c, float2 d) {
+    float direction = cross_product(b - a, c - a) < 0.0 ? -1.0 : 1.0;
+    float ab = direction * cross_product(b - a, point - a) / length(b - a);
+    float bc = direction * cross_product(c - b, point - b) / length(c - b);
+    float cd = direction * cross_product(d - c, point - c) / length(d - c);
+    float da = direction * cross_product(a - d, point - d) / length(a - d);
+    return smoothstep(-0.5, 0.5, min(min(ab, bc), min(cd, da)));
+}
+
+static float segment_distance(float2 point, float2 a, float2 b) {
+    float2 segment = b - a;
+    float projection = clamp(dot(point - a, segment) /
+                             dot(segment, segment), 0.0, 1.0);
+    return length(point - (a + projection * segment));
+}
+
+// Signed distance near an ellipse. Dividing its implicit equation by the
+// gradient produces pixel distances at the boundary, where coverage changes.
+static float ellipse_distance(float2 point, float2 radius) {
+    float2 normalized = point / radius;
+    float implicit = dot(normalized, normalized) - 1.0;
+    float2 gradient = 2.0 * point / (radius * radius);
+    return implicit / max(length(gradient), 0.0001);
+}
+
+static float powerline_coverage(float2 point, float2 size,
+                                float line_width, uint32_t kind) {
+    uint32_t shape = kind & CELL_GRAPHIC_POWERLINE_SHAPE_MASK;
+    bool mirror = (kind & CELL_GRAPHIC_POWERLINE_MIRROR) != 0;
+    if (mirror) point.x = size.x - point.x;
+
+    float width = size.x;
+    float height = size.y;
+    float middle = height * 0.5;
+
+    if (shape == CELL_GRAPHIC_POWERLINE_WEDGE) {
+        return triangle_coverage(point, float2(0), float2(width, middle),
+                                 float2(0, height));
+    }
+
+    if (shape == CELL_GRAPHIC_POWERLINE_CHEVRON) {
+        float distance = min(
+            segment_distance(point, float2(0), float2(width, middle)),
+            segment_distance(point, float2(width, middle),
+                             float2(0, height)));
+        float half_width = line_width * 0.5;
+        return 1.0 - smoothstep(half_width - 0.5,
+                                half_width + 0.5, distance);
+    }
+
+    if (shape == CELL_GRAPHIC_POWERLINE_ROUNDED_FILLED ||
+        shape == CELL_GRAPHIC_POWERLINE_ROUNDED_OUTLINE) {
+        bool outline = shape == CELL_GRAPHIC_POWERLINE_ROUNDED_OUTLINE;
+        float half_width = line_width * 0.5;
+        float inset = outline ? half_width : 0.0;
+        float2 radius = max(float2(width, middle) - inset, float2(0.5));
+        float distance = ellipse_distance(
+            float2(point.x, point.y - middle), radius);
+        if (!outline) {
+            return 1.0 - smoothstep(-0.5, 0.5, distance);
+        }
+        return 1.0 - smoothstep(half_width - 0.5,
+                                half_width + 0.5, abs(distance));
+    }
+
+    if (shape == CELL_GRAPHIC_POWERLINE_CORNER_TOP ||
+        shape == CELL_GRAPHIC_POWERLINE_CORNER_BOTTOM) {
+        bool bottom = shape == CELL_GRAPHIC_POWERLINE_CORNER_BOTTOM;
+        float2 a = bottom ? float2(0, height) : float2(0);
+        float2 b = bottom ? float2(0) : float2(width, 0);
+        float2 c = bottom ? float2(width, height) : float2(0, height);
+        return triangle_coverage(point, a, b, c);
+    }
+
+    if (shape == CELL_GRAPHIC_POWERLINE_TRAPEZOID) {
+        float half_gap = min(line_width, middle * 0.5);
+        float inner_x = width / 3.0;
+        float top = middle - half_gap;
+        float bottom = middle + half_gap;
+        float coverage = quadrilateral_coverage(
+            point, float2(0), float2(width, 0), float2(inner_x, top),
+            float2(0, top));
+        return max(coverage, quadrilateral_coverage(
+            point, float2(0, bottom), float2(inner_x, bottom),
+            float2(width, height), float2(0, height)));
+    }
+
+    if (shape == CELL_GRAPHIC_POWERLINE_TRIANGLES) {
+        return max(triangle_coverage(
+                       point, float2(0), float2(width, 0), float2(0, middle)),
+                   triangle_coverage(
+                       point, float2(0, middle), float2(width, height),
+                       float2(0, height)));
+    }
+
+    return 0.0;
+}
+
 fragment float4 cell_graphic_fill(
         cell_graphic_rasterizer_data in [[stage_in]],
         constant uniform_data &uniforms [[buffer(0)]]) {
@@ -655,6 +766,13 @@ fragment float4 cell_graphic_fill(
     float height = in.cell_size.y;
     float light_width = in.box_line_width;
     uint32_t family = in.kind & CELL_GRAPHIC_FAMILY_MASK;
+
+    if (family == CELL_GRAPHIC_POWERLINE) {
+        float alpha = powerline_coverage(local, in.cell_size, light_width,
+                                         in.kind);
+        if (alpha <= 0.0) discard_fragment();
+        return float4(color.rgb, alpha);
+    }
 
     if (family == CELL_GRAPHIC_BLOCK_RECT) {
         float left = block_boundary(

@@ -106,6 +106,7 @@ typedef struct {
 #define CELL_GRAPHIC_BOX_ARC 0x30000000u
 #define CELL_GRAPHIC_BLOCK_RECT 0x40000000u
 #define CELL_GRAPHIC_BLOCK_QUADRANTS 0x50000000u
+#define CELL_GRAPHIC_POWERLINE 0x60000000u
 
 /// Two-bit box stroke styles.
 #define CELL_GRAPHIC_STROKE_NONE 0u
@@ -143,6 +144,19 @@ typedef struct {
 #define CELL_GRAPHIC_QUADRANT_TOP_RIGHT 2u
 #define CELL_GRAPHIC_QUADRANT_BOTTOM_LEFT 4u
 #define CELL_GRAPHIC_QUADRANT_BOTTOM_RIGHT 8u
+
+/// Powerline payload fields. Shapes are defined facing or anchored left and
+/// reflected horizontally when `CELL_GRAPHIC_POWERLINE_MIRROR` is set.
+#define CELL_GRAPHIC_POWERLINE_SHAPE_MASK 7u
+#define CELL_GRAPHIC_POWERLINE_WEDGE 0u
+#define CELL_GRAPHIC_POWERLINE_CHEVRON 1u
+#define CELL_GRAPHIC_POWERLINE_ROUNDED_FILLED 2u
+#define CELL_GRAPHIC_POWERLINE_ROUNDED_OUTLINE 3u
+#define CELL_GRAPHIC_POWERLINE_CORNER_TOP 4u
+#define CELL_GRAPHIC_POWERLINE_CORNER_BOTTOM 5u
+#define CELL_GRAPHIC_POWERLINE_TRAPEZOID 6u
+#define CELL_GRAPHIC_POWERLINE_TRIANGLES 7u
+#define CELL_GRAPHIC_POWERLINE_MIRROR (1u << 3)
 
 /// One procedurally-drawn cell graphic (block, shade, diagonal, or separator)
 /// that the fragment shader renders without a glyph texture.

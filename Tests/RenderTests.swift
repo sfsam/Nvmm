@@ -65,7 +65,9 @@ final class RenderTests: XCTestCase {
         var graphics: [cell_graphic_data] = []
         for (row, graphemes) in rows.enumerated() {
             for (column, grapheme) in graphemes.enumerated() {
-                guard let kind = CellGraphicKind(grapheme: grapheme) else {
+                guard let kind = CellGraphicKind(
+                    grapheme: grapheme, nativePowerlineSymbols: true
+                ) else {
                     continue
                 }
                 graphics.append(cell_graphic_data(
@@ -249,6 +251,101 @@ final class RenderTests: XCTestCase {
             }
             XCTAssertTrue(hasInk, graphemes[index])
         }
+    }
+
+    func testCellGraphicShaderRendersCompletePowerlineSet() throws {
+        let graphemes = (Array(0xE0B0...0xE0BF)
+                         + [0xE0D2, 0xE0D4, 0xE0D6, 0xE0D7]).map {
+            String(UnicodeScalar($0)!)
+        }
+        let rows = [Array(graphemes[0..<10]),
+                    Array(graphemes[10..<20])]
+        let width = 13
+        let height = 27
+        let image = try renderCellGraphics(
+            rows, cellWidth: width, cellHeight: height)
+
+        for index in graphemes.indices {
+            let column = index % 10
+            let row = index / 10
+            var coverage = 0
+            for y in (row * height)..<((row + 1) * height) {
+                for x in (column * width)..<((column + 1) * width) {
+                    coverage += Int(image.alpha(x, y))
+                }
+            }
+            XCTAssertGreaterThan(coverage, 0, graphemes[index])
+        }
+    }
+
+    func testPowerlineMirrorPairsHaveMatchingCoverage() throws {
+        let pairs = [("", ""), ("", ""),
+                     ("", ""), ("", ""),
+                     ("", ""), ("", ""),
+                     ("", ""), ("", ""),
+                     ("", ""), ("", "")]
+        let width = 13
+        let height = 27
+
+        for (left, right) in pairs {
+            let leftImage = try renderCellGraphics(
+                [[left]], cellWidth: width, cellHeight: height)
+            let rightImage = try renderCellGraphics(
+                [[right]], cellWidth: width, cellHeight: height)
+            for y in 0..<height {
+                for x in 0..<width {
+                    XCTAssertEqual(leftImage.alpha(x, y),
+                                   rightImage.alpha(width - x - 1, y),
+                                   "\(left) / \(right) at \(x),\(y)")
+                }
+            }
+        }
+    }
+
+    func testPowerlineShapesFillSpacedCellHeight() throws {
+        let graphemes = ["", "", "", "", ""]
+        let width = 13
+        let height = 31
+        let image = try renderCellGraphics(
+            [graphemes], cellWidth: width, cellHeight: height)
+
+        for (column, grapheme) in graphemes.prefix(3).enumerated() {
+            for y in 0..<height {
+                let rowCoverage = (0..<width).map {
+                    image.alpha(column * width + $0, y)
+                }.max() ?? 0
+                XCTAssertGreaterThan(rowCoverage, 0, "\(grapheme) row \(y)")
+            }
+        }
+        for column in 3..<graphemes.count {
+            let top = (0..<width).map {
+                image.alpha(column * width + $0, 0)
+            }.max() ?? 0
+            let bottom = (0..<width).map {
+                image.alpha(column * width + $0, height - 1)
+            }.max() ?? 0
+            XCTAssertGreaterThan(top, 0, graphemes[column])
+            XCTAssertGreaterThan(bottom, 0, graphemes[column])
+        }
+    }
+
+    func testPowerlineRoundedOutlineAndTrapezoidGap() throws {
+        let width = 13
+        let height = 27
+        let image = try renderCellGraphics(
+            [["", ""]], cellWidth: width, cellHeight: height,
+            lineWidth: 2)
+        let middle = height / 2
+
+        XCTAssertEqual(image.alpha(0, middle), 0)
+        XCTAssertGreaterThan(image.alpha(width - 1, middle), 0)
+        XCTAssertGreaterThan(image.alpha(0, 0), 0)
+
+        for x in 0..<width {
+            XCTAssertEqual(image.alpha(width + x, middle), 0)
+        }
+        XCTAssertGreaterThan(image.alpha(width, 0), 0)
+        XCTAssertGreaterThan(image.alpha(width, height - 1), 0)
     }
 
     func testBlockElementsUseSharedRoundedBoundaries() throws {

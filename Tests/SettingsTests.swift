@@ -12,14 +12,13 @@ import XCTest
 
 final class SettingsTests: XCTestCase {
 
-    /// The context-sensitive cursor and the progress bar are on unless they are
-    /// turned off, which only holds because they are registered; every other
-    /// setting is off until set, which is what an unwritten key already reads
-    /// as.
+    /// Defaults registered as enabled are on unless explicitly turned off;
+    /// every other Boolean setting is off until set.
     @MainActor
     func testRegisteredDefaults() {
         let defaults = UserDefaults.standard
         let keys = [Settings.contextSensitiveCursorKey,
+                    Settings.nativePowerlineSymbolsKey,
                     Settings.openFilesInBuffersKey,
                     Settings.terminateAfterLastWindowKey,
                     Settings.titlebarAppearsTransparentKey,
@@ -41,6 +40,7 @@ final class SettingsTests: XCTestCase {
         Settings.registerDefaults()
 
         XCTAssertTrue(Settings.contextSensitiveCursor)
+        XCTAssertTrue(Settings.nativePowerlineSymbols)
         XCTAssertTrue(Settings.progressBar)
         XCTAssertFalse(Settings.openFilesInBuffers)
         XCTAssertFalse(Settings.terminateAfterLastWindow)

@@ -734,6 +734,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         var backgroundIndex = 0
         var cursorXray = false
         let cellWidth = Int(cellSizePixels.x)
+        let nativePowerlineSymbols = Settings.nativePowerlineSymbols
         for row in 0..<grid.height {
             if ligaturesEnabled {
                 let start = row * grid.width
@@ -831,7 +832,10 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                 }
 
                 if !cell.isEmpty {
-                    if let kind = CellGraphicKind(grapheme: cell.text) {
+                    if let kind = CellGraphicKind(
+                        grapheme: cell.text,
+                        nativePowerlineSymbols: nativePowerlineSymbols
+                    ) {
                         cellGraphics[cellGraphicCount] = cell_graphic_data(
                             grid_position: gridpos,
                             cell_width: UInt32(cell.width),

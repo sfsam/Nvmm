@@ -61,6 +61,60 @@ nonisolated struct CellGraphicKind: Equatable {
         Self(rawValue: CELL_GRAPHIC_BLOCK_QUADRANTS | mask)
     }
 
+    private static func powerlineShape(_ shape: UInt32,
+                                       mirror: Bool = false) -> Self {
+        Self(rawValue: CELL_GRAPHIC_POWERLINE | shape
+             | (mirror ? CELL_GRAPHIC_POWERLINE_MIRROR : 0))
+    }
+
+    private static func powerline(_ codepoint: UInt32) -> Self? {
+        switch codepoint {
+        case 0xE0B0: return Self.powerlineShape(CELL_GRAPHIC_POWERLINE_WEDGE)
+        case 0xE0B1: return Self.powerlineShape(CELL_GRAPHIC_POWERLINE_CHEVRON)
+        case 0xE0B2:
+            return Self.powerlineShape(CELL_GRAPHIC_POWERLINE_WEDGE,
+                                       mirror: true)
+        case 0xE0B3:
+            return Self.powerlineShape(CELL_GRAPHIC_POWERLINE_CHEVRON,
+                                       mirror: true)
+        case 0xE0B4:
+            return Self.powerlineShape(CELL_GRAPHIC_POWERLINE_ROUNDED_FILLED)
+        case 0xE0B5:
+            return Self.powerlineShape(CELL_GRAPHIC_POWERLINE_ROUNDED_OUTLINE)
+        case 0xE0B6:
+            return Self.powerlineShape(CELL_GRAPHIC_POWERLINE_ROUNDED_FILLED,
+                                       mirror: true)
+        case 0xE0B7:
+            return Self.powerlineShape(CELL_GRAPHIC_POWERLINE_ROUNDED_OUTLINE,
+                                       mirror: true)
+        case 0xE0B8:
+            return Self.powerlineShape(CELL_GRAPHIC_POWERLINE_CORNER_BOTTOM)
+        case 0xE0B9, 0xE0BF:
+            return Self(rawValue: CELL_GRAPHIC_DIAGONAL_DOWN_RIGHT)
+        case 0xE0BA:
+            return Self.powerlineShape(CELL_GRAPHIC_POWERLINE_CORNER_BOTTOM,
+                                       mirror: true)
+        case 0xE0BB, 0xE0BD:
+            return Self(rawValue: CELL_GRAPHIC_DIAGONAL_DOWN_LEFT)
+        case 0xE0BC:
+            return Self.powerlineShape(CELL_GRAPHIC_POWERLINE_CORNER_TOP)
+        case 0xE0BE:
+            return Self.powerlineShape(CELL_GRAPHIC_POWERLINE_CORNER_TOP,
+                                       mirror: true)
+        case 0xE0D2:
+            return Self.powerlineShape(CELL_GRAPHIC_POWERLINE_TRAPEZOID)
+        case 0xE0D4:
+            return Self.powerlineShape(CELL_GRAPHIC_POWERLINE_TRAPEZOID,
+                                       mirror: true)
+        case 0xE0D6:
+            return Self.powerlineShape(CELL_GRAPHIC_POWERLINE_TRIANGLES)
+        case 0xE0D7:
+            return Self.powerlineShape(CELL_GRAPHIC_POWERLINE_TRIANGLES,
+                                       mirror: true)
+        default: return nil
+        }
+    }
+
     private static func blockElement(_ codepoint: UInt32) -> Self? {
         switch codepoint {
         case 0x2580: return Self.block(0, 0, 8, 4)
@@ -112,7 +166,7 @@ nonisolated struct CellGraphicKind: Equatable {
     }
 
     /// The kind a grapheme maps to, or nil if it is not a cell graphic.
-    init?(grapheme: String) {
+    init?(grapheme: String, nativePowerlineSymbols: Bool) {
         // This runs for every cell of every frame, so reject the common
         // case in one pass: a lone scalar at or above the first graphic.
         var scalars = grapheme.unicodeScalars.makeIterator()
@@ -124,6 +178,10 @@ nonisolated struct CellGraphicKind: Equatable {
 
         if let block = Self.blockElement(codepoint) {
             self = block
+            return
+        }
+        if nativePowerlineSymbols, let powerline = Self.powerline(codepoint) {
+            self = powerline
             return
         }
 

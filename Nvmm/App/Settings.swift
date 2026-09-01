@@ -41,6 +41,10 @@ enum Settings {
     /// on unless the key is set by hand.
     static let contextSensitiveCursorKey = "NVEnableContextSensitiveMouseCursor"
 
+    /// Whether Powerline separators use cell-aligned native geometry. Has no
+    /// settings-window checkbox; it is on unless the key is set by hand.
+    static let nativePowerlineSymbolsKey = "NVEnableNativePowerlineSymbols"
+
     /// Zero disables the cursor trail; larger values select stronger profiles.
     static let cursorTrailStrengthKey = "NVCursorTrailStrength"
 
@@ -85,6 +89,10 @@ enum Settings {
         UserDefaults.standard.bool(forKey: contextSensitiveCursorKey)
     }
 
+    static var nativePowerlineSymbols: Bool {
+        UserDefaults.standard.bool(forKey: nativePowerlineSymbolsKey)
+    }
+
     static var cursorTrailStrength: Int {
         min(max(UserDefaults.standard.integer(forKey: cursorTrailStrengthKey),
                 cursorTrailStrengthMinimum), cursorTrailStrengthMaximum)
@@ -126,6 +134,7 @@ enum Settings {
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [
             contextSensitiveCursorKey: true,
+            nativePowerlineSymbolsKey: true,
             progressBarKey: true,
             fontThicknessKey: 50,
         ])
