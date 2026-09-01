@@ -51,7 +51,8 @@ final class RenderTests: XCTestCase {
             cell_pixel_size: SIMD2<Float>(Float(cellWidth), Float(cellHeight)),
             box_line_width: lineWidth,
             baseline: .zero, cursor_position: .zero, cursor_color: 0,
-            cursor_line_width: 0, cursor_cell_width: 1,
+            cursor_line_width: 0, cursor_height: UInt32(cellHeight),
+            cursor_top: 0, cursor_cell_width: 1,
             grid_width: UInt32(columnCount), cursor_xray: 0)
         let uniformBuffer = try XCTUnwrap(withUnsafeBytes(of: &uniforms) {
             device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
@@ -66,7 +67,8 @@ final class RenderTests: XCTestCase {
                 graphics.append(cell_graphic_data(
                     grid_position: SIMD2<Int16>(Int16(column), Int16(row)),
                     cell_width: 1, color: UInt32.max, background_color: 0,
-                    kind: kind.rawValue))
+                    cursor_color: UInt32.max, cursor_background_color: 0,
+                    kind: kind.rawValue, flags: 0))
             }
         }
         let graphicBuffer = try XCTUnwrap(graphics.withUnsafeBytes {
@@ -90,6 +92,7 @@ final class RenderTests: XCTestCase {
             descriptor: pass))
         encoder.setRenderPipelineState(context.cellGraphicPipeline)
         encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 0)
+        encoder.setFragmentBuffer(uniformBuffer, offset: 0, index: 0)
         encoder.setVertexBuffer(graphicBuffer, offset: 0, index: 1)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
                                vertexCount: 4,
@@ -383,11 +386,16 @@ final class RenderTests: XCTestCase {
 
         view.setFont(family)
         let naturalHeight = view.convertToBacking(view.cellSize).height
+        let naturalBaseline = view.fontBaseline
+        let naturalCursorHeight = view.cursorHeight
         view.setFont(family, lineSpace: 4)
         XCTAssertEqual(view.convertToBacking(view.cellSize).height,
                        naturalHeight + 4)
+        XCTAssertEqual(view.fontBaseline, naturalBaseline + 2)
+        XCTAssertEqual(view.cursorHeight, naturalCursorHeight)
         view.setFont(family, lineSpace: -10_000)
         XCTAssertEqual(view.convertToBacking(view.cellSize).height, 2)
+        XCTAssertEqual(view.cursorHeight, 2)
     }
 
     func testGlyphManagerRasterizesAndCaches() throws {
@@ -449,7 +457,8 @@ final class RenderTests: XCTestCase {
             cell_pixel_size: SIMD2<Float>(8, 8), box_line_width: 2,
             baseline: .zero,
             cursor_position: .zero, cursor_color: 0,
-            cursor_line_width: 0, cursor_cell_width: 1, grid_width: 4,
+            cursor_line_width: 0, cursor_height: 8, cursor_top: 0,
+            cursor_cell_width: 1, grid_width: 4,
             cursor_xray: 0)
         let uniformBuffer = try XCTUnwrap(withUnsafeBytes(of: &uniforms) {
             device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
@@ -962,7 +971,8 @@ final class RenderTests: XCTestCase {
             cell_pixel_size: SIMD2<Float>(8, 8), box_line_width: 2,
             baseline: .zero,
             cursor_position: SIMD2<Int16>(1, 0), cursor_color: 0xFF00_0000,
-            cursor_line_width: 0, cursor_cell_width: 1, grid_width: 4,
+            cursor_line_width: 0, cursor_height: 8, cursor_top: 0,
+            cursor_cell_width: 1, grid_width: 4,
             cursor_xray: 1)
         let uniformBuffer = try XCTUnwrap(withUnsafeBytes(of: &uniforms) {
             device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
@@ -1212,7 +1222,8 @@ final class RenderTests: XCTestCase {
             cell_pixel_size: SIMD2<Float>(16, 16), box_line_width: 2,
             baseline: SIMD2<Float>(0, 8),
             cursor_position: .zero, cursor_color: 0,
-            cursor_line_width: 0, cursor_cell_width: 1, grid_width: 2,
+            cursor_line_width: 0, cursor_height: 16, cursor_top: 0,
+            cursor_cell_width: 1, grid_width: 2,
             cursor_xray: 0)
         let uniformBuffer = try XCTUnwrap(withUnsafeBytes(of: &uniforms) {
             device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
@@ -1291,7 +1302,8 @@ final class RenderTests: XCTestCase {
             cell_pixel_size: SIMD2<Float>(8, 16),
             box_line_width: 2,
             baseline: .zero, cursor_position: .zero, cursor_color: 0,
-            cursor_line_width: 0, cursor_cell_width: 1, grid_width: 4,
+            cursor_line_width: 0, cursor_height: 8, cursor_top: 0,
+            cursor_cell_width: 1, grid_width: 4,
             cursor_xray: 0)
         let uniformBuffer = try XCTUnwrap(withUnsafeBytes(of: &uniforms) {
             device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)

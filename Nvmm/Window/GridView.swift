@@ -103,6 +103,8 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     private var backingCellSize = NSSize(width: 1, height: 1)
     private var cellSizePixels = SIMD2<Float>(1, 1)
     private var baselineTranslate = SIMD2<Float>(0, 0)
+    private var cursorHeightPixels: UInt32 = 1
+    private var cursorTopPixels: UInt32 = 0
     private var boxLineWidth: UInt32 = 1
     private var cursorLineThickness: UInt32 = 2
 
@@ -342,10 +344,12 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         // which AppKit rounds to a whole point, leaving the drawable a pixel
         // larger than the grid it holds — a thin strip of the clear color along
         // an edge. Rounding the cell up to a whole point keeps every window
-        // size integral and the drawable exactly grid-sized. The extra pixels
-        // fall below the descent as padding.
+        // size integral and the drawable exactly grid-sized. Vertical padding
+        // is split around the font below.
         let scale = max(1, Int(font.scaleFactor.rounded()))
         let naturalHeight = leading + descent + ascent
+        let naturalCellHeight = roundUp(max(CGFloat(scale), naturalHeight),
+                                        toMultipleOf: scale)
         let spacedHeight = max(CGFloat(scale),
                                naturalHeight + CGFloat(lineSpace))
         let cellHeight = roundUp(spacedHeight, toMultipleOf: scale)
@@ -354,7 +358,12 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         cellSizePixels = SIMD2<Float>(Float(cellWidth), Float(cellHeight))
         backingCellSize = convertSize(from: NSSize(width: cellWidth,
                                                    height: cellHeight))
-        baselineTranslate = SIMD2<Float>(0, Float(ascent))
+        let textPadding = max(0, cellHeight - ascent - descent)
+        let topPadding = (textPadding / 2).rounded(.down)
+        baselineTranslate = SIMD2<Float>(0, Float(ascent + topPadding))
+        let cursorHeight = min(naturalCellHeight, cellHeight)
+        cursorHeightPixels = UInt32(cursorHeight)
+        cursorTopPixels = UInt32((cellHeight - cursorHeight) / 2)
 
         let underlinePosition = font.underlinePosition
         let lineThickness = UInt16(floor(font.underlineThickness + 1.0))
@@ -407,6 +416,10 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
 
     /// The size of a single-width cell in the view's coordinate space.
     var cellSize: NSSize { backingCellSize }
+
+    /// Font and cursor vertical metrics in backing pixels.
+    var fontBaseline: CGFloat { CGFloat(baselineTranslate.y) }
+    var cursorHeight: CGFloat { CGFloat(cursorHeightPixels) }
 
     /// The frame size needed to fit the current grid.
     var desiredFrameSize: NSSize {
@@ -701,6 +714,8 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             cursor_position: SIMD2<Int16>(Int16(cursor.column), Int16(cursor.row)),
             cursor_color: cursor.background.rgb | (cursorAlpha << 24),
             cursor_line_width: cursorLineThickness,
+            cursor_height: cursorHeightPixels,
+            cursor_top: cursorTopPixels,
             cursor_cell_width: UInt32(cursor.width),
             grid_width: UInt32(grid.width),
             cursor_xray: 0)
@@ -735,9 +750,11 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                 && ligatureRuns[cursor.column].glyph != 0
             if xray { cursorXray = true }
             for col in 0..<grid.width {
-                var cell = grid.cell(row, col)
-                if blockCursorApplies, row == cursor.row,
-                   col >= cursor.column, col < cursor.column + cursor.width {
+                let originalCell = grid.cell(row, col)
+                var cell = originalCell
+                let hasBlockCursor = blockCursorApplies && row == cursor.row &&
+                    col >= cursor.column && col < cursor.column + cursor.width
+                if hasBlockCursor {
                     // Block cursors invert the cell through the normal grid
                     // passes, so fade their replacement colors in place. An
                     // x-ray cell keeps its foreground: the ligature draws
@@ -751,6 +768,11 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                 }
 
                 let gridpos = SIMD2<Int16>(Int16(col), Int16(row))
+                var originalForeground = originalCell.foreground
+                if originalCell.isDim {
+                    originalForeground = dimColor(originalForeground,
+                                                  originalCell.background)
+                }
                 var foreground = cell.foreground
                 let background = cell.background
                 var lineColor = cell.special
@@ -760,7 +782,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                     if !cell.hasSpecialColor { lineColor = foreground }
                 }
 
-                backgrounds[backgroundIndex] = background.rgb
+                backgrounds[backgroundIndex] = originalCell.background.rgb
                 backgroundIndex += 1
 
                 if cell.hasLineEmphasis {
@@ -813,9 +835,13 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                         cellGraphics[cellGraphicCount] = cell_graphic_data(
                             grid_position: gridpos,
                             cell_width: UInt32(cell.width),
-                            color: foreground.opaque,
-                            background_color: background.opaque,
-                            kind: kind.rawValue)
+                            color: originalForeground.opaque,
+                            background_color: originalCell.background.opaque,
+                            cursor_color: foreground.opaque,
+                            cursor_background_color: background.opaque,
+                            kind: kind.rawValue,
+                            flags: hasBlockCursor
+                                ? CELL_GRAPHIC_FLAG_CURSOR : 0)
                         cellGraphicCount += 1
                         continue
                     }
@@ -958,7 +984,8 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             cellGraphics[cellGraphicCount] = cell_graphic_data(
                 grid_position: SIMD2<Int16>(Int16(col), row), cell_width: 1,
                 color: clear, background_color: clear,
-                kind: CellGraphicKind.fullBlock.rawValue)
+                cursor_color: clear, cursor_background_color: clear,
+                kind: CellGraphicKind.fullBlock.rawValue, flags: 0)
             cellGraphicCount += 1
         }
 
@@ -968,7 +995,9 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             cellGraphics[cellGraphicCount] = cell_graphic_data(
                 grid_position: entry.position, cell_width: UInt32(cell.width),
                 color: background, background_color: background,
-                kind: CellGraphicKind.fullBlock.rawValue)
+                cursor_color: background,
+                cursor_background_color: background,
+                kind: CellGraphicKind.fullBlock.rawValue, flags: 0)
             cellGraphicCount += 1
 
             if !cell.isEmpty {
@@ -1066,12 +1095,18 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
 
         encoder.setRenderPipelineState(context.backgroundPipeline)
         encoder.setVertexBuffer(buffer, offset: uniformOffset, index: 0)
-        // The glyph pass reads the cursor rect per fragment to carve out its
-        // x-ray; the other fragment functions ignore this binding.
+        // Fragment passes share the cursor geometry in this uniform buffer.
         encoder.setFragmentBuffer(buffer, offset: uniformOffset, index: 0)
         encoder.setVertexBuffer(buffer, offset: backgroundOffset, index: 1)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
                                vertexCount: 4, instanceCount: gridSize)
+
+        if cursorShape == .block {
+            encoder.setRenderPipelineState(context.cursorPipeline)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
+                                   vertexCount: 4, instanceCount: 1,
+                                   baseInstance: 4)
+        }
 
         if gridCellGraphicCount > 0 {
             encoder.setRenderPipelineState(context.cellGraphicPipeline)
@@ -1139,7 +1174,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
                                    vertexCount: 4, instanceCount: 4, baseInstance: 0)
         case .block, .none:
-            break // Block cursors are drawn by recoloring the grid.
+            break // Block cursors are drawn behind the grid contents.
         }
 
         if hasCursorSmear {
@@ -1292,11 +1327,13 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         let oldRect = CursorTrailGeometry.cursorRect(
             row: previous.row, column: previous.column,
             cellWidth: previous.width, shape: previous.shape,
-            cellSize: cellSize, lineThickness: thickness)
+            cellSize: cellSize, lineThickness: thickness,
+            cursorHeight: CGFloat(cursorHeightPixels))
         let newRect = CursorTrailGeometry.cursorRect(
             row: current.row, column: current.column,
             cellWidth: current.width, shape: current.shape,
-            cellSize: cellSize, lineThickness: thickness)
+            cellSize: cellSize, lineThickness: thickness,
+            cursorHeight: CGFloat(cursorHeightPixels))
 
         cursorTrail = CursorTrailState(
             previous: oldRect, current: newRect, color: current.background,

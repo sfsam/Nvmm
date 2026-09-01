@@ -3,10 +3,10 @@
 //  Shaders.metal
 //
 //  The grid render pipelines. Each frame draws, in order: cell backgrounds,
-//  procedural cell graphics, glyphs, line decorations, the cursor, and an
-//  optional cursor smear. Each pass draws four-vertex triangle strips. Vertex
-//  data describes rectangles as an origin plus a size; a vertex offset selects
-//  one of the four corners.
+//  the block cursor, procedural cell graphics, glyphs, line decorations, other
+//  cursor shapes, and an optional cursor smear. Each pass draws four-vertex
+//  triangle strips. Vertex data describes rectangles as an origin plus a size;
+//  a vertex offset selects one of the four corners.
 //
 
 #include <metal_stdlib>
@@ -84,8 +84,11 @@ struct cell_graphic_rasterizer_data {
     float2 cell_size [[flat]];
     float4 color [[flat]];
     float4 background_color [[flat]];
+    float4 cursor_color [[flat]];
+    float4 cursor_background_color [[flat]];
     float box_line_width [[flat]];
     uint32_t kind;
+    uint32_t flags [[flat]];
 };
 
 struct cursor_smear_rasterizer_data {
@@ -117,14 +120,25 @@ constant float cursor_smear_saturation = 1.8;
 
 // Per-shape corner nudges that carve a thin bar out of a full cell rect. Row 0
 // is a left vertical bar, row 1 a bottom horizontal bar, row 2 a top horizontal
-// bar, and row 3 a right vertical bar.
-// Drawing all four produces a block outline.
-constant float2 cursor_transforms[4][4] = {
+// bar, row 3 a right vertical bar, and row 4 the complete rect. Drawing the
+// first four produces a block outline.
+constant float2 cursor_transforms[5][4] = {
     {{ 0,  0}, { 0,  0}, { 1,  0}, { 1,  0}},
     {{ 0, -1}, { 0,  0}, { 0, -1}, { 0,  0}},
     {{ 0,  0}, { 0,  1}, { 0,  0}, { 0,  1}},
     {{-1,  0}, {-1,  0}, { 0,  0}, { 0,  0}},
+    {{ 0,  0}, { 0,  0}, { 0,  0}, { 0,  0}},
 };
+
+static float4 cursor_pixel_rect(constant uniform_data &uniforms) {
+    float2 origin =
+        float2(uniforms.cursor_position.xy) * uniforms.cell_pixel_size;
+    origin.y += uniforms.cursor_top;
+    float2 size = float2(
+        uniforms.cell_pixel_size.x * float(uniforms.cursor_cell_width),
+        uniforms.cursor_height);
+    return float4(origin, size);
+}
 
 vertex grid_rasterizer_data
 background_render(uint vertex_id [[vertex_id]],
@@ -148,18 +162,16 @@ background_render(uint vertex_id [[vertex_id]],
 ///   1. A bottom horizontal bar.
 ///   2. A top horizontal bar.
 ///   3. A right vertical bar.
+///   4. A complete block.
 /// Draw all four instances to make a block outline.
 vertex grid_rasterizer_data
 cursor_render(uint vertex_id [[vertex_id]],
               uint instance_id [[instance_id]],
               constant uniform_data &uniforms [[buffer(0)]]) {
     // The cursor cell size in pixels, accounting for a double-width cell.
-    float2 cell_pixel_size = uniforms.cell_pixel_size;
-    cell_pixel_size.x *= uniforms.cursor_cell_width;
-
-    // The cursor cell's top-left corner in pixel coordinates.
-    float2 cell_position =
-        float2(uniforms.cursor_position.xy) * uniforms.cell_pixel_size;
+    float4 cursor_rect = cursor_pixel_rect(uniforms);
+    float2 cell_position = cursor_rect.xy;
+    float2 cell_pixel_size = cursor_rect.zw;
 
     // This vertex in pixel coordinates.
     float2 cell_vertex = cell_position + (cell_pixel_size * transforms[vertex_id]);
@@ -334,8 +346,12 @@ cell_graphic_render(uint vertex_id [[vertex_id]],
     data.cell_size = cell_size;
     data.color = load_color(graphic.color);
     data.background_color = load_color(graphic.background_color);
+    data.cursor_color = load_color(graphic.cursor_color);
+    data.cursor_background_color =
+        load_color(graphic.cursor_background_color);
     data.box_line_width = float(uniforms.box_line_width);
     data.kind = graphic.kind;
+    data.flags = graphic.flags;
     return data;
 }
 
@@ -384,11 +400,9 @@ static float xray_coverage(constant uniform_data &uniforms,
         return is_xray ? 0.0 : 1.0;
     }
 
-    float2 origin = float2(uniforms.cursor_position.xy) * uniforms.cell_pixel_size;
-    float2 size = uniforms.cell_pixel_size
-        * float2(float(uniforms.cursor_cell_width), 1.0);
-    bool inside = all(pixel_position >= origin)
-        && all(pixel_position < origin + size);
+    float4 cursor_rect = cursor_pixel_rect(uniforms);
+    bool inside = all(pixel_position >= cursor_rect.xy)
+        && all(pixel_position < cursor_rect.xy + cursor_rect.zw);
 
     return inside == is_xray ? 1.0 : 0.0;
 }
@@ -609,9 +623,19 @@ static float arc_distance(float2 point, float2 size, float line_width,
     return distance;
 }
 
-fragment float4 cell_graphic_fill(cell_graphic_rasterizer_data in [[stage_in]]) {
+fragment float4 cell_graphic_fill(
+        cell_graphic_rasterizer_data in [[stage_in]],
+        constant uniform_data &uniforms [[buffer(0)]]) {
+    float4 cursor_rect = cursor_pixel_rect(uniforms);
+    bool recolor = (in.flags & CELL_GRAPHIC_FLAG_CURSOR) != 0 &&
+        all(in.position.xy >= cursor_rect.xy) &&
+        all(in.position.xy < cursor_rect.xy + cursor_rect.zw);
+    float4 color = recolor ? in.cursor_color : in.color;
+    float4 background_color = recolor
+        ? in.cursor_background_color : in.background_color;
+
     if (in.kind == CELL_GRAPHIC_FULL_BLOCK) {
-        return float4(in.color.rgb, 1.0);
+        return float4(color.rgb, 1.0);
     }
 
     if (in.kind == CELL_GRAPHIC_DARK_SHADE ||
@@ -619,7 +643,7 @@ fragment float4 cell_graphic_fill(cell_graphic_rasterizer_data in [[stage_in]]) 
         in.kind == CELL_GRAPHIC_LIGHT_SHADE) {
         float coverage = in.kind == CELL_GRAPHIC_DARK_SHADE ? 0.57
                        : in.kind == CELL_GRAPHIC_MEDIUM_SHADE ? 0.26 : 0.08;
-        return float4(mix(in.background_color.rgb, in.color.rgb, coverage), 1.0);
+        return float4(mix(background_color.rgb, color.rgb, coverage), 1.0);
     }
 
     float2 local = in.position.xy - in.cell_position;
@@ -632,7 +656,7 @@ fragment float4 cell_graphic_fill(cell_graphic_rasterizer_data in [[stage_in]]) 
         if (!box_segments_contain(local, in.cell_size, light_width, in.kind)) {
             discard_fragment();
         }
-        return float4(in.color.rgb, 1.0);
+        return float4(color.rgb, 1.0);
     }
 
     if (family == CELL_GRAPHIC_BOX_DASHED) {
@@ -653,7 +677,7 @@ fragment float4 cell_graphic_fill(cell_graphic_rasterizer_data in [[stage_in]]) 
             phase < half_gap || phase >= period - half_gap) {
             discard_fragment();
         }
-        return float4(in.color.rgb, 1.0);
+        return float4(color.rgb, 1.0);
     }
 
     float distance = 0.0;
@@ -677,7 +701,7 @@ fragment float4 cell_graphic_fill(cell_graphic_rasterizer_data in [[stage_in]]) 
     float alpha = 1.0 - smoothstep(half_width - 0.5,
                                    half_width + 0.5, distance);
     if (alpha <= 0.0) discard_fragment();
-    return float4(in.color.rgb, alpha);
+    return float4(color.rgb, alpha);
 }
 
 struct cursor_quad {

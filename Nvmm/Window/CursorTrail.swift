@@ -40,24 +40,31 @@ nonisolated enum CursorTrailGeometry {
     /// The cursor rectangle in the coordinate space supplied by `cellSize`.
     static func cursorRect(row: Int, column: Int, cellWidth: Int,
                            shape: CursorShape, cellSize: CGSize,
-                           lineThickness: CGFloat) -> CGRect {
+                           lineThickness: CGFloat,
+                           cursorHeight: CGFloat? = nil) -> CGRect {
         let origin = CGPoint(x: CGFloat(column) * cellSize.width,
                              y: CGFloat(row) * cellSize.height)
         let width = cellSize.width * CGFloat(max(1, cellWidth))
         let thickness = max(0, lineThickness)
+        let height = min(max(0, cursorHeight ?? cellSize.height),
+                         cellSize.height)
+        let cursorOrigin = CGPoint(x: origin.x,
+                                   y: origin.y +
+                                      floor((cellSize.height - height) / 2))
 
         switch shape {
         case .block, .blockOutline:
-            return CGRect(origin: origin,
-                          size: CGSize(width: width, height: cellSize.height))
+            return CGRect(origin: cursorOrigin,
+                          size: CGSize(width: width, height: height))
         case .vertical:
-            return CGRect(origin: origin,
+            return CGRect(origin: cursorOrigin,
                           size: CGSize(width: min(thickness, width),
-                                       height: cellSize.height))
+                                       height: height))
         case .horizontal:
-            let height = min(thickness, cellSize.height)
-            return CGRect(x: origin.x, y: origin.y + cellSize.height - height,
-                          width: width, height: height)
+            let barHeight = min(thickness, height)
+            return CGRect(x: cursorOrigin.x,
+                          y: cursorOrigin.y + height - barHeight,
+                          width: width, height: barHeight)
         }
     }
 }

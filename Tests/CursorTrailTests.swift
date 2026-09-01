@@ -49,6 +49,26 @@ final class CursorTrailTests: XCTestCase {
             CGRect(x: 30, y: 58, width: 10, height: 2))
     }
 
+    func testCursorRectsStayCenteredWithinLineSpace() {
+        let cell = CGSize(width: 10, height: 28)
+
+        XCTAssertEqual(
+            CursorTrailGeometry.cursorRect(
+                row: 2, column: 3, cellWidth: 1, shape: .block,
+                cellSize: cell, lineThickness: 2, cursorHeight: 20),
+            CGRect(x: 30, y: 60, width: 10, height: 20))
+        XCTAssertEqual(
+            CursorTrailGeometry.cursorRect(
+                row: 2, column: 3, cellWidth: 1, shape: .vertical,
+                cellSize: cell, lineThickness: 2, cursorHeight: 20),
+            CGRect(x: 30, y: 60, width: 2, height: 20))
+        XCTAssertEqual(
+            CursorTrailGeometry.cursorRect(
+                row: 2, column: 3, cellWidth: 1, shape: .horizontal,
+                cellSize: cell, lineThickness: 2, cursorHeight: 20),
+            CGRect(x: 30, y: 78, width: 10, height: 2))
+    }
+
     func testStrengthProfilesIncreaseMonotonically() throws {
         XCTAssertNil(CursorTrailProfile.profile(for: 0))
         XCTAssertNil(CursorTrailProfile.profile(for: -1))

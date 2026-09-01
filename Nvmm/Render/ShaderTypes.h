@@ -42,6 +42,10 @@ typedef struct {
     /// The thickness in pixels of the cursor's bar and outline shapes.
     uint32_t cursor_line_width;
 
+    /// The cursor height and its inset from the top of a line, in pixels.
+    uint32_t cursor_height;
+    uint32_t cursor_top;
+
     /// The cursor cell width in cells (1 or 2).
     uint32_t cursor_cell_width;
 
@@ -132,8 +136,14 @@ typedef struct {
     uint32_t cell_width;
     uint32_t color;
     uint32_t background_color;
+    uint32_t cursor_color;
+    uint32_t cursor_background_color;
     uint32_t kind;
+    uint32_t flags;
 } cell_graphic_data;
+
+/// `cell_graphic_data.flags`: recolor inside the block cursor rectangle.
+#define CELL_GRAPHIC_FLAG_CURSOR 1u
 
 /// One underline, undercurl, overline, or strikethrough segment. A segment is
 /// one cell wide; adjacent segments join into a continuous line. The color's
