@@ -1316,6 +1316,97 @@ final class NeovimProcessTests: XCTestCase {
         }
     }
 
+    /// Save As renames the document rather than copying it out: the buffer
+    /// takes the new name, is no longer modified, and the alternate buffer
+    /// `:saveas` leaves behind under the old name is wiped, so the window
+    /// still holds one document.
+    func testSaveAsRenamesTheBufferAndWipesTheOldName() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            let directory = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+                .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: false)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let old = directory.appendingPathComponent("old").path
+            let new = directory.appendingPathComponent("new file %").path
+            try "old\n".write(toFile: old, atomically: true, encoding: .utf8)
+
+            let edited = try await process.request(
+                "nvim_exec_lua",
+                [.string("""
+                    vim.api.nvim_cmd({cmd='edit', args={...}}, {})
+                    vim.api.nvim_buf_set_lines(0, 0, -1, true, {'edited'})
+                    """),
+                 .array([.string(old)])])
+            XCTAssertFalse(edited.isError)
+
+            let outcome = await process.writeAs(new)
+            XCTAssertEqual(outcome, .written)
+
+            let state = try await process.request(
+                "nvim_exec_lua",
+                [.string("""
+                    local old = ...
+                    return {vim.api.nvim_buf_get_name(0), vim.bo.modified,
+                            vim.fn.bufexists(old) == 1,
+                            #vim.fn.getbufinfo({buflisted = 1})}
+                    """),
+                 .array([.string(old)])])
+            let values = try XCTUnwrap(state.result.arrayValue)
+            XCTAssertEqual(values.count, 4)
+            XCTAssertEqual(values[0].stringValue, new)
+            XCTAssertEqual(values[1], .bool(false))
+            XCTAssertEqual(values[2], .bool(false))
+            XCTAssertEqual(values[3].integer?.signed, 1)
+
+            // The edit went to the new file; the old one is left as it was.
+            XCTAssertEqual(try String(contentsOfFile: new, encoding: .utf8),
+                           "edited\n")
+            XCTAssertEqual(try String(contentsOfFile: old, encoding: .utf8),
+                           "old\n")
+        }
+    }
+
+    /// Saving a brand-new document under a name: `:saveas` leaves the empty
+    /// name behind as a `[No Name]` buffer, which is wiped too, so the window
+    /// is left holding the one document that was just named.
+    func testSaveAsFromAnUnnamedBufferLeavesNoStrayBuffer() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            let directory = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+                .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: false)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let path = directory.appendingPathComponent("named").path
+
+            let typed = try await process.request(
+                "nvim_buf_set_lines",
+                [.int(0), .int(0), .int(-1), .bool(true),
+                 .array([.string("typed")])])
+            XCTAssertFalse(typed.isError)
+
+            let outcome = await process.writeAs(path)
+            XCTAssertEqual(outcome, .written)
+
+            let state = try await process.request(
+                "nvim_exec_lua",
+                [.string("""
+                    return {vim.api.nvim_buf_get_name(0), vim.bo.modified,
+                            #vim.api.nvim_list_bufs()}
+                    """),
+                 .array([])])
+            let values = try XCTUnwrap(state.result.arrayValue)
+            XCTAssertEqual(values.count, 3)
+            XCTAssertEqual(values[0].stringValue, path)
+            XCTAssertEqual(values[1], .bool(false))
+            XCTAssertEqual(values[2].integer?.signed, 1)
+            XCTAssertEqual(try String(contentsOfFile: path, encoding: .utf8),
+                           "typed\n")
+        }
+    }
+
     /// Cmd-S while typing: the write covers the text just typed, and Neovim
     /// is left in Insert mode rather than dropped into Normal mode.
     func testSaveFromInsertModeWritesAndStaysInInsertMode() async throws {

@@ -363,7 +363,10 @@ extension NeovimProcess {
         }
     }
 
-    /// Force-writes the current buffer to a literal path.
+    /// Saves the current buffer as a literal path and edits it from then on,
+    /// overwriting a file already there. The buffer is renamed rather than
+    /// copied out, so the window goes on holding one document and a later
+    /// save writes the new file. See `write_as`.
     func writeAs(_ path: String) async -> WriteOutcome {
         // A blocked Neovim would never answer this request, and it is not
         // bounded: refusing keeps the caller from waiting forever.
@@ -503,14 +506,40 @@ extension NeovimProcess {
               return open
             end
 
+            -- Saves the current buffer as `path` and edits it from then on,
+            -- as a Save As does: `:saveas` renames the buffer, clears
+            -- 'modified', and detects the filetype from the new name.
+            --
+            -- It also leaves the name the buffer had behind in a buffer of
+            -- its own, holding the alternate file — `[No Name]` when the
+            -- document had no name yet. Nothing is editing that buffer, and
+            -- it would make one document look like two, so it is wiped.
+            -- Only a buffer this write created is touched, only under the
+            -- name it took over, and only while it is unloaded, unmodified,
+            -- and in no window.
             function _G.nvmm.write_as(path)
               local mods = {}
               if vim.fn.exists('#nvim.ui2#OptionSet') == 1 then
                 mods = {silent = true}
               end
-              vim.api.nvim_cmd({cmd = 'write', args = {path}, bang = true,
+              local old = vim.api.nvim_buf_get_name(0)
+              local existing = {}
+              for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+                existing[bufnr] = true
+              end
+
+              vim.api.nvim_cmd({cmd = 'saveas', args = {path}, bang = true,
                                 mods = mods,
                                 magic = {file = false, bar = false}}, {})
+
+              for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+                local info = not existing[bufnr]
+                  and vim.fn.getbufinfo(bufnr)[1]
+                if info and info.name == old and info.loaded == 0
+                   and info.changed == 0 and #info.windows == 0 then
+                  vim.api.nvim_buf_delete(bufnr, {force = false})
+                end
+              end
             end
 
             -- Inserts dropped text at the cursor and leaves it selected.
