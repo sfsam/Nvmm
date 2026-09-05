@@ -1316,6 +1316,35 @@ final class NeovimProcessTests: XCTestCase {
         }
     }
 
+    /// Cmd-S while typing: the write covers the text just typed, and Neovim
+    /// is left in Insert mode rather than dropped into Normal mode.
+    func testSaveFromInsertModeWritesAndStaysInInsertMode() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            let path = FileManager.default.temporaryDirectory
+                .appendingPathComponent("nvmm-save-\(UUID().uuidString)").path
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let named = try await process.request(
+                "nvim_buf_set_name", [.int(0), .string(path)])
+            XCTAssertFalse(named.isError)
+
+            await process.perform(.input("ihello"))
+            let typed = await waitForEditorState(
+                process, mode: .insert, line: "hello")
+            XCTAssertTrue(typed)
+
+            let allowed = await process.canSave()
+            XCTAssertTrue(allowed)
+            let outcome = await process.writeCurrentBuffer()
+            XCTAssertEqual(outcome, .written)
+
+            let mode = await process.mode()
+            XCTAssertEqual(mode, .insert)
+            let written = try String(contentsOfFile: path, encoding: .utf8)
+            XCTAssertEqual(written, "hello\n")
+        }
+    }
+
     func testUndoRedoReportsBoundariesAndPreservesInsertMode() async throws {
         try await withNvim { process in
             try await attachLinegridUI(process)

@@ -306,8 +306,16 @@ extension NeovimProcess {
 // MARK: - Saving
 
 extension NeovimProcess {
-    /// Writes the current buffer. Reports `.needsFilename` for an unnamed
-    /// buffer so the caller can run a save panel.
+    /// Writes the current buffer, leaving the mode as it was. Reports
+    /// `.needsFilename` for an unnamed buffer so the caller can run a save
+    /// panel.
+    ///
+    /// The mode is not reset first. A command issued over RPC runs against the
+    /// buffer as it stands — Insert mode has already applied every keystroke
+    /// to the buffer lines — and returns Neovim to whatever it was doing, so
+    /// saving mid-insert writes the text just typed and leaves the user
+    /// typing. The caller gates on `canSave()`, which refuses the modes that
+    /// would swallow the command, exactly as it does for `writeAs`.
     func writeCurrentBuffer() async -> WriteOutcome {
         // A successful write message can displace the mode indicator while
         // Neovim's own UI layer is active, leaving its command window expanded
@@ -316,7 +324,9 @@ extension NeovimProcess {
         guard await !isBlockedAwaitingInput() else { return .awaitingInput }
         let command =
             "if exists('#nvim.ui2#OptionSet') | silent write | else | write | endif"
-        return classifyWrite(await normalCommandResponse(command))
+        return classifyWrite(
+            await commandBounded("nvim_command", [.string(command)],
+                                 timeout: .seconds(2)))
     }
 
     /// Switches to a buffer and writes it. Used by the save prompts, which name
