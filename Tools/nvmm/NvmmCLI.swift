@@ -46,14 +46,9 @@ private struct CLIClient {
     }
 
     func send(_ request: CLIRequest) throws {
-        let encoded = try request.encodedLine(
+        let data = try request.encodedLine(
             maximumBytes: CLIProtocol.maximumRequestBytes)
-        if encoded.droppedEnvironment {
-            FileHandle.standardError.write(Data(
-                "nvmm: The environment is too large and was not sent.\n"
-                    .utf8))
-        }
-        try encoded.data.withUnsafeBytes { bytes in
+        try data.withUnsafeBytes { bytes in
             var offset = 0
             while offset < bytes.count {
                 let count = Darwin.write(descriptor,

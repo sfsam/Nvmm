@@ -20,8 +20,11 @@ import Darwin
 import Foundation
 
 nonisolated enum CLIProtocol {
-    static let version = 1
-    static let maximumRequestBytes = 256 << 10
+    // v2 added the required request environment.
+    static let version = 2
+    // Large enough for a request that carries a complete environment, with
+    // room for the growth JSON string escapes add.
+    static let maximumRequestBytes = 8 << 20
     static let maximumResponseBytes = 4 << 10
 
 #if DEBUG
@@ -165,8 +168,10 @@ nonisolated struct CLIRequest: Codable, Sendable, Equatable {
     var workingDirectory: String
     var forceNewWindow: Bool
     var wait: Bool
-    // The helper's environment, applied to the new window's nvim. Optional:
-    // a request from an older helper has no key and still decodes.
+    // The helper's environment, applied to the new window's nvim. A Swift
+    // optional so a v1 request still decodes and validation can name the
+    // version mismatch; v2 validation requires the field. An empty
+    // dictionary is a valid, intentionally empty environment.
     var environment: [String: String]? = nil
 
     func validate() throws {
@@ -177,37 +182,29 @@ nonisolated struct CLIRequest: Codable, Sendable, Equatable {
             throw CLIProtocolError.invalidWorkingDirectory
         }
         try CLIArguments.validateForwarded(arguments)
-        if let environment {
-            // A real environ cannot hold these shapes: `environ` splits each
-            // entry at the first `=`, and a C string cannot carry NUL.
-            for (key, value) in environment {
-                guard !key.isEmpty, !key.contains("="),
-                      !key.contains("\0"), !value.contains("\0") else {
-                    throw CLIProtocolError.invalidEnvironment
-                }
+        guard let environment else {
+            throw CLIProtocolError.missingEnvironment
+        }
+        // A real environ cannot hold these shapes: `environ` splits each
+        // entry at the first `=`, and a C string cannot carry NUL.
+        for (key, value) in environment {
+            guard !key.isEmpty, !key.contains("="),
+                  !key.contains("\0"), !value.contains("\0") else {
+                throw CLIProtocolError.invalidEnvironment
             }
         }
     }
 
     /// The request as one newline-terminated JSON line, at most
-    /// `maximumBytes` long. An oversized request drops its environment and
-    /// retries; a request that is still oversized throws.
-    func encodedLine(maximumBytes: Int) throws
-        -> (data: Data, droppedEnvironment: Bool) {
+    /// `maximumBytes` long. An oversized request is rejected whole: the
+    /// environment is never quietly removed to make the request fit.
+    func encodedLine(maximumBytes: Int) throws -> Data {
         var data = try JSONEncoder().encode(self)
         data.append(0x0a)
-        if data.count <= maximumBytes { return (data, false) }
-        guard environment != nil else {
+        guard data.count <= maximumBytes else {
             throw CLIProtocolError.oversizedRequest
         }
-        var trimmed = self
-        trimmed.environment = nil
-        var fallback = try JSONEncoder().encode(trimmed)
-        fallback.append(0x0a)
-        guard fallback.count <= maximumBytes else {
-            throw CLIProtocolError.oversizedRequest
-        }
-        return (fallback, true)
+        return data
     }
 
     var needsNewWindow: Bool {
@@ -246,6 +243,7 @@ nonisolated enum CLIProtocolError: Error, Sendable, Equatable {
     case invalidWorkingDirectory
     case invalidForwardedArguments
     case invalidEnvironment
+    case missingEnvironment
     case oversizedRequest
 
     var message: String {
@@ -258,6 +256,8 @@ nonisolated enum CLIProtocolError: Error, Sendable, Equatable {
             "The request contains an unsupported Neovim argument."
         case .invalidEnvironment:
             "The request environment contains an invalid entry."
+        case .missingEnvironment:
+            "The request does not contain an environment."
         case .oversizedRequest:
             "The request is too large."
         }

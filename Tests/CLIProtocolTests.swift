@@ -61,10 +61,13 @@ final class CLIProtocolTests: XCTestCase {
     }
 
     func testRequestRoundTripAndValidation() throws {
-        let request = CLIRequest(arguments: ["-c", "set number"],
+        var request = CLIRequest(arguments: ["-c", "set number"],
                                  files: ["new file"],
                                  workingDirectory: "/tmp",
                                  forceNewWindow: false, wait: true)
+        // An intentionally empty environment is valid; only a missing one
+        // is not.
+        request.environment = [:]
         let encoded = try JSONEncoder().encode(request)
         let decoded = try JSONDecoder().decode(CLIRequest.self, from: encoded)
 
@@ -120,9 +123,10 @@ final class CLIProtocolTests: XCTestCase {
         XCTAssertEqual(decoded, request)
     }
 
-    // A request from an older helper has no environment key. It must still
-    // decode and validate, so the field cannot be required.
-    func testRequestWithoutEnvironmentKeyStillDecodes() throws {
+    // A v1 request has no environment key. It must decode — the field is a
+    // Swift optional — so validation can name the version mismatch rather
+    // than fail with a decode error.
+    func testVersion1RequestDecodesButFailsValidation() throws {
         let json = """
         {"version": 1, "arguments": [], "files": [],
          "workingDirectory": "/tmp", "forceNewWindow": false, "wait": false}
@@ -130,7 +134,24 @@ final class CLIProtocolTests: XCTestCase {
         let decoded = try JSONDecoder().decode(CLIRequest.self,
                                                from: Data(json.utf8))
         XCTAssertNil(decoded.environment)
-        try decoded.validate()
+        XCTAssertThrowsError(try decoded.validate()) { error in
+            XCTAssertEqual(error as? CLIProtocolError, .incompatibleVersion)
+        }
+    }
+
+    // v2 requires the environment. Without this, a new helper talking to an
+    // old app would have the key silently ignored and report success while
+    // reproducing the stale-environment bug.
+    func testCurrentVersionRequestWithoutEnvironmentFailsValidation() throws {
+        let json = """
+        {"version": 2, "arguments": [], "files": [],
+         "workingDirectory": "/tmp", "forceNewWindow": false, "wait": false}
+        """
+        let decoded = try JSONDecoder().decode(CLIRequest.self,
+                                               from: Data(json.utf8))
+        XCTAssertThrowsError(try decoded.validate()) { error in
+            XCTAssertEqual(error as? CLIProtocolError, .missingEnvironment)
+        }
     }
 
     // A real environ cannot hold these shapes, so a request that does was
@@ -151,26 +172,19 @@ final class CLIProtocolTests: XCTestCase {
         }
     }
 
-    func testEncodedLineDropsOnlyAnOversizedEnvironment() throws {
+    // The environment is all-or-nothing: an oversized request is rejected,
+    // never sent with the environment quietly removed.
+    func testEncodedLineRejectsAnOversizedRequest() throws {
         var request = CLIRequest(
             arguments: [], files: [], workingDirectory: "/tmp",
             forceNewWindow: false, wait: false)
         request.environment = ["KEY": "value"]
 
-        let kept = try request.encodedLine(
+        let line = try request.encodedLine(
             maximumBytes: CLIProtocol.maximumRequestBytes)
-        XCTAssertFalse(kept.droppedEnvironment)
-        XCTAssertEqual(kept.data.last, 0x0a)
+        XCTAssertEqual(line.last, 0x0a)
 
         request.environment = ["BIG": String(repeating: "x", count: 512)]
-        let dropped = try request.encodedLine(maximumBytes: 256)
-        XCTAssertTrue(dropped.droppedEnvironment)
-        let decoded = try JSONDecoder().decode(
-            CLIRequest.self, from: dropped.data.dropLast())
-        XCTAssertNil(decoded.environment)
-
-        request.environment = nil
-        request.files = [String(repeating: "y", count: 512)]
         XCTAssertThrowsError(
             try request.encodedLine(maximumBytes: 256)) { error in
             XCTAssertEqual(error as? CLIProtocolError, .oversizedRequest)
