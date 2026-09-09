@@ -78,25 +78,23 @@ final class NeovimBundleTests: XCTestCase {
         XCTAssertEqual(arguments, ["--embed"])
     }
 
-    // A child environment with TERM comes from a terminal. Its PATH is
-    // already correct, and a login shell's profile could shadow it.
-    func testLaunchCommandWithTERMSpawnsNvimDirectly() {
-        let command = NeovimBundle.launchCommand(
-            nvimPath: "/opt/x/nvim", arguments: ["--embed"],
-            environment: ["TERM": "xterm-256color"])
-        XCTAssertEqual(command.path, "/opt/x/nvim")
-        XCTAssertEqual(command.argv, ["/opt/x/nvim", "--embed"])
-    }
-
-    func testLaunchCommandWithoutTERMUsesALoginShell() {
-        let command = NeovimBundle.launchCommand(
-            nvimPath: "/opt/x/nvim", arguments: ["--embed"],
-            environment: [:])
-        XCTAssertNotEqual(command.path, "/opt/x/nvim")
-        XCTAssertEqual(command.argv.count, 3)
-        XCTAssertTrue(command.argv[0].hasPrefix("-"))
-        XCTAssertEqual(command.argv[1], "-c")
-        XCTAssertTrue(command.argv[2].contains("'/opt/x/nvim'"))
+    // Any CLI environment — non-nil — spawns nvim directly with exactly that
+    // environment. A login shell would source the profile and change the
+    // environment the request just forwarded. TERM plays no part: a valid
+    // CLI environment can lack it (`env -i nvmm -N`).
+    func testLaunchCommandWithCLIEnvironmentSpawnsNvimDirectly() {
+        let environments: [[String: String]] = [
+            ["TERM": "xterm-256color"],
+            ["PATH": "/opt/project/bin:/usr/bin"],
+            [:],
+        ]
+        for environment in environments {
+            let command = NeovimBundle.launchCommand(
+                nvimPath: "/opt/x/nvim", arguments: ["--embed"],
+                environment: environment)
+            XCTAssertEqual(command.path, "/opt/x/nvim")
+            XCTAssertEqual(command.argv, ["/opt/x/nvim", "--embed"])
+        }
     }
 
     func testLoginShellCommandExecsNvimAsLoginShell() {

@@ -807,8 +807,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
             }
             let launch = NeovimBundle.launchCommand(
                 nvimPath: nvimPath, arguments: neovimArguments(),
-                environment: startupEnvironment
-                    ?? ProcessInfo.processInfo.environment)
+                environment: startupEnvironment)
             plan = .spawn(path: launch.path, argv: launch.argv,
                           directory: workingDirectory(),
                           environment: startupEnvironment)
@@ -873,11 +872,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
                 switch plan {
                 case .spawn(let path, let argv, let directory,
                             let environment):
-                    // PWD must name the real working directory. The
-                    // inherited value names the directory of the app's
-                    // first launch.
                     try await process.spawn(path: path, argv: argv,
-                                            env: ["PWD=\(directory)"],
                                             baseEnvironment: environment,
                                             workingDirectory: directory)
                 case .connect(let address):
