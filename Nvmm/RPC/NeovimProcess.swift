@@ -201,6 +201,9 @@ actor NeovimProcess {
 
     /// UI model, present once `uiAttach` has run. Redraw notifications feed it.
     private var ui: UIController?
+    /// This connection's RPC channel, used to isolate per-UI startup state.
+    private var channelID: UInt64?
+    private var startupActivationStarted = false
 
     /// Grid snapshots published on each flush. Each is a complete snapshot, so
     /// the stream keeps only the newest: a consumer that falls behind renders
@@ -799,8 +802,10 @@ actor NeovimProcess {
                     }
                 }
                 return
-            case "vimenter":
-                ui.vimenter()
+            case "startup_complete":
+                if let grid = ui.startupDidComplete() {
+                    gridsContinuation.yield(grid)
+                }
                 return
             case "progress":
                 if arguments.count == 1, case .map(let event) = arguments[0] {
@@ -981,9 +986,10 @@ extension NeovimProcess {
     ///
     /// Runs the startup transaction under one shared deadline:
     /// `nvim_get_api_info` → validate → `nvim_set_client_info` →
-    /// `nvim_ui_attach` → post-attach Lua setup, attaching only the options
-    /// Neovim supports. On success, redraw notifications feed the UI model and
-    /// flushed grids are published on `grids`.
+    /// pre-attach Lua setup → `nvim_ui_attach` → post-attach Lua setup,
+    /// attaching only the options Neovim supports. On success, redraw
+    /// notifications feed the UI model and flushed grids are published on
+    /// `grids`.
     func uiAttach(width: Int, height: Int, options: UIOptions,
                   timeout: Duration = .seconds(5)) async -> UIAttachResult {
         let controller = ui ?? UIController(
@@ -1003,6 +1009,7 @@ extension NeovimProcess {
 
         let (validation, capabilities) = validateAPIMetadata(api.result, requested: options)
         guard validation.status == .success else { return validation }
+        channelID = capabilities.channelID
 
         let clientOutcome = await requestWaiting(
             "nvim_set_client_info", clientInfoArguments(), until: deadline)
@@ -1023,20 +1030,20 @@ extension NeovimProcess {
                 recentFilesOutcome, String(localized: "Recent-files setup"))
         }
 
-        // Register the VimEnter signal before attaching, so it is in place
-        // before Neovim finishes startup. It lets the window hold its first
-        // paint until startup config (notably `guifont`) has been applied.
-        // Channel 0 broadcasts, reaching this UI without hard-coding a channel.
-        notify("nvim_command",
-               [.string("autocmd VimEnter * silent! call rpcnotify(0, 'vimenter')")])
-        // A UI connecting to an already-running Neovim has missed VimEnter (it
-        // fired during that Neovim's startup), so fire the signal now if
-        // startup is already complete. On a fresh `--embed` spawn this is a
-        // no-op:
-        // Neovim pauses before loading startup files until `nvim_ui_attach`, so
-        // `v:vim_did_enter` is still 0 here and only the autocmd above fires.
-        notify("nvim_command",
-               [.string("if v:vim_did_enter | call rpcnotify(0, 'vimenter') | endif")])
+        // Install this before attaching so it observes this channel's UIEnter.
+        // Neovim delays the event until after VimEnter during embedded startup,
+        // and fires it during attachment for an existing server.
+        let startupOutcome = await requestWaiting(
+            "nvim_exec_lua",
+            [.string(Self.startupAutocmdLua),
+             .array([.int(MPInteger(capabilities.channelID))])],
+            until: deadline)
+        guard case .response(let startup) = startupOutcome,
+              !startup.isError else {
+            await abandonGUIStartup(channelID: capabilities.channelID)
+            return attachFailure(
+                startupOutcome, String(localized: "Startup setup"))
+        }
 
         let attachOptions = supportedOptions(requested: options,
                                              supported: capabilities.uiOptions)
@@ -1044,6 +1051,7 @@ extension NeovimProcess {
                                      .int(MPInteger(height)), .map(attachOptions)]
         let attachOutcome = await requestWaiting("nvim_ui_attach", attachArgs, until: deadline)
         guard case .response(let attached) = attachOutcome, !attached.isError else {
+            await abandonGUIStartup(channelID: capabilities.channelID)
             return attachFailure(
                 attachOutcome, String(localized: "UI attachment"))
         }
@@ -1061,6 +1069,7 @@ extension NeovimProcess {
                 "nvim_exec_lua", [.string(lua), .array([])], until: deadline)
             guard case .response(let response) = outcome,
                   !response.isError else {
+                await abandonGUIStartup(channelID: capabilities.channelID)
                 return attachFailure(outcome, operation)
             }
         }
@@ -1068,6 +1077,46 @@ extension NeovimProcess {
         var result = validation
         result.status = .success
         return result
+    }
+
+    /// Lets the matching UIEnter hook schedule GUI configuration. Call this
+    /// only after input forwarding is ready, because ginit.vim may prompt.
+    func activateGUIStartup() async {
+        guard !startupActivationStarted else { return }
+        startupActivationStarted = true
+        guard let channelID else {
+            if let grid = ui?.startupDidComplete() {
+                gridsContinuation.yield(grid)
+            }
+            return
+        }
+        do {
+            let response = try await request(
+                "nvim_exec_lua",
+                [.string(Self.activateStartupLua),
+                 .array([.int(MPInteger(channelID))])])
+            if response.isError {
+                let detail = String(describing: response.error)
+                Log.rpc.error("Could not activate GUI startup: \(detail)")
+                if let grid = ui?.startupDidComplete() {
+                    gridsContinuation.yield(grid)
+                }
+            }
+        } catch {
+            Log.rpc.error("Could not activate GUI startup: \(error)")
+            if let grid = ui?.startupDidComplete() {
+                gridsContinuation.yield(grid)
+            }
+        }
+    }
+
+    private func abandonGUIStartup(channelID: UInt64) async {
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(250))
+        _ = await requestWaiting(
+            "nvim_exec_lua",
+            [.string(Self.cleanupStartupLua),
+             .array([.int(MPInteger(channelID))])],
+            until: deadline)
     }
 
     /// Reports the current buffer's name and edited state. Buffer and window
@@ -1127,6 +1176,112 @@ extension NeovimProcess {
         end
         vim.api.nvim_create_autocmd({'BufReadPost', 'BufWritePost'},
           {group=group, callback=notify})
+        """
+
+    /// Records this channel's UIEnter without doing work that could block the
+    /// nvim_ui_attach request. Activation later schedules GUI configuration.
+    private static let startupAutocmdLua = """
+        local channel = ...
+        local states = rawget(_G, '__nvmm_startup')
+        if not states then
+          states = {}
+          _G.__nvmm_startup = states
+        end
+        local state = {entered=false, activated=false, scheduled=false}
+        states[channel] = state
+        local group = vim.api.nvim_create_augroup(
+          'NvmmStartup' .. channel, {clear=true})
+        local function cleanup()
+          states[channel] = nil
+          pcall(vim.api.nvim_del_augroup_by_id, group)
+        end
+        local function echo_error(err)
+          local chunks = {{tostring(err), 'ErrorMsg'}}
+          if not pcall(vim.api.nvim_echo,
+              chunks, true, {_truncate=true}) then
+            pcall(vim.api.nvim_echo, chunks, true, {})
+          end
+        end
+        local function user_config_disabled()
+          for i, arg in ipairs(vim.v.argv) do
+            if arg == '--' then break end
+            if arg == '-u' then
+              local config = vim.v.argv[i + 1]
+              return config == 'NONE' or config == 'NORC'
+            end
+          end
+          return false
+        end
+        local function maybe_schedule()
+          if not state.entered or not state.activated
+             or state.scheduled then return end
+          state.scheduled = true
+          vim.schedule(function()
+            local function source_ginit()
+              local catch = string.format(
+                'lua local s=_G.__nvmm_startup[%d]; '
+                  .. 's.error=vim.v.exception; '
+                  .. 's.throwpoint=vim.v.throwpoint', channel)
+              if not user_config_disabled() then
+                vim.cmd('try\\nruntime! ginit.vim\\ncatch\\n'
+                  .. catch .. '\\nendtry')
+              end
+              local err = state.error
+              local point = state.throwpoint or ''
+              if err and point ~= '' then
+                err = err .. '\\n' .. point
+              end
+              if err then
+                echo_error(err)
+              end
+            end
+            local ok, err = pcall(source_ginit)
+            if not ok then echo_error(err) end
+            cleanup()
+            pcall(vim.cmd, 'redraw')
+            vim.rpcnotify(channel, 'startup_complete')
+          end)
+        end
+        state.activate = function()
+          state.activated = true
+          maybe_schedule()
+        end
+        vim.api.nvim_create_autocmd('UIEnter', {
+          group=group,
+          callback=function()
+            if vim.v.event.chan ~= channel then return false end
+            state.entered = true
+            maybe_schedule()
+            return true
+          end,
+        })
+        vim.api.nvim_create_autocmd('UILeave', {
+          group=group,
+          callback=function()
+            if vim.v.event.chan == channel and not state.scheduled then
+              cleanup()
+            end
+          end,
+        })
+        """
+
+    private static let cleanupStartupLua = """
+        local channel = ...
+        local states = rawget(_G, '__nvmm_startup')
+        if states then states[channel] = nil end
+        pcall(vim.api.nvim_del_augroup_by_name,
+          'NvmmStartup' .. channel)
+        """
+
+    /// Activates GUI startup only after the window is able to answer prompts.
+    private static let activateStartupLua = """
+        local channel = ...
+        local states = rawget(_G, '__nvmm_startup')
+        local state = states and states[channel]
+        -- Missing state means startup cannot source ginit.vim. Swift logs the
+        -- error and releases first paint so the window remains usable.
+        if not state then error('GUI startup state is missing') end
+        state.activate()
         """
 
     /// Points Neovim's `g:clipboard` provider at this UI, so the `+`/`*`

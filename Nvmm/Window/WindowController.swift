@@ -172,11 +172,10 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     /// that by opening another window need to be able to tell apart.
     var isAwaitingFirstShow: Bool { !hasShownWindow }
 
-    // The first paint is held until Neovim signals `VimEnter` (startup config,
-    // notably `guifont`, applied), so the window never appears at an interim
-    // font. `startupRelaxed` drops that requirement after a short fallback so a
-    // config that never reaches `VimEnter` still shows; `hasReceivedGrid` gates
-    // the relaxed show on there being something to draw.
+    // The first paint is held until GUI startup config, notably `guifont`, has
+    // been applied, so the window never appears at an interim font.
+    // `startupRelaxed` drops that requirement after a short fallback;
+    // `hasReceivedGrid` gates the relaxed show on having something to draw.
     private var startupRelaxed = false
     private var hasReceivedGrid = false
     private var startupTimeoutTask: Task<Void, Never>?
@@ -944,6 +943,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
             self.connectFallback = nil
             self.currentServerAddress = address
             self.startStartupTimeout()
+            Task { await process.activateGUIStartup() }
 
             for await grid in process.grids {
                 self.applyFontOptions(
@@ -1140,9 +1140,8 @@ final class WindowController: NSWindowController, NSWindowDelegate,
 
     // MARK: - Showing the window
 
-    /// Drops the `VimEnter` requirement after a short delay, so a session that
-    /// never reaches `VimEnter` still shows its window; if a grid has already
-    /// arrived it is shown at once, otherwise the next grid shows it.
+    /// Drops the startup-ready requirement after a short delay. If a grid has
+    /// already arrived it is shown at once; otherwise the next grid shows it.
     ///
     /// Cancellation ends the task rather than falling through it, so a window
     /// closed while it is still starting is never shown after the fact.

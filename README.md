@@ -37,6 +37,10 @@ Ordinary file opens reuse the best existing window. `-N`, `--wait`, or any suppo
 
 Supported options are shown by `nvmm --help`.
 
+## Neovim Configuration
+
+Nvmm loads Neovim's normal configuration, then sources `ginit.vim` after the UI enters and input forwarding is ready. GUI-only settings such as `guifont` can be placed there. Nvmm respects `--clean`, `-u NONE`, and `-u NORC`.
+
 ## Build
 
 No Apple Developer account is required. The checked-in signing configuration uses an ad-hoc signature by default.

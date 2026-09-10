@@ -78,6 +78,7 @@ nonisolated struct UIAttachResult: Sendable {
 
 /// The capabilities parsed from Neovim's API metadata.
 nonisolated struct APICapabilities: Sendable, Equatable {
+    var channelID: UInt64 = 0
     var version = APIVersion()
     var functions: [String] = []
     var uiOptions: [String] = []
@@ -94,6 +95,7 @@ private nonisolated let requiredAPIFunctions = [
 /// come from the map. Returns nil if the structure or required fields are missing.
 nonisolated func parseAPICapabilities(_ metadata: MPValue) -> APICapabilities? {
     guard case .array(let result) = metadata, result.count >= 2,
+          let channelID = result[0].integer?.unsigned,
           case .map = result[1],
           let versionValue = result[1].mapValue(for: .string("version")),
           case .map = versionValue,
@@ -108,6 +110,7 @@ nonisolated func parseAPICapabilities(_ metadata: MPValue) -> APICapabilities? {
     else { return nil }
 
     var capabilities = APICapabilities()
+    capabilities.channelID = channelID
     capabilities.version = APIVersion(major: major, minor: minor, patch: patch)
     for entry in functions {
         if case .map = entry, let name = entry.mapValue(for: .string("name"))?.stringValue {

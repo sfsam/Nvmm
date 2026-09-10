@@ -13,6 +13,16 @@ import XCTest
 import Darwin
 @testable import Nvmm
 
+private actor StartupGridProbe {
+    private(set) var hasDrawn = false
+    private(set) var startupGrid: Grid?
+
+    func record(_ grid: Grid) {
+        hasDrawn = true
+        if grid.startupComplete { startupGrid = grid }
+    }
+}
+
 final class NeovimProcessTests: XCTestCase {
 
     private struct TestIOError: Error {}
@@ -343,20 +353,6 @@ final class NeovimProcessTests: XCTestCase {
         return id
     }
 
-    private func readNotification(
-        _ fd: Int32, method: String,
-        unpacker: inout MessagePackUnpacker
-    ) throws {
-        let message = try readMessage(fd, unpacker: &unpacker)
-        guard let values = message.arrayValue, values.count == 3,
-              values[0].integer?.unsigned == 2,
-              values[1].stringValue == method,
-              values[2].arrayValue != nil else {
-            XCTFail("expected notification for \(method), got \(message)")
-            throw TestIOError()
-        }
-    }
-
     private func compatibleAPIMetadata() -> MPValue {
         let functions = [
             "nvim_set_client_info", "nvim_ui_attach", "nvim_exec_lua",
@@ -375,7 +371,7 @@ final class NeovimProcessTests: XCTestCase {
         return .array([.int(1), info])
     }
 
-    private func answerAttachPreamble(
+    private func answerAttachThroughRecentFiles(
         _ fd: Int32, unpacker: inout MessagePackUnpacker
     ) throws {
         var id = try readRequest(
@@ -389,10 +385,16 @@ final class NeovimProcessTests: XCTestCase {
         id = try readRequest(
             fd, method: "nvim_exec_lua", unpacker: &unpacker)
         try writeResponse(fd, id: id)
-        try readNotification(
-            fd, method: "nvim_command", unpacker: &unpacker)
-        try readNotification(
-            fd, method: "nvim_command", unpacker: &unpacker)
+    }
+
+    private func answerAttachPreamble(
+        _ fd: Int32, unpacker: inout MessagePackUnpacker
+    ) throws {
+        try answerAttachThroughRecentFiles(fd, unpacker: &unpacker)
+
+        var id = try readRequest(
+            fd, method: "nvim_exec_lua", unpacker: &unpacker)
+        try writeResponse(fd, id: id)
 
         id = try readRequest(
             fd, method: "nvim_ui_attach", unpacker: &unpacker)
@@ -580,6 +582,58 @@ final class NeovimProcessTests: XCTestCase {
         XCTAssertEqual(result.status, .rpcError)
         XCTAssertEqual(result.message, "Progress setup was rejected by Neovim")
         XCTAssertEqual(result.rpcError, setupError)
+        await process.disconnect()
+    }
+
+    func testUIAttachReportsStartupSetupError() async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+        var options = UIOptions()
+        options.extLinegrid = true
+
+        let attach = Task {
+            await process.uiAttach(width: 80, height: 24, options: options)
+        }
+        var unpacker = MessagePackUnpacker()
+        try answerAttachThroughRecentFiles(
+            pair.peer, unpacker: &unpacker)
+        let id = try readRequest(
+            pair.peer, method: "nvim_exec_lua", unpacker: &unpacker)
+        let setupError = MPValue.string("setup failed")
+        try writeResponse(pair.peer, id: id, error: setupError)
+
+        let result = await attach.value
+        XCTAssertEqual(result.status, .rpcError)
+        XCTAssertEqual(result.message,
+                       "Startup setup was rejected by Neovim")
+        XCTAssertEqual(result.rpcError, setupError)
+        await process.disconnect()
+    }
+
+    func testUIAttachTimesOutDuringStartupSetup() async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+        var options = UIOptions()
+        options.extLinegrid = true
+
+        let attach = Task {
+            await process.uiAttach(
+                width: 80, height: 24, options: options,
+                timeout: .seconds(1))
+        }
+        var unpacker = MessagePackUnpacker()
+        try answerAttachThroughRecentFiles(
+            pair.peer, unpacker: &unpacker)
+        _ = try readRequest(
+            pair.peer, method: "nvim_exec_lua", unpacker: &unpacker)
+
+        let result = await attach.value
+        XCTAssertEqual(result.status, .timedOut)
+        XCTAssertEqual(result.message, "Startup setup timed out")
         await process.disconnect()
     }
 
@@ -962,21 +1016,20 @@ final class NeovimProcessTests: XCTestCase {
     /// process waits there forever. `terminateChild` escalates to `SIGKILL`,
     /// which ends it whatever state it stopped in.
     ///
-    /// A private state directory keeps swap files out of the one the person
-    /// running the tests edits in, so a test that ends abruptly cannot leave
-    /// residue that later runs — or that person's own Neovim — trip over.
+    /// Private XDG directories keep the test from reading user configuration
+    /// and keep swap or state files from affecting later test or editor runs.
     private func withNvim(_ body: (NeovimProcess) async throws -> Void) async throws {
         guard let nvim = await MainActor.run(body: { NeovimBundle.executableURL }) else {
             throw XCTSkip("bundled nvim executable not available")
         }
-        let state = FileManager.default.temporaryDirectory
-            .appendingPathComponent("nvmm-state-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: state) }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nvmm-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
         let process = NeovimProcess()
         try await process.spawn(
             path: nvim.path,
             argv: [nvim.path, "--embed", "-n", "-u", "NONE", "-i", "NONE"],
-            env: ["XDG_STATE_HOME=\(state.path)"])
+            env: isolatedNvimEnvironment(root: root))
         do {
             try await body(process)
         } catch {
@@ -988,12 +1041,118 @@ final class NeovimProcessTests: XCTestCase {
         _ = await process.terminateChild()
     }
 
+    private func withConfiguredNvim(
+        initLua: String,
+        ginitVim: String?,
+        arguments: [String] = [],
+        _ body: (NeovimProcess) async throws -> Void
+    ) async throws {
+        guard let nvim = await MainActor.run(
+            body: { NeovimBundle.executableURL }) else {
+            throw XCTSkip("bundled nvim executable not available")
+        }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nvmm-config-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let config = root.appendingPathComponent("config/nvim")
+        try FileManager.default.createDirectory(
+            at: config, withIntermediateDirectories: true)
+        try Data(initLua.utf8).write(
+            to: config.appendingPathComponent("init.lua"))
+        if let ginitVim {
+            try Data(ginitVim.utf8).write(
+                to: config.appendingPathComponent("ginit.vim"))
+        }
+
+        let process = NeovimProcess()
+        let argv = [nvim.path, "--embed", "-n", "-i", "NONE"] + arguments
+        try await process.spawn(
+            path: nvim.path, argv: argv,
+            env: isolatedNvimEnvironment(root: root))
+        do {
+            try await body(process)
+        } catch {
+            await process.disconnect()
+            _ = await process.terminateChild()
+            throw error
+        }
+        await process.disconnect()
+        _ = await process.terminateChild()
+    }
+
+    private func withListeningConfiguredNvim(
+        ginitVim: String,
+        _ body: (String) async throws -> Void
+    ) async throws {
+        guard let nvim = await MainActor.run(
+            body: { NeovimBundle.executableURL }) else {
+            throw XCTSkip("bundled nvim executable not available")
+        }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nvmm-server-test-\(UUID().uuidString)")
+        let config = root.appendingPathComponent("config/nvim")
+        try FileManager.default.createDirectory(
+            at: config, withIntermediateDirectories: true)
+        try Data(ginitVim.utf8).write(
+            to: config.appendingPathComponent("ginit.vim"))
+        let socket = NSTemporaryDirectory()
+            + "nvmm-server-\(UUID().uuidString).sock"
+
+        var environment = ProcessInfo.processInfo.environment
+        for entry in isolatedNvimEnvironment(root: root) {
+            let pair = entry.split(
+                separator: "=", maxSplits: 1,
+                omittingEmptySubsequences: false)
+            environment[String(pair[0])] = String(pair[1])
+        }
+        let server = Process()
+        server.executableURL = nvim
+        server.arguments = ["--headless", "-n", "-i", "NONE",
+                            "--listen", socket]
+        server.environment = environment
+        try server.run()
+        defer {
+            if server.isRunning { kill(server.processIdentifier, SIGKILL) }
+            try? FileManager.default.removeItem(atPath: socket)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while !FileManager.default.fileExists(atPath: socket) {
+            if ContinuousClock.now >= deadline {
+                throw XCTSkip("nvim server socket did not appear")
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        try await body(socket)
+    }
+
+    private func isolatedNvimEnvironment(root: URL) -> [String] {
+        [
+            "EXINIT=",
+            "NVIM_APPNAME=nvim",
+            "VIMINIT=",
+            "XDG_CACHE_HOME=\(root.appendingPathComponent("cache").path)",
+            "XDG_CONFIG_HOME=\(root.appendingPathComponent("config").path)",
+            "XDG_CONFIG_DIRS=\(root.appendingPathComponent("config-dirs").path)",
+            "XDG_DATA_HOME=\(root.appendingPathComponent("data").path)",
+            "XDG_DATA_DIRS=\(root.appendingPathComponent("data-dirs").path)",
+            "XDG_STATE_HOME=\(root.appendingPathComponent("state").path)",
+        ]
+    }
+
     private func attachLinegridUI(_ process: NeovimProcess) async throws {
         var options = UIOptions()
         options.extLinegrid = true
         let result = await process.uiAttach(
             width: 80, height: 24, options: options)
-        guard result.status == .success else { throw TestIOError() }
+        guard result.status == .success else {
+            XCTFail(
+                "attach failed: \(result.status) \(result.message) "
+                    + "\(String(describing: result.rpcError))")
+            throw TestIOError()
+        }
+        await process.activateGUIStartup()
     }
 
     func testUIAttachCompletesRequiredLuaSetup() async throws {
@@ -1020,6 +1179,192 @@ final class NeovimProcessTests: XCTestCase {
             XCTAssertFalse(response.isError)
             XCTAssertEqual(response.result.arrayValue,
                            [.bool(true), .bool(true), .bool(true), .bool(true)])
+        }
+    }
+
+    func testGinitRunsAfterInitAndCommandAndSetsGuifont() async throws {
+        let initLua = """
+            vim.g.nvmm_startup_order = 'init'
+            vim.api.nvim_create_autocmd('VimEnter', {callback=function()
+              vim.g.nvmm_startup_order = vim.g.nvmm_startup_order .. ',vimenter'
+            end})
+            vim.api.nvim_create_autocmd('UIEnter', {callback=function()
+              vim.g.nvmm_startup_order = vim.g.nvmm_startup_order .. ',uienter'
+            end})
+            """
+        let ginitVim = """
+            let g:nvmm_startup_order .= ',ginit'
+            let g:nvmm_ginit_count = get(g:, 'nvmm_ginit_count', 0) + 1
+            set guifont=NvmmTestFont:h17
+            """
+        let command = "let g:nvmm_startup_order .= ',command'"
+
+        try await withConfiguredNvim(
+            initLua: initLua, ginitVim: ginitVim,
+            arguments: ["-c", command]
+        ) { process in
+            try await attachLinegridUI(process)
+            await process.activateGUIStartup()
+            let ready = await awaitStartupGrid(process.grids)
+            let finished = await waitUntilTrue(
+                process, "get(g:, 'nvmm_ginit_count', 0) == 1")
+            XCTAssertTrue(finished)
+            XCTAssertEqual(ready?.guifont, "NvmmTestFont:h17")
+
+            let order = try await process.request(
+                "nvim_eval", [.string("g:nvmm_startup_order")])
+            let font = try await process.request(
+                "nvim_get_option_value",
+                [.string("guifont"), .map([])])
+            XCTAssertEqual(
+                order.result.stringValue,
+                "init,command,vimenter,uienter,ginit")
+            XCTAssertEqual(font.result.stringValue, "NvmmTestFont:h17")
+        }
+    }
+
+    func testMissingGinitDoesNotChangeStartup() async throws {
+        try await withConfiguredNvim(
+            initLua: "vim.g.nvmm_init_ran = true", ginitVim: nil
+        ) { process in
+            try await attachLinegridUI(process)
+            let finished = await waitUntilTrue(
+                process,
+                "v:vim_did_enter && get(g:, 'nvmm_init_ran', v:false)")
+            XCTAssertTrue(finished)
+        }
+    }
+
+    func testGinitErrorIsReportedWithoutStoppingStartup() async throws {
+        let ginitVim = """
+            let g:nvmm_ginit_ran = 1
+            throw 'broken-ginit-marker'
+            """
+        try await withConfiguredNvim(
+            initLua: "", ginitVim: ginitVim
+        ) { process in
+            try await attachLinegridUI(process)
+            let finished = await waitUntilTrue(
+                process, "v:vim_did_enter && get(g:, 'nvmm_ginit_ran', 0)")
+            let reported = await waitUntilTrue(
+                process,
+                "execute('messages') =~# 'broken-ginit-marker'")
+            let located = await waitUntilTrue(
+                process,
+                "execute('messages') =~# 'ginit.vim, line 2'")
+            XCTAssertTrue(finished)
+            XCTAssertTrue(reported)
+            XCTAssertTrue(located)
+        }
+    }
+
+    func testDisabledConfigurationDoesNotSourceUserGinit() async throws {
+        let ginitVim = "let g:nvmm_ginit_ran = 1"
+        let argumentSets = [["--clean"], ["-u", "NONE"], ["-u", "NORC"]]
+        for arguments in argumentSets {
+            try await withConfiguredNvim(
+                initLua: "", ginitVim: ginitVim,
+                arguments: arguments
+            ) { process in
+                try await attachLinegridUI(process)
+                let finished = await waitUntilTrue(process, "v:vim_did_enter")
+                XCTAssertTrue(finished, "arguments: \(arguments)")
+                let response = try await process.request(
+                    "nvim_eval", [.string("exists('g:nvmm_ginit_ran')")])
+                XCTAssertEqual(response.result.integer?.signed, 0,
+                               "arguments: \(arguments)")
+            }
+        }
+    }
+
+    func testPromptingGinitDoesNotBlockRemoteStartup() async throws {
+        let ginitVim = """
+            let g:nvmm_prompt_answer = input('Nvmm prompt: ')
+            let g:nvmm_prompt_done = 1
+            """
+        try await withListeningConfiguredNvim(
+            ginitVim: ginitVim
+        ) { socket in
+            let process = NeovimProcess()
+            try await process.connect(socket)
+
+            var options = UIOptions()
+            options.extLinegrid = true
+            let result = await process.uiAttach(
+                width: 80, height: 24, options: options)
+            XCTAssertEqual(result.status, .success)
+            await process.activateGUIStartup()
+
+            // `input()` services input notifications but not ordinary RPC
+            // requests, so give its prompt time to enter the blocking loop.
+            try await Task.sleep(for: .milliseconds(100))
+            await process.perform(.input("answer<CR>"))
+            let finished = await waitUntilTrue(
+                process,
+                "get(g:, 'nvmm_prompt_done', 0)"
+                    + " && g:nvmm_prompt_answer ==# 'answer'")
+            XCTAssertTrue(finished)
+            await process.disconnect()
+        }
+    }
+
+    func testConcurrentUIsRunIndependentGUIStartup() async throws {
+        let ginitVim = """
+            let g:nvmm_ginit_count = get(g:, 'nvmm_ginit_count', 0) + 1
+            """
+        try await withListeningConfiguredNvim(
+            ginitVim: ginitVim
+        ) { socket in
+            let first = NeovimProcess()
+            let second = NeovimProcess()
+            try await first.connect(socket)
+            try await second.connect(socket)
+
+            var options = UIOptions()
+            options.extLinegrid = true
+            async let firstResult = first.uiAttach(
+                width: 80, height: 24, options: options)
+            async let secondResult = second.uiAttach(
+                width: 80, height: 24, options: options)
+            let results = await [firstResult, secondResult]
+            XCTAssertTrue(results.allSatisfy { $0.status == .success })
+
+            let secondProbe = StartupGridProbe()
+            let observeSecond = Task {
+                for await grid in second.grids {
+                    await secondProbe.record(grid)
+                }
+            }
+            await first.perform(.input("iX<Esc>"))
+            let drawDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while await !secondProbe.hasDrawn,
+                  ContinuousClock.now < drawDeadline {
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            let secondDrawn = await secondProbe.hasDrawn
+            XCTAssertTrue(secondDrawn)
+
+            await first.activateGUIStartup()
+            let firstReady = await awaitStartupGrid(first.grids)
+            XCTAssertNotNil(firstReady)
+            try await Task.sleep(for: .milliseconds(200))
+            let secondEarly = await secondProbe.startupGrid
+            XCTAssertNil(secondEarly)
+
+            await second.activateGUIStartup()
+            let readyDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while await secondProbe.startupGrid == nil,
+                  ContinuousClock.now < readyDeadline {
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            let secondReady = await secondProbe.startupGrid
+            XCTAssertNotNil(secondReady)
+            observeSecond.cancel()
+            let ranTwice = await waitUntilTrue(
+                first, "get(g:, 'nvmm_ginit_count', 0) == 2")
+            XCTAssertTrue(ranTwice)
+            await first.disconnect()
+            await second.disconnect()
         }
     }
 
@@ -1101,6 +1446,26 @@ final class NeovimProcessTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(25))
         }
         return false
+    }
+
+    private func awaitStartupGrid(
+        _ stream: AsyncStream<Grid>, timeout: Duration = .seconds(2)
+    ) async -> Grid? {
+        await withTaskGroup(of: Grid?.self) { group in
+            group.addTask {
+                for await grid in stream where grid.startupComplete {
+                    return grid
+                }
+                return nil
+            }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                return nil
+            }
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result
+        }
     }
 
     /// Puts Neovim into the block every one of these cases starts from: `q`
@@ -1517,4 +1882,3 @@ final class NeovimProcessTests: XCTestCase {
         }
     }
 }
-

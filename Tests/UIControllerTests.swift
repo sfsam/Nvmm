@@ -642,7 +642,7 @@ final class UIControllerTests: XCTestCase {
 
     // MARK: Startup
 
-    func testFlushMarksStartupCompleteOnlyAfterVimenter() {
+    func testFlushMarksStartupCompleteOnlyAfterReadySignal() {
         let controller = UIController()
         let flush: MPValue = ["flush", []]
 
@@ -650,10 +650,19 @@ final class UIControllerTests: XCTestCase {
         XCTAssertEqual(before.count, 1)
         XCTAssertFalse(before[0].startupComplete)
 
-        controller.vimenter()
+        controller.startupDidComplete()
         let after = controller.redraw([flush])
         XCTAssertEqual(after.count, 1)
         XCTAssertTrue(after[0].startupComplete)
+    }
+
+    func testStartupCompletionDoesNotCreateAnEmptyGrid() {
+        let controller = UIController()
+
+        XCTAssertNil(controller.startupDidComplete())
+        let grids = controller.redraw([["flush", []]])
+        XCTAssertEqual(grids.count, 1)
+        XCTAssertTrue(grids[0].startupComplete)
     }
 
     // MARK: Handoff
@@ -872,6 +881,7 @@ final class UIControllerTests: XCTestCase {
             await process.disconnect()
             return XCTFail("attach failed: \(result.status) \(result.message)")
         }
+        await process.activateGUIStartup()
 
         _ = try await process.request("nvim_input", [.string("ihello")])
         let state = await awaitFirst(
@@ -953,6 +963,7 @@ final class UIControllerTests: XCTestCase {
             await process.disconnect()
             return XCTFail("attach failed: \(result.status) \(result.message)")
         }
+        await process.activateGUIStartup()
 
         _ = try await process.request("nvim_input", [.string("ihello")])
         let grid = await awaitFirst(
@@ -971,9 +982,8 @@ final class UIControllerTests: XCTestCase {
             throw XCTSkip("bundled nvim executable not available")
         }
 
-        // A headless server completes startup — firing VimEnter — without a UI,
-        // so a UI connecting afterward has missed VimEnter. This exercises the
-        // connect path that latches `startupComplete` from `v:vim_did_enter`.
+        // A headless server has already completed VimEnter. This exercises the
+        // later UIEnter and GUI-startup path used by a connected UI.
         let socket = NSTemporaryDirectory() + "nvmm-connect-\(UUID().uuidString).sock"
         let server = Process()
         server.executableURL = URL(fileURLWithPath: nvim.path)
@@ -1011,6 +1021,7 @@ final class UIControllerTests: XCTestCase {
             await process.disconnect()
             return XCTFail("attach failed: \(result.status) \(result.message)")
         }
+        await process.activateGUIStartup()
 
         _ = try await process.request("nvim_input", [.string("ihello")])
         let grid = await awaitFirst(

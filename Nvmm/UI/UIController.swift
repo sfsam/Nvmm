@@ -95,8 +95,8 @@ nonisolated final class UIController {
     private(set) var guifont = ""
     private(set) var guifontwide = ""
     private(set) var linespace = 0
-    // Set once Neovim fires `VimEnter`; stamped onto each flushed snapshot.
-    private(set) var vimentered = false
+    // Set once GUI startup configuration is ready for the first paint.
+    private(set) var startupReady = false
     private(set) var uiOptions = UIOptions()
     private(set) var viewport = ViewportState()
     private(set) var handoff: UIHandoff?
@@ -666,7 +666,7 @@ nonisolated final class UIController {
         writing.guifontwide = guifontwide
         writing.linespace = linespace
         writing.viewport = viewport
-        writing.startupComplete = vimentered
+        writing.startupComplete = startupReady
         globalGrid = writing
         return globalGrid
     }
@@ -746,9 +746,13 @@ nonisolated final class UIController {
         return percent
     }
 
-    /// Records that Neovim has fired `VimEnter`, so subsequent snapshots are
-    /// marked startup-complete.
-    func vimenter() { vimentered = true }
+    /// Marks GUI startup complete and returns a drawable first-paint snapshot.
+    @discardableResult
+    func startupDidComplete() -> Grid? {
+        startupReady = true
+        guard writing.drawTick > 0 else { return nil }
+        return flush()
+    }
 
     /// Updates the current buffer state.
     func setDocumentState(_ value: DocumentState) {

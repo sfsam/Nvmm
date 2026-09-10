@@ -235,9 +235,9 @@ nonisolated struct Grid: Sendable {
     /// (`win_viewport`), carried on the snapshot so the window's scrollbar
     /// tracks the viewport in flush order.
     var viewport = ViewportState()
-    /// True once Neovim has fired `VimEnter`, so startup config (including the
-    /// final font options) has been applied. The window holds its first paint
-    /// until a snapshot with this set, so it never shows an interim font.
+    /// True once GUI startup config, including the final font options, has been
+    /// applied. The window holds its first paint until a snapshot with this
+    /// set, so it never shows an interim font.
     var startupComplete = false
 
     init() {
