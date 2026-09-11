@@ -61,10 +61,13 @@ final class CLIProtocolTests: XCTestCase {
     }
 
     func testRequestRoundTripAndValidation() throws {
-        let request = CLIRequest(arguments: ["-c", "set number"],
+        var request = CLIRequest(arguments: ["-c", "set number"],
                                  files: ["new file"],
                                  workingDirectory: "/tmp",
                                  forceNewWindow: false, wait: true)
+        // An intentionally empty environment is valid; only a missing one
+        // is not.
+        request.environment = [:]
         let encoded = try JSONEncoder().encode(request)
         let decoded = try JSONDecoder().decode(CLIRequest.self, from: encoded)
 
@@ -105,6 +108,86 @@ final class CLIProtocolTests: XCTestCase {
         XCTAssertThrowsError(try request.validate()) { error in
             XCTAssertEqual(error as? CLIProtocolError,
                            .invalidForwardedArguments)
+        }
+    }
+
+    func testRequestCarriesAndValidatesEnvironment() throws {
+        var request = CLIRequest(
+            arguments: [], files: [], workingDirectory: "/tmp",
+            forceNewWindow: false, wait: false)
+        request.environment = ["PATH": "/usr/bin", "EMPTY": ""]
+        try request.validate()
+
+        let data = try JSONEncoder().encode(request)
+        let decoded = try JSONDecoder().decode(CLIRequest.self, from: data)
+        XCTAssertEqual(decoded, request)
+    }
+
+    // A v1 request has no environment key. It must decode — the field is a
+    // Swift optional — so validation can name the version mismatch rather
+    // than fail with a decode error.
+    func testVersion1RequestDecodesButFailsValidation() throws {
+        let json = """
+        {"version": 1, "arguments": [], "files": [],
+         "workingDirectory": "/tmp", "forceNewWindow": false, "wait": false}
+        """
+        let decoded = try JSONDecoder().decode(CLIRequest.self,
+                                               from: Data(json.utf8))
+        XCTAssertNil(decoded.environment)
+        XCTAssertThrowsError(try decoded.validate()) { error in
+            XCTAssertEqual(error as? CLIProtocolError, .incompatibleVersion)
+        }
+    }
+
+    // v2 requires the environment. Without this, a new helper talking to an
+    // old app would have the key silently ignored and report success while
+    // reproducing the stale-environment bug.
+    func testCurrentVersionRequestWithoutEnvironmentFailsValidation() throws {
+        let json = """
+        {"version": 2, "arguments": [], "files": [],
+         "workingDirectory": "/tmp", "forceNewWindow": false, "wait": false}
+        """
+        let decoded = try JSONDecoder().decode(CLIRequest.self,
+                                               from: Data(json.utf8))
+        XCTAssertThrowsError(try decoded.validate()) { error in
+            XCTAssertEqual(error as? CLIProtocolError, .missingEnvironment)
+        }
+    }
+
+    // A real environ cannot hold these shapes, so a request that does was
+    // not built by the helper.
+    func testRequestRejectsMalformedEnvironmentEntries() {
+        let bad: [[String: String]] = [
+            ["": "value"], ["A=B": "value"],
+            ["A\0B": "value"], ["KEY": "a\0b"],
+        ]
+        for environment in bad {
+            var request = CLIRequest(
+                arguments: [], files: [], workingDirectory: "/tmp",
+                forceNewWindow: false, wait: false)
+            request.environment = environment
+            XCTAssertThrowsError(try request.validate()) { error in
+                XCTAssertEqual(error as? CLIProtocolError, .invalidEnvironment)
+            }
+        }
+    }
+
+    // The environment is all-or-nothing: an oversized request is rejected,
+    // never sent with the environment quietly removed.
+    func testEncodedLineRejectsAnOversizedRequest() throws {
+        var request = CLIRequest(
+            arguments: [], files: [], workingDirectory: "/tmp",
+            forceNewWindow: false, wait: false)
+        request.environment = ["KEY": "value"]
+
+        let line = try request.encodedLine(
+            maximumBytes: CLIProtocol.maximumRequestBytes)
+        XCTAssertEqual(line.last, 0x0a)
+
+        request.environment = ["BIG": String(repeating: "x", count: 512)]
+        XCTAssertThrowsError(
+            try request.encodedLine(maximumBytes: 256)) { error in
+            XCTAssertEqual(error as? CLIProtocolError, .oversizedRequest)
         }
     }
 

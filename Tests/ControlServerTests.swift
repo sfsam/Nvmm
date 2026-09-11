@@ -22,9 +22,10 @@ final class ControlServerTests: XCTestCase {
         }
         defer { server.stop() }
 
-        let request = CLIRequest(arguments: [], files: ["new-file"],
+        var request = CLIRequest(arguments: [], files: ["new-file"],
                                  workingDirectory: "/tmp",
                                  forceNewWindow: false, wait: true)
+        request.environment = [:]
         let responses = try await Self.exchangeAsync(
             request, path: endpoint.socketPath)
 
@@ -40,9 +41,10 @@ final class ControlServerTests: XCTestCase {
         }
         defer { server.stop() }
 
-        let request = CLIRequest(arguments: ["--headless"], files: [],
+        var request = CLIRequest(arguments: ["--headless"], files: [],
                                  workingDirectory: "/tmp",
                                  forceNewWindow: false, wait: false)
+        request.environment = [:]
         let responses = try await Self.exchangeAsync(
             request, path: endpoint.socketPath)
 
@@ -310,9 +312,11 @@ final class ControlServerTests: XCTestCase {
     private nonisolated static func request(
         wait: Bool = false
     ) -> CLIRequest {
-        CLIRequest(arguments: [], files: ["new-file"],
-                   workingDirectory: "/tmp",
-                   forceNewWindow: false, wait: wait)
+        var request = CLIRequest(arguments: [], files: ["new-file"],
+                                 workingDirectory: "/tmp",
+                                 forceNewWindow: false, wait: wait)
+        request.environment = [:]
+        return request
     }
 
     private nonisolated static func exchange(

@@ -119,6 +119,39 @@ final class SpawnTests: XCTestCase {
         XCTAssertEqual(entries, ["\(key)=\(replacement)"])
     }
 
+    /// A base environment replaces the parent environment completely, and an
+    /// `env` entry still overrides the base.
+    func testBaseEnvironmentReplacesTheParentEnvironment() async throws {
+        // HOME is exported by the parent; its absence from the child proves
+        // the base replaced the parent environment rather than merged in.
+        XCTAssertNotNil(ProcessInfo.processInfo.environment["HOME"])
+        let output = Spawn.openPipe()
+        XCTAssertEqual(output.error, 0)
+        defer { close(output.pipe.readEnd) }
+        let result = Spawn.spawn(
+            path: "/usr/bin/env", argv: ["/usr/bin/env"],
+            env: ["OVERRIDE=b"],
+            base: ["ONLY": "a", "OVERRIDE": "a"],
+            workingDirectory: nil,
+            streams: Spawn.Streams(output: output.pipe.writeEnd))
+        close(output.pipe.writeEnd)
+        XCTAssertEqual(result.error, 0)
+
+        var reported = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = read(output.pipe.readEnd, &buffer, buffer.count)
+            if count <= 0 { break }
+            reported.append(contentsOf: buffer[0..<count])
+        }
+        let termination = await Spawn.wait(forChild: result.pid)
+        XCTAssertEqual(termination, .exited(status: 0))
+
+        let entries = Set(String(decoding: reported, as: UTF8.self)
+            .split(separator: "\n").map(String.init))
+        XCTAssertEqual(entries, ["ONLY=a", "OVERRIDE=b"])
+    }
+
     func testParsesUnixAndTCPServerAddresses() {
         XCTAssertEqual(parseRPCAddress("/tmp/nvim.sock"),
                        .unix(path: "/tmp/nvim.sock"))
