@@ -156,9 +156,11 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     private let commands: AsyncStream<NvimCommand>
     private let commandsContinuation: AsyncStream<NvimCommand>.Continuation
 
-    // True once the UI is attached; gates resize and focus forwarding so events
-    // during initial layout do not reach Neovim before it is listening.
+    // True once UI setup finishes. An earlier visible startup prompt separately
+    // permits resize forwarding because its redraw proves the UI is attached.
     private var isReady = false
+    private var startupInputVisible = false
+    private var startupResizePending = false
     private var lastGridSize = GridSize(width: 0, height: 0)
 
     // The window is shown only once the first grid is ready, so its first paint
@@ -783,6 +785,8 @@ final class WindowController: NSWindowController, NSWindowDelegate,
 
     private func startNeovim() {
         startHiddenWindowBackstop()
+        startupInputVisible = false
+        startupResizePending = false
 
         let plan: LaunchPlan
         switch source {
@@ -902,6 +906,16 @@ final class WindowController: NSWindowController, NSWindowDelegate,
                 return
             }
 
+            // Redraws can carry a startup prompt while an attach or setup
+            // request is waiting for input. Keep one consumer alive throughout
+            // startup so that prompt can be shown and answered.
+            let gridTask = Task { [weak self] in
+                for await grid in process.grids {
+                    await self?.apply(grid, from: process)
+                }
+            }
+            defer { gridTask.cancel() }
+
             var options = UIOptions()
             options.extLinegrid = true
             let result = await process.uiAttach(
@@ -937,6 +951,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
 
             guard let self else { return }
             self.isReady = true
+            self.startupResizePending = false
             // The connection is up, so a later drop is a real disconnect, not a
             // handoff that failed to connect.
             self.lastHandoffKind = nil
@@ -945,25 +960,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
             self.startStartupTimeout()
             Task { await process.activateGUIStartup() }
 
-            for await grid in process.grids {
-                self.applyFontOptions(
-                    guifont: grid.guifont,
-                    guifontwide: grid.guifontwide,
-                    linespace: grid.linespace)
-                self.applyBackground(grid.defaultBackground)
-                self.gridView.setGrid(grid)
-                self.scrollerController.update(
-                    topline: grid.viewport.topline,
-                    botline: grid.viewport.botline,
-                    lineCount: grid.viewport.lineCount)
-                self.hasReceivedGrid = true
-                if !self.hasShownWindow, grid.startupComplete || self.startupRelaxed {
-                    self.showInitialWindow()
-                }
-                self.currentTitle = grid.title
-                if self.liveResizeDepth == 0 { self.window?.title = self.currentTitle }
-                self.reconcileWindowSize(to: grid.size)
-            }
+            await gridTask.value
 
             // The grid stream ends when Neovim disconnects. If Neovim asked
             // for a handoff (`:restart`/`:connect`) before closing, reconnect
@@ -1139,6 +1136,44 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     }
 
     // MARK: - Showing the window
+
+    /// Applies a flushed grid. Normal first paint still waits for GUI startup;
+    /// only a Neovim input wait may reveal an earlier grid, because the user
+    /// must be able to answer it before startup can continue.
+    private func apply(_ grid: Grid, from process: NeovimProcess) async {
+        guard self.process === process else { return }
+        applyFontOptions(
+            guifont: grid.guifont,
+            guifontwide: grid.guifontwide,
+            linespace: grid.linespace)
+        applyBackground(grid.defaultBackground)
+        gridView.setGrid(grid)
+        scrollerController.update(
+            topline: grid.viewport.topline,
+            botline: grid.viewport.botline,
+            lineCount: grid.viewport.lineCount)
+        hasReceivedGrid = true
+
+        var showsInput = grid.showsInputPrompt
+        if !showsInput, !hasShownWindow, !isReady {
+            showsInput = await process.isBlockedAwaitingInput()
+            if !showsInput {
+                showsInput = await process.hasPendingStartupPrompt()
+            }
+        }
+        guard self.process === process else { return }
+        if showsInput { startupInputVisible = true }
+        let shouldShow = grid.startupComplete || startupRelaxed || showsInput
+        if !hasShownWindow, shouldShow { showInitialWindow() }
+
+        currentTitle = grid.title
+        if liveResizeDepth == 0 { window?.title = currentTitle }
+        if startupResizePending {
+            if grid.size == lastGridSize { startupResizePending = false }
+        } else {
+            reconcileWindowSize(to: grid.size)
+        }
+    }
 
     /// Drops the startup-ready requirement after a short delay. If a grid has
     /// already arrived it is shown at once; otherwise the next grid shows it.
@@ -1336,10 +1371,11 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     /// where the layout changed under a window that cannot itself resize — in
     /// full screen — rather than the usual way round.
     private func resizeGridToFitWindow() {
-        guard isReady else { return }
+        guard isReady || startupInputVisible else { return }
         let size = gridView.desiredGridSize
         guard size.width >= 1, size.height >= 1, size != lastGridSize else { return }
         lastGridSize = size
+        if !isReady { startupResizePending = true }
         enqueue(.resize(width: size.width, height: size.height))
     }
 
@@ -1590,7 +1626,9 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     func windowDidResize(_ notification: Notification) {
         // A scrollbar animation resizes the window around a grid that is being
         // held at its current size, so there is nothing to forward.
-        guard isReady, !isTogglingScrollbar else { return }
+        guard (isReady || startupInputVisible), !isTogglingScrollbar else {
+            return
+        }
         let size = gridView.desiredGridSize
         // Show the grid size in the title bar while a live resize is in progress;
         // the real title is restored when the resize ends.
@@ -1599,6 +1637,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         }
         guard size.width >= 1, size.height >= 1, size != lastGridSize else { return }
         lastGridSize = size
+        if !isReady { startupResizePending = true }
         enqueue(.resize(width: size.width, height: size.height))
         if liveResizeDepth == 0 { saveFrame() }
     }
@@ -1625,7 +1664,8 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     /// Snaps the window so the grid view is exactly its grid's size, trimming
     /// any sub-cell strip a fractional cell size left after a resize.
     private func snapWindowToGrid() {
-        guard isReady, let window else { return }
+        guard isReady || startupInputVisible,
+              !startupResizePending, let window else { return }
         let desired = gridView.desiredFrameSize
         guard desired.width > 0, desired.height > 0,
               gridView.frame.size != desired else { return }

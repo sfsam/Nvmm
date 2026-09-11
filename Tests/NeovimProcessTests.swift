@@ -23,6 +23,32 @@ private actor StartupGridProbe {
     }
 }
 
+private func awaitGrid(
+    _ stream: AsyncStream<Grid>, containing needles: [String],
+    timeout: Duration = .seconds(2)
+) async -> Grid? {
+    await withTaskGroup(of: Grid?.self) { group in
+        group.addTask {
+            for await grid in stream {
+                let text = (0..<grid.size.height).map { row in
+                    (0..<grid.size.width).map {
+                        grid.cell(row, $0).text
+                    }.joined()
+                }.joined(separator: "\n")
+                if needles.allSatisfy({ text.contains($0) }) { return grid }
+            }
+            return nil
+        }
+        group.addTask {
+            try? await Task.sleep(for: timeout)
+            return nil
+        }
+        let result = await group.next() ?? nil
+        group.cancelAll()
+        return result
+    }
+}
+
 final class NeovimProcessTests: XCTestCase {
 
     private struct TestIOError: Error {}
@@ -1179,6 +1205,111 @@ final class NeovimProcessTests: XCTestCase {
             XCTAssertFalse(response.isError)
             XCTAssertEqual(response.result.arrayValue,
                            [.bool(true), .bool(true), .bool(true), .bool(true)])
+        }
+    }
+
+    func testInitLuaErrorCanBeAnsweredDuringUISetup() async throws {
+        try await withConfiguredNvim(
+            initLua: "\n\n\n\n\n\n\n\n#", ginitVim: nil
+        ) { process in
+            var options = UIOptions()
+            options.extLinegrid = true
+            let errorGrid = Task {
+                await awaitGrid(
+                    process.grids,
+                    containing: ["E5112", "init.lua", ":9"])
+            }
+            let attach = Task {
+                await process.uiAttach(
+                    width: 80, height: 24, options: options,
+                    timeout: .seconds(1))
+            }
+
+            let renderedError = await errorGrid.value
+            try await Task.sleep(for: .milliseconds(1_100))
+            let blocked = await process.isBlockedAwaitingInput()
+            XCTAssertNotNil(renderedError)
+            XCTAssertTrue(blocked)
+            await process.perform(.input("<CR>"))
+
+            let result = await attach.value
+            XCTAssertEqual(result.status, .success)
+            await process.activateGUIStartup()
+            let ready = await awaitStartupGrid(process.grids)
+            XCTAssertNotNil(ready)
+        }
+    }
+
+    func testRemoteUIEnterPromptCanOutlastAttachDeadline() async throws {
+        try await withListeningConfiguredNvim(ginitVim: "") { socket in
+            let process = NeovimProcess()
+            try await process.connect(socket)
+            let hook = """
+                vim.api.nvim_create_autocmd('UIEnter', {once=true,
+                  callback=function()
+                    vim.fn.input('remote-uienter-marker: ')
+                  end})
+                """
+            let response = try await process.request(
+                "nvim_exec_lua", [.string(hook), .array([])])
+            XCTAssertFalse(response.isError)
+
+            var options = UIOptions()
+            options.extLinegrid = true
+            let promptGrid = Task {
+                await awaitGrid(
+                    process.grids,
+                    containing: ["remote-uienter-marker"])
+            }
+            let attach = Task {
+                await process.uiAttach(
+                    width: 80, height: 24, options: options,
+                    timeout: .seconds(1))
+            }
+
+            let renderedPrompt = await promptGrid.value
+            XCTAssertNotNil(renderedPrompt)
+            try await Task.sleep(for: .milliseconds(1_100))
+            let promptPending = await process.hasPendingStartupPrompt()
+            XCTAssertTrue(promptPending)
+            await process.perform(.input("answer<CR>"))
+
+            let result = await attach.value
+            XCTAssertEqual(result.status, .success)
+            let promptFinished = await process.hasPendingStartupPrompt()
+            XCTAssertFalse(promptFinished)
+            await process.activateGUIStartup()
+            let ready = await awaitStartupGrid(process.grids)
+            XCTAssertNotNil(ready)
+            await process.disconnect()
+        }
+    }
+
+    func testRemoteSlowUIEnterStillTimesOut() async throws {
+        try await withListeningConfiguredNvim(ginitVim: "") { socket in
+            let process = NeovimProcess()
+            try await process.connect(socket)
+            let hook = """
+                vim.api.nvim_create_autocmd('UIEnter', {once=true,
+                  callback=function()
+                    vim.wait(1500)
+                  end})
+                """
+            let response = try await process.request(
+                "nvim_exec_lua", [.string(hook), .array([])])
+            XCTAssertFalse(response.isError)
+
+            var options = UIOptions()
+            options.extLinegrid = true
+            let result = await process.uiAttach(
+                width: 80, height: 24, options: options,
+                timeout: .milliseconds(500))
+
+            XCTAssertEqual(result.status, .timedOut)
+            XCTAssertEqual(result.message, "UI attachment timed out")
+            let promptPending = await process.hasPendingStartupPrompt()
+            XCTAssertFalse(promptPending)
+            await process.disconnect()
         }
     }
 

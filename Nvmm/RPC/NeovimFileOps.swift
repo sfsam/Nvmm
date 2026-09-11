@@ -115,7 +115,7 @@ extension NeovimProcess {
     /// give. See `parseBlockedAwaitingInput` for what the answer means, and
     /// for why no answer reads as "not blocked".
     func isBlockedAwaitingInput() async -> Bool {
-        parseBlockedAwaitingInput(
+        return parseBlockedAwaitingInput(
             await queryBounded("nvim_get_mode", [],
                                timeout: .milliseconds(250)))
     }

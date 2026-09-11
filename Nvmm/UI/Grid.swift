@@ -259,6 +259,9 @@ nonisolated struct Grid: Sendable {
     var tick: UInt64 { drawTick }
     var hideCursor: Bool { cursorHidden }
     var semanticMode: UIMode { modeState.semantic }
+    var showsInputPrompt: Bool {
+        semanticMode == .prompt || semanticMode == .commandLine
+    }
     var acceptsTextInput: Bool { Nvmm.acceptsTextInput(modeState.semantic) }
     var isVisualMode: Bool { isVisualSelection(modeState.semantic) }
     var displacesForComposition: Bool { Nvmm.displacesForComposition(modeState.semantic) }

@@ -204,6 +204,7 @@ actor NeovimProcess {
     /// This connection's RPC channel, used to isolate per-UI startup state.
     private var channelID: UInt64?
     private var startupActivationStarted = false
+    private var startupPromptVisible = false
 
     /// Grid snapshots published on each flush. Each is a complete snapshot, so
     /// the stream keeps only the newest: a consumer that falls behind renders
@@ -378,6 +379,7 @@ actor NeovimProcess {
     /// external Neovim reached via `connect` keeps running.
     func disconnect() {
         guard state == .connected else { return }
+        startupPromptVisible = false
         io?.shutdown(.connectionClosed)
     }
 
@@ -910,6 +912,7 @@ actor NeovimProcess {
                 "RPC transport closed: \(error.description, privacy: .public)")
         }
         state = .closed
+        startupPromptVisible = false
 
         let outstanding = pending
         pending.removeAll()
@@ -984,12 +987,12 @@ extension NeovimProcess {
 
     /// Negotiates the API and attaches a UI of the given size.
     ///
-    /// Runs the startup transaction under one shared deadline:
+    /// Runs negotiation and attachment under one shared deadline:
     /// `nvim_get_api_info` → validate → `nvim_set_client_info` →
-    /// pre-attach Lua setup → `nvim_ui_attach` → post-attach Lua setup,
-    /// attaching only the options Neovim supports. On success, redraw
-    /// notifications feed the UI model and flushed grids are published on
-    /// `grids`.
+    /// pre-attach Lua setup → `nvim_ui_attach`, attaching only the options
+    /// Neovim supports. Post-attach setup has fresh deadlines that pause for an
+    /// answerable startup prompt. Redraw notifications continue to feed `grids`
+    /// while those requests wait.
     func uiAttach(width: Int, height: Int, options: UIOptions,
                   timeout: Duration = .seconds(5)) async -> UIAttachResult {
         let controller = ui ?? UIController(
@@ -1049,7 +1052,10 @@ extension NeovimProcess {
                                              supported: capabilities.uiOptions)
         let attachArgs: [MPValue] = [.int(MPInteger(width)),
                                      .int(MPInteger(height)), .map(attachOptions)]
-        let attachOutcome = await requestWaiting("nvim_ui_attach", attachArgs, until: deadline)
+        startupPromptVisible = false
+        let drawTick = ui?.globalGrid.drawTick ?? 0
+        let attachOutcome = await requestWaitingForStartupInput(
+            "nvim_ui_attach", attachArgs, after: drawTick, until: deadline)
         guard case .response(let attached) = attachOutcome, !attached.isError else {
             await abandonGUIStartup(channelID: capabilities.channelID)
             return attachFailure(
@@ -1065,8 +1071,11 @@ extension NeovimProcess {
              Self.fileHelpersLua),
         ]
         for (operation, lua) in setupScripts {
-            let outcome = await requestWaiting(
-                "nvim_exec_lua", [.string(lua), .array([])], until: deadline)
+            let drawTick = ui?.globalGrid.drawTick ?? 0
+            let setupDeadline = ContinuousClock.now.advanced(by: timeout)
+            let outcome = await requestWaitingForStartupInput(
+                "nvim_exec_lua", [.string(lua), .array([])],
+                after: drawTick, until: setupDeadline)
             guard case .response(let response) = outcome,
                   !response.isError else {
                 await abandonGUIStartup(channelID: capabilities.channelID)
@@ -1212,29 +1221,29 @@ extension NeovimProcess {
           end
           return false
         end
+        local function source_ginit()
+          local catch = string.format(
+            'lua local s=_G.__nvmm_startup[%d]; '
+              .. 's.error=vim.v.exception; '
+              .. 's.throwpoint=vim.v.throwpoint', channel)
+          if not user_config_disabled() then
+            vim.cmd('try\\nruntime! ginit.vim\\ncatch\\n'
+              .. catch .. '\\nendtry')
+          end
+          local err = state.error
+          local point = state.throwpoint or ''
+          if err and point ~= '' then
+            err = err .. '\\n' .. point
+          end
+          if err then
+            echo_error(err)
+          end
+        end
         local function maybe_schedule()
           if not state.entered or not state.activated
              or state.scheduled then return end
           state.scheduled = true
           vim.schedule(function()
-            local function source_ginit()
-              local catch = string.format(
-                'lua local s=_G.__nvmm_startup[%d]; '
-                  .. 's.error=vim.v.exception; '
-                  .. 's.throwpoint=vim.v.throwpoint', channel)
-              if not user_config_disabled() then
-                vim.cmd('try\\nruntime! ginit.vim\\ncatch\\n'
-                  .. catch .. '\\nendtry')
-              end
-              local err = state.error
-              local point = state.throwpoint or ''
-              if err and point ~= '' then
-                err = err .. '\\n' .. point
-              end
-              if err then
-                echo_error(err)
-              end
-            end
             local ok, err = pcall(source_ginit)
             if not ok then echo_error(err) end
             cleanup()
@@ -1341,15 +1350,7 @@ extension NeovimProcess {
 
         return await withTaskGroup(of: AttachOutcome.self) { group in
             group.addTask {
-                do {
-                    return .response(try await self.request(method, arguments))
-                } catch let error as RPCError {
-                    switch error {
-                    case .transport(let transport): return .transport(transport)
-                    }
-                } catch {
-                    return .transport(.connectionClosed)
-                }
+                await self.requestOutcome(method, arguments)
             }
             group.addTask {
                 try? await Task.sleep(for: remaining)
@@ -1359,6 +1360,69 @@ extension NeovimProcess {
             group.cancelAll()
             return first
         }
+    }
+
+    /// Waits through startup input without hiding it behind an RPC timeout. A
+    /// new prompt-mode grid or a reported input wait makes the current grid
+    /// safe to reveal while the original request remains pending.
+    private func requestWaitingForStartupInput(
+        _ method: String, _ arguments: [MPValue],
+        after drawTick: UInt64,
+        until deadline: ContinuousClock.Instant
+    ) async -> AttachOutcome {
+        let remaining = ContinuousClock.now.duration(to: deadline)
+        if remaining <= .zero { return .timedOut }
+
+        let outcome = await withTaskGroup(of: AttachOutcome?.self) { group in
+            group.addTask {
+                await self.requestOutcome(method, arguments)
+            }
+            group.addTask {
+                do { try await Task.sleep(for: remaining) } catch { return nil }
+                guard await self.showStartupInput(after: drawTick) else {
+                    return .timedOut
+                }
+                return nil
+            }
+            while let candidate = await group.next() {
+                guard let outcome = candidate else { continue }
+                group.cancelAll()
+                return outcome
+            }
+            return .transport(.connectionClosed)
+        }
+        startupPromptVisible = false
+        return outcome
+    }
+
+    private func requestOutcome(
+        _ method: String, _ arguments: [MPValue]
+    ) async -> AttachOutcome {
+        do {
+            return .response(try await request(method, arguments))
+        } catch let error as RPCError {
+            switch error {
+            case .transport(let transport): return .transport(transport)
+            }
+        } catch {
+            return .transport(.connectionClosed)
+        }
+    }
+
+    private func showStartupInput(after drawTick: UInt64) async -> Bool {
+        guard !Task.isCancelled else { return false }
+        guard let grid = ui?.globalGrid, grid.drawTick > 0 else { return false }
+        if !grid.showsInputPrompt || grid.drawTick <= drawTick {
+            guard await isBlockedAwaitingInput() else { return false }
+        }
+        guard !Task.isCancelled else { return false }
+        startupPromptVisible = true
+        gridsContinuation.yield(grid)
+        return true
+    }
+
+    func hasPendingStartupPrompt() -> Bool {
+        startupPromptVisible
     }
 
     private func attachFailure(_ outcome: AttachOutcome, _ operation: String) -> UIAttachResult {
