@@ -1197,14 +1197,49 @@ final class NeovimProcessTests: XCTestCase {
                   or #vim.api.nvim_get_autocmds({group='NvmmProgress'}) > 0
                 local recent = #vim.api.nvim_get_autocmds(
                   {group='NvmmRecentFiles'}) == 2
-                return {helpers, document_state, progress, recent}
+                local background = #vim.api.nvim_get_autocmds(
+                  {event='OptionSet', pattern='background'}) > 0
+                return {helpers, document_state, progress, recent, background}
                 """
             let response = try await process.request(
                 "nvim_exec_lua", [.string(lua), .array([])])
 
             XCTAssertFalse(response.isError)
             XCTAssertEqual(response.result.arrayValue,
-                           [.bool(true), .bool(true), .bool(true), .bool(true)])
+                           [.bool(true), .bool(true), .bool(true), .bool(true),
+                            .bool(true)])
+        }
+    }
+
+    func testBackgroundOptionIsPublishedWithoutBeingSet() async throws {
+        try await withNvim { process in
+            let initial = Task {
+                var values = process.backgroundOptions.makeAsyncIterator()
+                return await values.next()
+            }
+            try await attachLinegridUI(process)
+            let initialValue = await initial.value
+            XCTAssertEqual(initialValue, .dark)
+
+            let changed = Task<NeovimBackgroundOption?, Never> {
+                for await value in process.backgroundOptions where value == .light {
+                    return value
+                }
+                return nil
+            }
+            let lua = """
+                vim.api.nvim_create_autocmd('User', {
+                  pattern='NvmmTestBackground', once=true,
+                  callback=function() vim.o.background='light' end,
+                })
+                vim.api.nvim_exec_autocmds('User', {
+                  pattern='NvmmTestBackground'})
+                """
+            let response = try await process.request(
+                "nvim_exec_lua", [.string(lua), .array([])])
+            XCTAssertFalse(response.isError)
+            let changedValue = await changed.value
+            XCTAssertEqual(changedValue, .light)
         }
     }
 

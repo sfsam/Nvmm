@@ -17,7 +17,8 @@ final class SettingsTests: XCTestCase {
     @MainActor
     func testRegisteredDefaults() {
         let defaults = UserDefaults.standard
-        let keys = [Settings.contextSensitiveCursorKey,
+        let keys = [Settings.appearanceModeKey,
+                    Settings.contextSensitiveCursorKey,
                     Settings.nativePowerlineSymbolsKey,
                     Settings.openFilesInBuffersKey,
                     Settings.terminateAfterLastWindowKey,
@@ -39,6 +40,7 @@ final class SettingsTests: XCTestCase {
 
         Settings.registerDefaults()
 
+        XCTAssertEqual(Settings.appearanceMode, .system)
         XCTAssertTrue(Settings.contextSensitiveCursor)
         XCTAssertTrue(Settings.nativePowerlineSymbols)
         XCTAssertTrue(Settings.progressBar)
@@ -50,6 +52,38 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(Settings.cursorTrailStrength, 0)
         XCTAssertEqual(Settings.fontThickness, 50)
         XCTAssertFalse(Settings.ligatures)
+    }
+
+    @MainActor
+    func testInvalidAppearanceModeFallsBackToSystem() {
+        let defaults = UserDefaults.standard
+        let key = Settings.appearanceModeKey
+        let saved = defaults.object(forKey: key)
+        defer { defaults.set(saved, forKey: key) }
+
+        defaults.set(99, forKey: key)
+
+        XCTAssertEqual(Settings.appearanceMode, .system)
+    }
+
+    @MainActor
+    func testEditorAppearanceMapping() {
+        XCTAssertNil(editorAppearanceName(mode: .system,
+                                           neovimBackgroundOption: .dark))
+        XCTAssertEqual(editorAppearanceName(mode: .light,
+                                             neovimBackgroundOption: .dark),
+                       .aqua)
+        XCTAssertEqual(editorAppearanceName(mode: .dark,
+                                             neovimBackgroundOption: .light),
+                       .darkAqua)
+        XCTAssertEqual(editorAppearanceName(mode: .neovimBackground,
+                                             neovimBackgroundOption: .light),
+                       .aqua)
+        XCTAssertEqual(editorAppearanceName(mode: .neovimBackground,
+                                             neovimBackgroundOption: .dark),
+                       .darkAqua)
+        XCTAssertNil(editorAppearanceName(mode: .neovimBackground,
+                                           neovimBackgroundOption: nil))
     }
 
     @MainActor
@@ -104,6 +138,13 @@ final class SettingsTests: XCTestCase {
         }
 
         let views = descendants(of: contentView)
+        let popup = try XCTUnwrap(views.compactMap { $0 as? NSPopUpButton }
+            .first { $0.identifier?.rawValue == "appearanceMode" })
+        XCTAssertEqual(popup.itemTitles,
+                       ["System", "Light", "Dark",
+                        "Use Neovim ‘background’ option"])
+        XCTAssertNotNil(popup.action)
+
         let sliders = views.compactMap { $0 as? NSSlider }
         XCTAssertEqual(sliders.count, 2)
         let cursorSlider = try XCTUnwrap(sliders.first {

@@ -23,6 +23,11 @@ import Darwin
 import Foundation
 import os
 
+nonisolated enum NeovimBackgroundOption: String, Sendable {
+    case light
+    case dark
+}
+
 // MARK: - Inbound events
 
 /// One event delivered from the I/O queue to the actor, in wire order. A
@@ -228,6 +233,11 @@ actor NeovimProcess {
     nonisolated let progressUpdates: AsyncStream<ProgressUpdate>
     private let progressUpdatesContinuation: AsyncStream<ProgressUpdate>.Continuation
 
+    /// The literal value of Neovim's global 'background' option.
+    nonisolated let backgroundOptions: AsyncStream<NeovimBackgroundOption>
+    private let backgroundOptionsContinuation:
+        AsyncStream<NeovimBackgroundOption>.Continuation
+
     /// Absolute paths Neovim successfully read or wrote. The window forwards
     /// them to AppKit's application-wide recent-document store.
     nonisolated let recentFilePaths: AsyncStream<String>
@@ -269,6 +279,12 @@ actor NeovimProcess {
             of: ProgressUpdate.self, bufferingPolicy: .bufferingNewest(1))
         progressUpdates = progressPair.stream
         progressUpdatesContinuation = progressPair.continuation
+
+        let backgroundPair = AsyncStream.makeStream(
+            of: NeovimBackgroundOption.self,
+            bufferingPolicy: .bufferingNewest(1))
+        backgroundOptions = backgroundPair.stream
+        backgroundOptionsContinuation = backgroundPair.continuation
 
         let recentFilesPair = AsyncStream.makeStream(of: String.self)
         recentFilePaths = recentFilesPair.stream
@@ -837,6 +853,13 @@ actor NeovimProcess {
                     documentStatesContinuation.yield(value)
                 }
                 return
+            case "background_option":
+                if arguments.count == 1,
+                   let value = arguments[0].stringValue,
+                   let background = NeovimBackgroundOption(rawValue: value) {
+                    backgroundOptionsContinuation.yield(background)
+                }
+                return
             case "recent_file":
                 if arguments.count == 1,
                    let path = arguments[0].stringValue, !path.isEmpty {
@@ -924,6 +947,7 @@ actor NeovimProcess {
         bellsContinuation.finish()
         documentStatesContinuation.finish()
         progressUpdatesContinuation.finish()
+        backgroundOptionsContinuation.finish()
         recentFilePathsContinuation.finish()
         inboundContinuation.finish()
         io = nil
@@ -1200,6 +1224,29 @@ extension NeovimProcess {
         states[channel] = state
         local group = vim.api.nvim_create_augroup(
           'NvmmStartup' .. channel, {clear=true})
+        local background_group = vim.api.nvim_create_augroup(
+          'NvmmBackground' .. channel, {clear=true})
+        local last_background
+        local function notify_background()
+          local background = vim.o.background
+          if background == last_background then return end
+          last_background = background
+          vim.rpcnotify(channel, 'background_option', background)
+        end
+        vim.api.nvim_create_autocmd('OptionSet', {
+          group=background_group, pattern='background',
+          callback=notify_background})
+        vim.api.nvim_create_autocmd('SafeState', {
+          group=background_group, callback=notify_background})
+        vim.api.nvim_create_autocmd('UILeave', {
+          group=background_group,
+          callback=function()
+            if vim.v.event.chan ~= channel then return end
+            vim.schedule(function()
+              pcall(vim.api.nvim_del_augroup_by_id, background_group)
+            end)
+          end,
+        })
         local function cleanup()
           states[channel] = nil
           pcall(vim.api.nvim_del_augroup_by_id, group)
@@ -1248,6 +1295,7 @@ extension NeovimProcess {
             if not ok then echo_error(err) end
             cleanup()
             pcall(vim.cmd, 'redraw')
+            notify_background()
             vim.rpcnotify(channel, 'startup_complete')
           end)
         end
@@ -1280,6 +1328,8 @@ extension NeovimProcess {
         if states then states[channel] = nil end
         pcall(vim.api.nvim_del_augroup_by_name,
           'NvmmStartup' .. channel)
+        pcall(vim.api.nvim_del_augroup_by_name,
+          'NvmmBackground' .. channel)
         """
 
     /// Activates GUI startup only after the window is able to answer prompts.

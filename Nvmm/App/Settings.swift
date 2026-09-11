@@ -14,6 +14,13 @@ import Cocoa
 
 /// The app's user defaults.
 enum Settings {
+    nonisolated enum AppearanceMode: Int, CaseIterable {
+        case system
+        case light
+        case dark
+        case neovimBackground
+    }
+
     /// Whether a document opens as a buffer in the current tab page rather
     /// than in a new tab page. Applies to Finder and drag-and-drop opens, the
     /// Open panel, and New.
@@ -25,6 +32,9 @@ enum Settings {
     /// Whether the title bar is transparent, so the editor's background color
     /// runs behind it.
     static let titlebarAppearsTransparentKey = "NVTitlebarAppearsTransparent"
+
+    /// How editor windows choose their AppKit appearance.
+    static let appearanceModeKey = "NVAppearanceMode"
 
     /// Whether the window represents its current local file in the title bar.
     static let documentProxyIconKey = "NVEnableDocumentProxyIcon"
@@ -71,6 +81,11 @@ enum Settings {
 
     static var titlebarAppearsTransparent: Bool {
         UserDefaults.standard.bool(forKey: titlebarAppearsTransparentKey)
+    }
+
+    static var appearanceMode: AppearanceMode {
+        AppearanceMode(rawValue:
+            UserDefaults.standard.integer(forKey: appearanceModeKey)) ?? .system
     }
 
     static var documentProxyIcon: Bool {
@@ -133,6 +148,7 @@ enum Settings {
     /// typed `UserDefaults` accessor.
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [
+            appearanceModeKey: AppearanceMode.system.rawValue,
             contextSensitiveCursorKey: true,
             nativePowerlineSymbolsKey: true,
             progressBarKey: true,
@@ -149,20 +165,23 @@ final class SettingsWindowController: NSWindowController {
     private static let fontThicknessDebounce = Duration.milliseconds(500)
 
     private var fontThicknessSlider: NSSlider!
+    private var appearancePopup: NSPopUpButton!
     private var appliedFontThicknessLevel = 0
     private var pendingFontThicknessTask: Task<Void, Never>?
 
     convenience init() {
         let behaviorLabel = NSTextField(labelWithString:
-            String(localized: "Behavior:"))
+            String(localized: "Behavior"))
+        let appearanceLabel = NSTextField(labelWithString:
+            String(localized: "Appearance"))
         let windowLabel = NSTextField(labelWithString:
-            String(localized: "Window:"))
+            String(localized: "Window"))
         let textLabel = NSTextField(labelWithString:
-            String(localized: "Text:"))
+            String(localized: "Text"))
         let thicknessLabel = NSTextField(labelWithString:
-            String(localized: "Text thickness:"))
+            String(localized: "Text thickness"))
         let cursorTrailLabel = NSTextField(labelWithString:
-            String(localized: "Cursor trail:"))
+            String(localized: "Cursor trail"))
 
         let buffers = Self.checkbox(
             String(localized: "Open files in buffers instead of tabs"),
@@ -177,6 +196,19 @@ final class SettingsWindowController: NSWindowController {
         let titlebar = Self.checkbox(
             String(localized: "Transparent title bar"),
             key: Settings.titlebarAppearsTransparentKey)
+
+        let appearance = NSPopUpButton(frame: .zero, pullsDown: false)
+        appearance.addItems(withTitles: [
+            String(localized: "System"),
+            String(localized: "Light"),
+            String(localized: "Dark"),
+            String(localized: "Use Neovim ‘background’ option"),
+        ])
+        for (mode, item) in zip(Settings.AppearanceMode.allCases,
+                                appearance.itemArray) {
+            item.tag = mode.rawValue
+        }
+        appearance.identifier = .init("appearanceMode")
 
         let documentProxyIcon = Self.checkbox(
             String(localized: "Document proxy icon in title bar"),
@@ -220,9 +252,10 @@ final class SettingsWindowController: NSWindowController {
             options: [.continuouslyUpdatesValue: true])
 
         let empty = NSGridCell.emptyContentView
-        let grid = NSGridView(views: [[behaviorLabel, buffers],
+        let grid = NSGridView(views: [[appearanceLabel, appearance],
+                                      [behaviorLabel, terminate],
+                                      [empty, buffers],
                                       [empty, buffersNote],
-                                      [empty, terminate],
                                       [windowLabel, titlebar],
                                       [empty, documentProxyIcon],
                                       [empty, scrollbar],
@@ -234,21 +267,12 @@ final class SettingsWindowController: NSWindowController {
         grid.translatesAutoresizingMaskIntoConstraints = false
         grid.rowAlignment = .firstBaseline
         grid.column(at: 0).xPlacement = .trailing
+        grid.columnSpacing += 6
 
         // Space below the last control of each group of settings.
-        for item in [terminate, scrollbarNote, ligaturesNote, thickness] {
+        for item in [buffersNote, appearance, scrollbarNote, ligaturesNote,
+                     thickness] {
             grid.cell(for: item)?.row?.bottomPadding = 12
-        }
-
-        // Indent secondary controls to the checkbox-title column.
-        for item in [buffersNote, scrollbarNote, ligaturesNote, thickness,
-                     cursorTrail] {
-            let cell = grid.cell(for: item)
-            cell?.xPlacement = .none
-            cell?.customPlacementConstraints = [
-                item.leadingAnchor.constraint(
-                    equalTo: buffers.leadingAnchor, constant: 21)
-            ]
         }
 
         let contentView = NSView()
@@ -265,10 +289,16 @@ final class SettingsWindowController: NSWindowController {
                             backing: .buffered,
                             defer: false)
         panel.title = String(localized: "Settings")
+        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        panel.standardWindowButton(.zoomButton)?.isHidden = true
         panel.contentView = contentView
         self.init(window: panel)
 
         fontThicknessSlider = thickness
+        appearancePopup = appearance
+        appearance.target = self
+        appearance.action = #selector(appearanceChanged)
+        loadAppearance()
         thickness.target = self
         thickness.action = #selector(fontThicknessChanged)
         loadFontThickness()
@@ -276,6 +306,7 @@ final class SettingsWindowController: NSWindowController {
 
     override func showWindow(_ sender: Any?) {
         if pendingFontThicknessTask == nil { loadFontThickness() }
+        loadAppearance()
         super.showWindow(sender)
         window?.center()
     }
@@ -296,6 +327,18 @@ final class SettingsWindowController: NSWindowController {
             self?.applyFontThickness(level: level)
             self?.pendingFontThicknessTask = nil
         }
+    }
+
+    @objc private func appearanceChanged(_ sender: NSPopUpButton) {
+        guard Settings.AppearanceMode(rawValue: sender.selectedTag()) != nil else {
+            return
+        }
+        UserDefaults.standard.set(sender.selectedTag(),
+                                  forKey: Settings.appearanceModeKey)
+    }
+
+    private func loadAppearance() {
+        appearancePopup.selectItem(withTag: Settings.appearanceMode.rawValue)
     }
 
     private func applyFontThickness(level: Int) {

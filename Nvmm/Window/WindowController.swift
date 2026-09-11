@@ -111,6 +111,23 @@ nonisolated func preservedAcrossHandoff(
     current && kind == .restart
 }
 
+func editorAppearanceName(
+    mode: Settings.AppearanceMode,
+    neovimBackgroundOption: NeovimBackgroundOption?
+) -> NSAppearance.Name? {
+    switch mode {
+    case .system: nil
+    case .light: .aqua
+    case .dark: .darkAqua
+    case .neovimBackground:
+        switch neovimBackgroundOption {
+        case .light: .aqua
+        case .dark: .darkAqua
+        case nil: nil
+        }
+    }
+}
+
 final class WindowController: NSWindowController, NSWindowDelegate,
                               NSFontChanging, QuitSession {
     // MARK: - State
@@ -137,6 +154,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     private var inputTask: Task<Void, Never>?
     private var documentStateTask: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
+    private var backgroundOptionTask: Task<Void, Never>?
     private var recentFileTask: Task<Void, Never>?
     private var bellTask: Task<Void, Never>?
     private var settingsTask: Task<Void, Never>?
@@ -202,8 +220,9 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     private var currentTitle = String(localized: "NVIM")
 
     // The default background color last applied to the window, so the content
-    // background and title-bar appearance are only updated when it changes.
+    // background is only updated when it changes.
     private var lastBackground = RGBColor()
+    private var neovimBackgroundOption: NeovimBackgroundOption?
 
     // The most recently saved window geometry: its top-left point and grid
     // size, not its pixel size. Recomputing pixels from the grid makes the next
@@ -364,6 +383,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         self.cascadeSource = source
         window.delegate = self
         window.registerForDraggedTypes([.fileURL])
+        applyWindowAppearance()
         observeSettings()
     }
 
@@ -832,6 +852,13 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         // Do not describe the previous process while the new one attaches.
         applyDocumentState(.empty)
 
+        backgroundOptionTask = Task { [weak self] in
+            for await background in process.backgroundOptions {
+                self?.neovimBackgroundOption = background
+                self?.applyWindowAppearance()
+            }
+        }
+
         // Mirror Neovim's current buffer into the native document window.
         documentStateTask = Task { [weak self] in
             for await state in process.documentStates {
@@ -1004,6 +1031,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         // consumer and forwards to the new process once `startNeovim` swaps it
         // in. The per-process stream tasks are rebuilt by `startNeovim`.
         documentStateTask?.cancel()
+        backgroundOptionTask?.cancel()
         recentFileTask?.cancel()
         // The new session has no tasks of its own yet, so nothing carries over.
         progressTask?.cancel()
@@ -1268,6 +1296,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         settingsTask = Task { [weak self] in
             for await _ in changes {
                 self?.applyTitlebarTransparency()
+                self?.applyWindowAppearance()
                 self?.applyDocumentProxyIcon()
                 self?.applyScrollbarVisibility()
                 self?.updateProgressIndicator()
@@ -1421,10 +1450,8 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     }
 
     /// Tints the content background with Neovim's default background color so
-    /// the grid margins match the editor, and sets the window appearance from
-    /// the color's lightness so the title-bar text stays legible. Only acts on
-    /// a change, unless `force` is set for a reason unrelated to the color —
-    /// the title bar becoming transparent changes what the tint has to cover.
+    /// the grid margins match the editor. Only acts on a change, unless
+    /// `force` is set because title-bar transparency changed the tinted area.
     private func applyBackground(_ color: RGBColor, force: Bool = false) {
         guard color != lastBackground || force else { return }
         lastBackground = color
@@ -1436,11 +1463,15 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         // visibly different color from the grid they surround.
         window?.contentView?.layer?.backgroundColor = NSColor(
             srgbRed: r / 255, green: g / 255, blue: b / 255, alpha: 1).cgColor
+    }
 
-        // Perceived lightness (HSP model, http://alienryderflex.com/hsp.html).
-        let lightness = (0.299 * r * r + 0.587 * g * g + 0.114 * b * b).squareRoot()
-        let appearance: NSAppearance.Name = lightness > 127.5 ? .aqua : .darkAqua
-        window?.appearance = NSAppearance(named: appearance)
+    /// Applies the selected editor-window appearance. A nil appearance lets
+    /// this window inherit AppKit's current system appearance.
+    private func applyWindowAppearance() {
+        let name = editorAppearanceName(
+            mode: Settings.appearanceMode,
+            neovimBackgroundOption: neovimBackgroundOption)
+        window?.appearance = name.flatMap { NSAppearance(named: $0) }
     }
 
     /// Rebuilds font and row metrics when a Neovim font option changes.
@@ -1718,6 +1749,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         renderTask?.cancel()
         inputTask?.cancel()
         documentStateTask?.cancel()
+        backgroundOptionTask?.cancel()
         progressTask?.cancel()
         recentFileTask?.cancel()
         bellTask?.cancel()
