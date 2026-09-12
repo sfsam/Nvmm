@@ -2,8 +2,8 @@
 //  NvmmTests
 //  NeovimBundleTests.swift
 //
-//  Covers the pure login-shell command construction used to launch the embedded
-//  nvim with the user's login environment when the app starts outside a terminal.
+//  Covers startup arguments, directories, and login-shell policy for the
+//  embedded nvim process.
 //
 
 import XCTest
@@ -95,6 +95,41 @@ final class NeovimBundleTests: XCTestCase {
             XCTAssertEqual(command.path, "/opt/x/nvim")
             XCTAssertEqual(command.argv, ["/opt/x/nvim", "--embed"])
         }
+    }
+
+    func testLaunchCommandWithoutCLIEnvironmentUsesLoginShell() {
+        let command = NeovimBundle.launchCommand(
+            nvimPath: "/opt/x/nvim", arguments: ["--embed"],
+            environment: nil)
+
+        XCTAssertEqual(command.argv.count, 3)
+        XCTAssertTrue(command.argv.first?.hasPrefix("-") == true)
+        XCTAssertEqual(command.argv.dropFirst().first, "-c")
+        XCTAssertEqual(command.argv.last,
+                       "exec '/opt/x/nvim' '--embed'")
+    }
+
+    func testStartupWorkingDirectoryPrefersExplicitDirectory() {
+        let directory = WindowController.startupWorkingDirectory(
+            directory: "/request", files: ["/files/one"],
+            homeDirectory: "/home")
+
+        XCTAssertEqual(directory, "/request")
+    }
+
+    func testStartupWorkingDirectoryUsesFirstFileDirectory() {
+        let directory = WindowController.startupWorkingDirectory(
+            directory: nil, files: ["/files/one", "/other/two"],
+            homeDirectory: "/home")
+
+        XCTAssertEqual(directory, "/files")
+    }
+
+    func testStartupWorkingDirectoryFallsBackToHome() {
+        let directory = WindowController.startupWorkingDirectory(
+            directory: nil, files: [], homeDirectory: "/home")
+
+        XCTAssertEqual(directory, "/home")
     }
 
     func testLoginShellCommandExecsNvimAsLoginShell() {

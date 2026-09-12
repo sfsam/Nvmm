@@ -409,11 +409,11 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     /// Configures rendering and launches Neovim, opening `files` at startup.
     ///
     /// `directory` is the working directory Neovim starts in; when nil it is
-    /// derived from the first file, falling back to the invoking shell's
-    /// working directory and then the home directory.
+    /// derived from the first file, falling back to the home directory.
     ///
-    /// `environment` is the complete environment Neovim starts with — a
-    /// control request carries the helper's — and nil keeps the app's own.
+    /// `environment` is the complete environment forwarded by a control
+    /// request. Nil identifies a native window, whose login shell inherits
+    /// the app environment and sources the user's profile.
     func start(files: [String] = [], directory: String? = nil,
                arguments: [String] = [],
                environment: [String: String]? = nil) {
@@ -782,17 +782,24 @@ final class WindowController: NSWindowController, NSWindowDelegate,
                              openFilesInBuffers: Settings.openFilesInBuffers)
     }
 
-    /// The directory Neovim starts in: the caller's, else the first startup
-    /// file's, else the working directory Nvmm was invoked from. Launched from
-    /// the Finder there is no such directory, so the home directory is used —
-    /// never the app's own, which is the filesystem root.
-    private func workingDirectory() -> String {
-        if let startupDirectory, !startupDirectory.isEmpty { return startupDirectory }
-        if let file = startupFiles.first {
+    /// Resolves a startup directory without consulting the app's cwd or
+    /// environment, which may belong to a terminal that launched Nvmm.
+    nonisolated static func startupWorkingDirectory(
+        directory: String?, files: [String], homeDirectory: String
+    ) -> String {
+        if let directory, !directory.isEmpty { return directory }
+        if let file = files.first {
             return (file as NSString).deletingLastPathComponent
         }
-        let shellDirectory = ProcessInfo.processInfo.environment["PWD"]
-        return shellDirectory ?? NSHomeDirectory()
+        return homeDirectory
+    }
+
+    /// The directory Neovim starts in: the caller's, else the first startup
+    /// file's, else the user's home directory.
+    private func workingDirectory() -> String {
+        Self.startupWorkingDirectory(
+            directory: startupDirectory, files: startupFiles,
+            homeDirectory: NSHomeDirectory())
     }
 
     /// How the render task reaches Neovim, resolved on the main actor before
