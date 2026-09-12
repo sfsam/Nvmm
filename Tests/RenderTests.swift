@@ -607,6 +607,120 @@ final class RenderTests: XCTestCase {
         XCTAssertEqual(CTFontGetSize(resized.font(.none, wide: true)), 30)
     }
 
+    func testFontFamilyPreservesFallbackCascadeThroughCacheAndResize() throws {
+        let manager = FontManager()
+        let entries = FontManager.makeResolvedGuifontEntries([
+            GuifontEntry(name: "Nvmm Missing Font", size: 12),
+            GuifontEntry(name: "Helvetica", size: 15),
+            GuifontEntry(name: "Apple Symbols", size: 14),
+            GuifontEntry(name: "Menlo", size: 13),
+        ])
+        XCTAssertEqual(entries.count, 3)
+
+        let symbols = try XCTUnwrap(
+            FontManager.makeDescriptor("Apple Symbols"))
+        let menlo = try XCTUnwrap(FontManager.makeDescriptor("Menlo"))
+        let family = manager.family(
+            resolvedEntries: entries, scaleFactor: 2)
+        let equivalent = manager.family(
+            resolvedEntries: entries, scaleFactor: 2)
+        let reversed = manager.family(
+            resolvedEntries: Array(entries.reversed()),
+            scaleFactor: 2)
+
+        XCTAssertTrue(family.regular === equivalent.regular)
+        XCTAssertFalse(family.regular === reversed.regular)
+
+        // These assertions check the size attribute stored on each cascade
+        // descriptor, not the size CoreText actually renders a substituted
+        // glyph at (see testCoreTextSelectsConfiguredFallbackForMissingCharacter,
+        // which shows CoreText ignores this attribute and always renders
+        // substitutions at the primary face's size).
+        let faces: [FontAttributes] = [.none, .bold, .italic, .boldItalic]
+        for face in faces {
+            let cascade = try fallbackDescriptors(of: family.font(face))
+            XCTAssertEqual(cascade.count, 2)
+            XCTAssertEqual(descriptorName(cascade[0]), descriptorName(symbols))
+            XCTAssertEqual(descriptorName(cascade[1]), descriptorName(menlo))
+            XCTAssertEqual(descriptorSize(cascade[0]), 28)
+            XCTAssertEqual(descriptorSize(cascade[1]), 26)
+        }
+
+        let resized = manager.resized(family, size: 17, scaleFactor: 2)
+        let cascade = try fallbackDescriptors(of: resized.regular)
+
+        XCTAssertEqual(resized.unscaledSize, 17)
+        XCTAssertEqual(descriptorSize(cascade[0]), 32)
+        XCTAssertEqual(descriptorSize(cascade[1]), 30)
+    }
+
+    func testFamilyReusingPreservesFallbackCascadeWithNewWideEntry() throws {
+        let manager = FontManager()
+        let symbols = try XCTUnwrap(FontManager.makeDescriptor("Apple Symbols"))
+        let entries = FontManager.makeResolvedGuifontEntries([
+            GuifontEntry(name: "Helvetica", size: 15),
+            GuifontEntry(name: "Apple Symbols", size: 14),
+        ])
+        let family = manager.family(resolvedEntries: entries, scaleFactor: 2)
+        let wideDescriptor = try XCTUnwrap(FontManager.makeDescriptor("Menlo"))
+        let wideEntry = ResolvedGuifontEntry(
+            descriptor: wideDescriptor, unscaledSize: 13)
+
+        let reused = manager.family(
+            reusing: family, wideEntry: wideEntry, scaleFactor: 2)
+        let faces: [FontAttributes] = [.none, .bold, .italic, .boldItalic]
+
+        for face in faces {
+            XCTAssertTrue(reused.font(face) === family.font(face))
+            let cascade = try fallbackDescriptors(of: reused.font(face))
+            XCTAssertEqual(descriptorName(cascade[0]), descriptorName(symbols))
+        }
+        XCTAssertFalse(
+            reused.font(.none, wide: true) === family.font(.none, wide: true))
+        XCTAssertEqual(CTFontGetSize(reused.font(.none, wide: true)), 26)
+        XCTAssertEqual(
+            CTFontCopyPostScriptName(reused.font(.none, wide: true)),
+            CTFontCopyPostScriptName(
+                CTFontCreateWithFontDescriptor(wideDescriptor, 26, nil)))
+    }
+
+    func testCoreTextSelectsConfiguredFallbackForMissingCharacter() throws {
+        let fixture = try requireFallbackFixture()
+        let family = FontManager().family(
+            resolvedEntries: [
+                ResolvedGuifontEntry(
+                    descriptor: fixture.primary, unscaledSize: 15),
+                ResolvedGuifontEntry(
+                    descriptor: fixture.fallback, unscaledSize: 14),
+            ],
+            scaleFactor: 2)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .init(kCTFontAttributeName as String): family.regular,
+        ]
+        let attributed = NSAttributedString(
+            string: fixture.text, attributes: attributes)
+        let line = CTLineCreateWithAttributedString(attributed)
+        let runs = try XCTUnwrap(CTLineGetGlyphRuns(line) as? [CTRun])
+        let run = try XCTUnwrap(runs.first)
+        let runAttributes = CTRunGetAttributes(run) as NSDictionary
+        let selectedValue = try XCTUnwrap(
+            runAttributes[kCTFontAttributeName])
+        let selected = selectedValue as! CTFont
+        // CoreText's cascade-list resolution picks the correct fallback
+        // face, but does not honor that entry's own size attribute at
+        // shape time: substituted glyphs always come back sized at the
+        // primary face's resolved size (15 * scaleFactor 2 = 30), not the
+        // fallback's own configured 14. This matches how other CoreText
+        // consumers with fallback (e.g. kitty) render substituted glyphs
+        // at the main face's size.
+        let fallback = CTFontCreateWithFontDescriptor(
+            fixture.fallback, 30, nil)
+
+        XCTAssertEqual(CTFontCopyPostScriptName(selected),
+                       CTFontCopyPostScriptName(fallback))
+        XCTAssertEqual(CTFontGetSize(selected), 30)
+    }
+
     func testLineSpaceChangesAndClampsCellHeight() {
         let manager = FontManager()
         let family = manager.family(
@@ -1158,6 +1272,59 @@ final class RenderTests: XCTestCase {
         XCTAssertEqual(cached.rect.texture_origin, .zero)
         // Nothing was packed, so the atlas is untouched.
         XCTAssertTrue(context.glyphManager.maskTexture === before)
+    }
+
+    private func fallbackDescriptors(of font: CTFont) throws
+        -> [CTFontDescriptor] {
+        let descriptor = CTFontCopyFontDescriptor(font)
+        return try XCTUnwrap(CTFontDescriptorCopyAttribute(
+            descriptor, kCTFontCascadeListAttribute) as? [CTFontDescriptor])
+    }
+
+    private func descriptorName(_ descriptor: CTFontDescriptor) -> String? {
+        CTFontDescriptorCopyAttribute(
+            descriptor, kCTFontNameAttribute) as? String
+    }
+
+    private func descriptorSize(_ descriptor: CTFontDescriptor) -> CGFloat? {
+        let number = CTFontDescriptorCopyAttribute(
+            descriptor, kCTFontSizeAttribute) as? NSNumber
+        return number.map { CGFloat(truncating: $0) }
+    }
+
+    private func requireFallbackFixture() throws -> (
+        primary: CTFontDescriptor,
+        fallback: CTFontDescriptor,
+        text: String
+    ) {
+        let primary = try XCTUnwrap(FontManager.makeDescriptor("Helvetica"))
+        let fallback = try XCTUnwrap(
+            FontManager.makeDescriptor("Apple Symbols"))
+        let primaryFont = CTFontCreateWithFontDescriptor(primary, 28, nil)
+        let fallbackFont = CTFontCreateWithFontDescriptor(fallback, 28, nil)
+        let ranges: [ClosedRange<UInt32>] = [
+            0x2190...0x2BFF,
+            0xE000...0xF8FF,
+        ]
+
+        for range in ranges {
+            for value in range {
+                var character = UniChar(value)
+                var primaryGlyph = CGGlyph(0)
+                var fallbackGlyph = CGGlyph(0)
+                let primaryHasGlyph = CTFontGetGlyphsForCharacters(
+                    primaryFont, &character, &primaryGlyph, 1)
+                let fallbackHasGlyph = CTFontGetGlyphsForCharacters(
+                    fallbackFont, &character, &fallbackGlyph, 1)
+                if (!primaryHasGlyph || primaryGlyph == 0),
+                   fallbackHasGlyph, fallbackGlyph != 0,
+                   let scalar = Unicode.Scalar(value) {
+                    return (primary, fallback, String(scalar))
+                }
+            }
+        }
+        throw XCTSkip(
+            "No stable system-font character exercised explicit fallback")
     }
 
     /// Total ink in a rasterized bitmap.
