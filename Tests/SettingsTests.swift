@@ -87,6 +87,23 @@ final class SettingsTests: XCTestCase {
     }
 
     @MainActor
+    func testEffectiveOSAppearanceMapping() throws {
+        let cases: [(NSAppearance.Name, Bool, OSAppearance)] = [
+            (.aqua, false, .light),
+            (.darkAqua, false, .dark),
+            (.aqua, true, .highContrastLight),
+            (.darkAqua, true, .highContrastDark),
+        ]
+        for (name, increasedContrast, expected) in cases {
+            let appearance = try XCTUnwrap(NSAppearance(named: name))
+            XCTAssertEqual(
+                osAppearance(
+                    appearance, increasedContrast: increasedContrast),
+                expected)
+        }
+    }
+
+    @MainActor
     func testCursorTrailStrengthIsClamped() {
         let defaults = UserDefaults.standard
         let key = Settings.cursorTrailStrengthKey

@@ -1389,6 +1389,51 @@ final class NeovimProcessTests: XCTestCase {
         }
     }
 
+    func testOSAppearanceIsPublishedBeforeGinitAndOnChanges() async throws {
+        let initLua = """
+            vim.g.nvmm_appearance_changes = 0
+            vim.api.nvim_create_autocmd('User', {
+              pattern = 'NvmmOSAppearanceChanged',
+              callback = function()
+                vim.g.nvmm_appearance_changes =
+                  vim.g.nvmm_appearance_changes + 1
+              end,
+            })
+            """
+        let ginitVim = """
+            let g:nvmm_ginit_appearance = g:nvmm_os_appearance
+            """
+
+        try await withConfiguredNvim(
+            initLua: initLua, ginitVim: ginitVim
+        ) { process in
+            var options = UIOptions()
+            options.extLinegrid = true
+            let result = await process.uiAttach(
+                width: 80, height: 24, options: options)
+            XCTAssertEqual(result.status, .success)
+
+            await process.publishOSAppearance(.dark)
+            await process.publishOSAppearance(.dark)
+            await process.activateGUIStartup()
+            let finished = await waitUntilTrue(process, "v:vim_did_enter")
+            XCTAssertTrue(finished)
+
+            var response = try await process.request(
+                "nvim_eval",
+                [.string("[g:nvmm_ginit_appearance, "
+                         + "g:nvmm_appearance_changes]")])
+            XCTAssertEqual(response.result.arrayValue, [.int(1), .int(1)])
+
+            await process.perform(.osAppearance(.highContrastDark))
+            response = try await process.request(
+                "nvim_eval",
+                [.string("[g:nvmm_os_appearance, "
+                         + "g:nvmm_appearance_changes]")])
+            XCTAssertEqual(response.result.arrayValue, [.int(3), .int(2)])
+        }
+    }
+
     func testMissingGinitDoesNotChangeStartup() async throws {
         try await withConfiguredNvim(
             initLua: "vim.g.nvmm_init_ran = true", ginitVim: nil

@@ -39,7 +39,51 @@ Supported options are shown by `nvmm --help`.
 
 ## Neovim Configuration
 
-Nvmm loads Neovim's normal configuration, then sources `ginit.vim` after the UI enters and input forwarding is ready. GUI-only settings such as `guifont` can be placed there. Nvmm respects `--clean`, `-u NONE`, and `-u NORC`.
+Nvmm loads Neovim's normal configuration, then sources `ginit.vim` after the UI enters and input forwarding is ready. Nvmm respects `--clean`, `-u NONE`, and `-u NORC`.
+
+## Appearance
+
+Nvmm's Settings panel has options for following the System Appearance,
+always using Light or Dark, or following Neovim's `'background'` option.
+
+Nvmm exposes the editor view's effective appearance as
+`g:nvmm_os_appearance`: 0 is light, 1 is dark, 2 is high-contrast light, and
+3 is high-contrast dark. Changes trigger the
+`User NvmmOSAppearanceChanged` autocmd. The value reports the editor view's
+effective appearance after applying the Appearance setting and macOS
+accessibility contrast.
+
+For example, with Appearance set to System in the Settings panel, add this
+to `ginit.vim` to keep Neovim's `'background'` option synchronized with the
+editor view:
+
+```vim
+lua << EOF
+local function update_background()
+  local appearance = vim.g.nvmm_os_appearance
+  if appearance == nil then
+    return
+  end
+
+  local light = appearance == 0 or appearance == 2
+  vim.o.background = light and "light" or "dark"
+end
+
+local group = vim.api.nvim_create_augroup(
+  "NvmmAppearance",
+  { clear = true }
+)
+
+vim.api.nvim_create_autocmd("User", {
+  group = group,
+  pattern = "NvmmOSAppearanceChanged",
+  callback = update_background,
+})
+
+-- Apply an appearance that Nvmm published before this configuration loaded.
+update_background()
+EOF
+```
 
 ## Build
 

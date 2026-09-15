@@ -566,6 +566,8 @@ actor NeovimProcess {
             notify("nvim_set_option_value",
                    [.string(name), .string(value),
                     .map([(.string("scope"), .string("global"))])])
+        case .osAppearance(let appearance):
+            notify("nvim_exec_lua", Self.osAppearanceArguments(appearance))
         case .scrollToLine(let line):
             // `zt` rather than `winrestview`: it redraws through Neovim's own
             // scrolling, so wrapped lines, folds, and `smoothscroll` are
@@ -1144,6 +1146,36 @@ extension NeovimProcess {
             }
         }
     }
+
+    /// Publishes the initial effective appearance before ginit.vim runs.
+    func publishOSAppearance(_ appearance: OSAppearance) async {
+        do {
+            let response = try await request(
+                "nvim_exec_lua", Self.osAppearanceArguments(appearance))
+            if response.isError {
+                let detail = String(describing: response.error)
+                Log.rpc.error("Could not publish OS appearance: \(detail)")
+            }
+        } catch {
+            Log.rpc.error("Could not publish OS appearance: \(error)")
+        }
+    }
+
+    private static func osAppearanceArguments(
+        _ appearance: OSAppearance
+    ) -> [MPValue] {
+        [.string(osAppearanceLua), .array([.int(MPInteger(appearance.rawValue))])]
+    }
+
+    private static let osAppearanceLua = """
+        local appearance = ...
+        if vim.g.nvmm_os_appearance == appearance then return end
+        vim.g.nvmm_os_appearance = appearance
+        vim.api.nvim_exec_autocmds('User', {
+          pattern = 'NvmmOSAppearanceChanged',
+          modeline = false,
+        })
+        """
 
     private func abandonGUIStartup(channelID: UInt64) async {
         let deadline = ContinuousClock.now.advanced(by: .milliseconds(250))

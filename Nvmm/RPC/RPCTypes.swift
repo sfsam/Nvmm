@@ -43,6 +43,8 @@ nonisolated enum NvimCommand: Sendable {
     case errorWriteln(String)
     /// Sets one global Neovim option through `nvim_set_option_value`.
     case setGlobalOption(name: String, value: String)
+    /// Publishes the editor view's effective AppKit appearance to Neovim.
+    case osAppearance(OSAppearance)
     /// Put the given one-based line at the top of the window, for the
     /// scrollbar. Carries a line rather than a screen offset because that is
     /// what the scrollbar knows: Neovim reports its viewport in buffer lines.
@@ -51,6 +53,15 @@ nonisolated enum NvimCommand: Sendable {
     /// A non-forced quit with unsaved buffers is refused by Neovim, so the
     /// process stays alive and the window is left open.
     case quit(force: Bool)
+}
+
+/// The editor view's effective AppKit appearance, including accessibility
+/// contrast. Raw values form the interface exposed to Neovim.
+nonisolated enum OSAppearance: Int, Sendable {
+    case light = 0
+    case dark = 1
+    case highContrastLight = 2
+    case highContrastDark = 3
 }
 
 /// What the window's progress bar should show, published as Neovim reports

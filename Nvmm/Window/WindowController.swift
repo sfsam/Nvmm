@@ -128,6 +128,18 @@ func editorAppearanceName(
     }
 }
 
+func osAppearance(
+    _ appearance: NSAppearance, increasedContrast: Bool
+) -> OSAppearance {
+    let dark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+    return switch (dark, increasedContrast) {
+    case (false, false): .light
+    case (true, false): .dark
+    case (false, true): .highContrastLight
+    case (true, true): .highContrastDark
+    }
+}
+
 final class WindowController: NSWindowController, NSWindowDelegate,
                               NSFontChanging, QuitSession {
     // MARK: - State
@@ -158,6 +170,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     private var recentFileTask: Task<Void, Never>?
     private var bellTask: Task<Void, Never>?
     private var settingsTask: Task<Void, Never>?
+    private var accessibilityDisplayTask: Task<Void, Never>?
     private var frameSaveTask: Task<Void, Never>?
 
     private var appliedFontThickness = Settings.fontThickness
@@ -179,6 +192,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     private var isReady = false
     private var startupInputVisible = false
     private var startupResizePending = false
+    private var appearancePublishingReady = false
     private var lastGridSize = GridSize(width: 0, height: 0)
 
     // The window is shown only once the first grid is ready, so its first paint
@@ -513,6 +527,9 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         gridView.sendInput = { [weak self] input in
             self?.enqueue(.input(input))
         }
+        gridView.effectiveAppearanceDidChange = { [weak self] in
+            self?.effectiveAppearanceDidChange()
+        }
         gridView.sendMouse = { [weak self] button, action, modifiers, row, col in
             self?.enqueue(.mouse(button: button, action: action,
                                  modifiers: modifiers, row: row, col: col))
@@ -821,6 +838,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         startHiddenWindowBackstop()
         startupInputVisible = false
         startupResizePending = false
+        appearancePublishingReady = false
 
         let plan: LaunchPlan
         switch source {
@@ -995,6 +1013,13 @@ final class WindowController: NSWindowController, NSWindowDelegate,
             let address = await process.serverAddress()
 
             guard let self else { return }
+            while true {
+                let appearance = self.effectiveOSAppearance
+                await process.publishOSAppearance(appearance)
+                guard self.process === process else { return }
+                if self.effectiveOSAppearance == appearance { break }
+            }
+            self.appearancePublishingReady = true
             self.isReady = true
             self.startupResizePending = false
             // The connection is up, so a later drop is a real disconnect, not a
@@ -1323,6 +1348,17 @@ final class WindowController: NSWindowController, NSWindowDelegate,
                 self?.applyFontRasterizationSettings()
             }
         }
+
+        let accessibilityChanges = NSWorkspace.shared.notificationCenter
+            .notifications(
+                named: NSWorkspace
+                    .accessibilityDisplayOptionsDidChangeNotification)
+        accessibilityDisplayTask = Task { [weak self] in
+            for await _ in accessibilityChanges {
+                guard let self else { return }
+                effectiveAppearanceDidChange()
+            }
+        }
     }
 
     /// Synchronizes the shared glyph caches and redraws this window. The
@@ -1490,6 +1526,17 @@ final class WindowController: NSWindowController, NSWindowDelegate,
             mode: Settings.appearanceMode,
             neovimBackgroundOption: neovimBackgroundOption)
         window?.appearance = name.flatMap { NSAppearance(named: $0) }
+    }
+
+    private var effectiveOSAppearance: OSAppearance {
+        osAppearance(
+            gridView.effectiveAppearance,
+            increasedContrast: NSWorkspace.shared
+                .accessibilityDisplayShouldIncreaseContrast)
+    }
+
+    private func effectiveAppearanceDidChange() {
+        if appearancePublishingReady { enqueue(.osAppearance(effectiveOSAppearance)) }
     }
 
     /// Rebuilds font and row metrics when a Neovim font option changes.
@@ -1773,6 +1820,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         bellTask?.cancel()
         progressHoldTask?.cancel()
         settingsTask?.cancel()
+        accessibilityDisplayTask?.cancel()
         frameSaveTask?.cancel()
         startupTimeoutTask?.cancel()
         hiddenWindowBackstopTask?.cancel()

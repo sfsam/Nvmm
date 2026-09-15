@@ -155,6 +155,9 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     /// Sends a key-notation payload to Neovim (`nvim_input`).
     var sendInput: ((String) -> Void)?
 
+    /// Reports that AppKit resolved a new appearance for this editor view.
+    var effectiveAppearanceDidChange: (() -> Void)?
+
     /// Sends a mouse event to Neovim (`nvim_input_mouse`).
     var sendMouse: ((_ button: String, _ action: String, _ modifiers: String,
                      _ row: Int, _ col: Int) -> Void)?
@@ -485,6 +488,11 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         clearCursorTrail()
         super.viewDidChangeBackingProperties()
         textInputGeometryDidChange()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        effectiveAppearanceDidChange?()
     }
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
