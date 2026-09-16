@@ -81,7 +81,7 @@ final class NeovimBundleTests: XCTestCase {
     // Any CLI environment — non-nil — spawns nvim directly with exactly that
     // environment. A login shell would source the profile and change the
     // environment the request just forwarded. TERM plays no part: a valid
-    // CLI environment can lack it (`env -i nvmm -N`).
+    // CLI environment can lack it (`env -i nvmm`).
     func testLaunchCommandWithCLIEnvironmentSpawnsNvimDirectly() {
         let environments: [[String: String]] = [
             ["TERM": "xterm-256color"],

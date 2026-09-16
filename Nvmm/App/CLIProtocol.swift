@@ -267,12 +267,12 @@ nonisolated enum CLIProtocolError: Error, Sendable, Equatable {
 nonisolated struct CLIArguments: Sendable, Equatable {
     var arguments: [String] = []
     var files: [String] = []
-    var forceNewWindow = false
+    var reuseWindow = false
     var wait = false
     var showHelp = false
 
     var needsNewWindow: Bool {
-        forceNewWindow || wait || !arguments.isEmpty
+        !reuseWindow
     }
 
     static func parse(_ values: [String]) throws -> CLIArguments {
@@ -290,6 +290,7 @@ nonisolated struct CLIArguments: Sendable, Equatable {
                 case "--wait": result.wait = true
                 case "--help": result.showHelp = true
                 case "--clean": result.arguments.append(value)
+                case "--reuse": result.reuseWindow = true
                 default: throw CLIArgumentError.unknownOption(value)
                 }
             } else if options && value.hasPrefix("-") && value != "-" {
@@ -299,6 +300,10 @@ nonisolated struct CLIArguments: Sendable, Equatable {
                 result.files.append(value)
             }
             index += 1
+        }
+        if result.reuseWindow &&
+            (result.wait || !result.arguments.isEmpty) {
+            throw CLIArgumentError.incompatibleReuse
         }
         return result
     }
@@ -312,7 +317,6 @@ nonisolated struct CLIArguments: Sendable, Equatable {
             switch option {
             case "d", "o", "O", "p", "R":
                 result.arguments.append("-\(option)")
-            case "N": result.forceNewWindow = true
             case "f": result.wait = true
             case "h": result.showHelp = true
             case "c":
@@ -350,12 +354,15 @@ nonisolated struct CLIArguments: Sendable, Equatable {
 nonisolated enum CLIArgumentError: Error, Sendable, Equatable {
     case unknownOption(String)
     case missingValue(String)
+    case incompatibleReuse
 
     var message: String {
         switch self {
         case .unknownOption(let option): "Unknown option: \(option)"
         case .missingValue(let option):
             "Option \(option) requires an argument."
+        case .incompatibleReuse:
+            "Option --reuse cannot be combined with this option. See --help."
         }
     }
 }

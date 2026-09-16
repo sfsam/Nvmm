@@ -30,12 +30,14 @@ Options:
   -d                Diff mode
   -f, --wait        Foreground mode - wait until the window is closed
   -h, --help        Print this help message
-  -N                Open a new Nvmm window
   -o                Open one horizontal window per file
   -O                Open one vertical window per file
   -p                Open one tab page per file
   -R                Read-only mode
   --clean           Factory defaults - no user config or plugins
+  --reuse           Reuse the best existing Nvmm window
+                    Cannot be combined with +cmd, -c, -d, -o, -O,
+                    -p, -R, --clean, or -f/--wait
 """
 
 private struct CLIClient {
@@ -117,7 +119,7 @@ private struct NvmmCLI {
             var request = CLIRequest(
                 arguments: parsed.arguments, files: parsed.files,
                 workingDirectory: directory,
-                forceNewWindow: parsed.forceNewWindow, wait: parsed.wait)
+                forceNewWindow: parsed.needsNewWindow, wait: parsed.wait)
             request.environment = ProcessInfo.processInfo.environment
             try request.validate()
             try CLIEndpoint.prepareDirectory()

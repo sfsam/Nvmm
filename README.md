@@ -26,14 +26,18 @@ ln -s /Applications/Nvmm.app/Contents/bin/nvim ~/.local/bin/nvim
 ### Example `nvmm` usage
 
 ```text
-nvmm                 # launch or activate Nvmm
+nvmm                 # open a new window in the current directory
 nvmm a.txt           # open file
+nvmm --reuse a.txt   # open file in the best existing window
 nvmm -p a.txt b.txt  # one tab per file
 nvmm +42 a.txt       # put cursor at line 42
 nvmm --wait a.txt    # open file and wait until its window is closed
 ```
 
-Ordinary file opens reuse the best existing window. `-N`, `--wait`, or any supported Neovim option opens a new window.
+Each invocation opens a new window with Neovim running in the current
+directory. `--reuse` instead opens files in the best existing window, or
+activates an existing window when no files are given. If no window exists,
+it opens one. `--reuse` cannot be combined with `--wait` or Neovim options.
 
 Supported options are shown by `nvmm --help`.
 

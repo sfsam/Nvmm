@@ -11,7 +11,7 @@ final class CLIProtocolTests: XCTestCase {
 
     func testParsesReferenceOptionSurface() throws {
         let parsed = try CLIArguments.parse([
-            "-dR", "-cset number", "--clean", "-N", "--wait",
+            "-dR", "-cset number", "--clean", "--wait",
             "+42", "+/needle", "one", "two",
         ])
 
@@ -19,7 +19,6 @@ final class CLIProtocolTests: XCTestCase {
             "-d", "-R", "-c", "set number", "--clean", "+42", "+/needle",
         ])
         XCTAssertEqual(parsed.files, ["one", "two"])
-        XCTAssertTrue(parsed.forceNewWindow)
         XCTAssertTrue(parsed.wait)
         XCTAssertTrue(parsed.needsNewWindow)
     }
@@ -36,7 +35,35 @@ final class CLIProtocolTests: XCTestCase {
 
         XCTAssertEqual(parsed.files, ["-literal", "+quit"])
         XCTAssertTrue(parsed.arguments.isEmpty)
+        XCTAssertTrue(parsed.needsNewWindow)
+    }
+
+    func testDefaultRequestsNewWindow() throws {
+        XCTAssertTrue(try CLIArguments.parse([]).needsNewWindow)
+        XCTAssertTrue(try CLIArguments.parse(["one"]).needsNewWindow)
+    }
+
+    func testReuseRequestsAnExistingWindow() throws {
+        let parsed = try CLIArguments.parse(["--reuse", "one", "two"])
+
+        XCTAssertTrue(parsed.reuseWindow)
+        XCTAssertEqual(parsed.files, ["one", "two"])
         XCTAssertFalse(parsed.needsNewWindow)
+    }
+
+    func testReuseRejectsStartupOptionsAndWait() {
+        let incompatible = [
+            ["--wait"], ["-f"], ["--clean"], ["-d"], ["-o"], ["-O"],
+            ["-p"], ["-R"], ["+42"], ["-c", "set number"],
+        ]
+        for options in incompatible {
+            XCTAssertThrowsError(
+                try CLIArguments.parse(["--reuse"] + options + ["one"])
+            ) { error in
+                XCTAssertEqual(error as? CLIArgumentError,
+                               .incompatibleReuse)
+            }
+        }
     }
 
     func testHelpIsClientSide() throws {
@@ -44,13 +71,18 @@ final class CLIProtocolTests: XCTestCase {
 
         XCTAssertTrue(parsed.showHelp)
         XCTAssertTrue(parsed.arguments.isEmpty)
-        XCTAssertFalse(parsed.needsNewWindow)
     }
 
     func testUnknownOptionFails() {
         XCTAssertThrowsError(try CLIArguments.parse(["--headless"])) { error in
             XCTAssertEqual(error as? CLIArgumentError,
                            .unknownOption("--headless"))
+        }
+    }
+
+    func testRemovedNewWindowOptionFails() {
+        XCTAssertThrowsError(try CLIArguments.parse(["-N"])) { error in
+            XCTAssertEqual(error as? CLIArgumentError, .unknownOption("-N"))
         }
     }
 

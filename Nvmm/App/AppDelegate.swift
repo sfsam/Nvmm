@@ -313,6 +313,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         guard !request.files.isEmpty else {
+            let controller = frontmostWindow.flatMap {
+                $0.hasExited ? nil : $0
+            } ?? candidates.first { !$0.hasExited }
+            guard let controller else {
+                openCLIWindow(
+                    request, channel: channel,
+                    cascadingFrom: candidates.last { !$0.hasExited })
+                return
+            }
+            if !controller.isAwaitingFirstShow {
+                controller.window?.deminiaturize(nil)
+                controller.window?.makeKeyAndOrderFront(nil)
+            }
             channel.accepted(wait: false)
             return
         }
