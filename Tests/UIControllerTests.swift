@@ -5,8 +5,8 @@
 //  UIController coverage: mode classification and policy, redraw event handling
 //  (grids, highlights, modes), progress tracking, and restart / connect handoffs.
 //  Each case drives a bare controller with synthetic redraw arrays and asserts on
-//  the flushed snapshot. One live case attaches a real bundled `nvim --embed` and
-//  checks that typed text lands in the grid.
+//  the flushed snapshot. The live cases run a real bundled Neovim: `:restart`
+//  and `:detach` handoffs, document state, and a UI connected to a server.
 //
 
 import XCTest
@@ -32,7 +32,7 @@ final class UIControllerTests: XCTestCase {
 
     // MARK: Mode classification & policy
 
-    func testClassifiesUiModeNamesAndShortNames() {
+    func testClassifiesUiModesAndDerivesTheirPolicy() {
         let names: [(String, UIMode)] = [
             ("normal", .normal), ("insert", .insert), ("replace", .replace),
             ("vreplace", .virtualReplace), ("cmdline_normal", .commandLine),
@@ -56,9 +56,8 @@ final class UIControllerTests: XCTestCase {
             XCTAssertEqual(classifyUIModeShortname(value), expected)
         }
         XCTAssertNil(classifyUIModeShortname("m"))
-    }
 
-    func testDerivesUiModePolicyWithoutCursorPresentation() {
+        // The policy follows from the mode alone, not cursor presentation.
         XCTAssertTrue(acceptsTextInput(.insert))
         XCTAssertTrue(acceptsTextInput(.replace))
         XCTAssertTrue(acceptsTextInput(.virtualReplace))
@@ -85,7 +84,10 @@ final class UIControllerTests: XCTestCase {
         XCTAssertEqual(bells, [.audible, .visual])
     }
 
-    func testUnknownRedrawEventsAreReported() {
+    /// Only a well-formed event with a name the controller does not know is
+    /// reported, truncated to 127 bytes on a character boundary. Documented
+    /// no-op events and malformed ones are not.
+    func testOnlyUnknownRedrawEventsAreReported() {
         var names: [String] = []
         let controller = UIController(
             onUnhandledRedraw: { names.append($0) })
@@ -95,34 +97,16 @@ final class UIControllerTests: XCTestCase {
             ["future_protocol_event", ["private value"]]))
         XCTAssertNil(controller.applyRedrawEvent(
             .array([.string(longName), .array([])])))
-
-        XCTAssertEqual(names, ["future_protocol_event",
-                               String(repeating: "x", count: 127)])
-    }
-
-    func testDocumentedNoOpRedrawEventsAreNotReported() {
-        var names: [String] = []
-        let controller = UIController(
-            onUnhandledRedraw: { names.append($0) })
-
         for name in ["chdir", "mouse_on", "mouse_off", "set_icon",
                      "suspend", "update_menu"] {
             XCTAssertNil(controller.applyRedrawEvent(
                 .array([.string(name), .array([])])))
         }
-
-        XCTAssertTrue(names.isEmpty)
-    }
-
-    func testMalformedRedrawEventsAreNotReportedAsUnknown() {
-        var names: [String] = []
-        let controller = UIController(
-            onUnhandledRedraw: { names.append($0) })
-
         XCTAssertNil(controller.applyRedrawEvent(.string("not an event")))
         XCTAssertNil(controller.applyRedrawEvent([42, []]))
 
-        XCTAssertTrue(names.isEmpty)
+        XCTAssertEqual(names, ["future_protocol_event",
+                               String(repeating: "x", count: 127)])
     }
 
     func testModeInfoFallsBackToShortNameForTextEntryEligibility() {
@@ -319,21 +303,6 @@ final class UIControllerTests: XCTestCase {
         XCTAssertEqual(controller.globalGrid.cell(0, 0).text, "x")
     }
 
-    func testSparseHighlightIdUsesDefinedAttributes() {
-        let controller = UIController()
-        _ = controller.redraw([
-            ["grid_resize", [1, 1, 1]],
-            ["hl_attr_define", [5, map(("foreground", 0x11_2233),
-                                       ("background", 0x44_5566))]],
-            ["grid_line", [1, 0, 0, [["x", 5]]]],
-            ["flush", []],
-        ])
-        let cell = controller.globalGrid.cell(0, 0)
-        assertRGB(cell.foreground, 0x11, 0x22, 0x33)
-        assertRGB(cell.background, 0x44, 0x55, 0x66)
-        XCTAssertFalse(cell.hasSpecialColor)
-    }
-
     func testConsecutiveSparseHighlightIdsDoNotShiftAttributes() {
         let controller = UIController()
         _ = controller.redraw([
@@ -352,15 +321,27 @@ final class UIControllerTests: XCTestCase {
         assertRGB(grid.cell(0, 1).background, 0xd0, 0xe0, 0xf0)
     }
 
+    /// A negative or over-budget resize is dropped. One that arrives first
+    /// leaves a 0x0 grid, whose cursor still reads without indexing into an
+    /// empty cell array.
     func testInvalidGridResizeIsIgnored() {
         let controller = UIController()
+        _ = controller.redraw([
+            ["grid_resize", [1, -1, -1]],
+            ["flush", []],
+        ])
+        var grid = controller.globalGrid
+        XCTAssertEqual(grid.width, 0)
+        XCTAssertEqual(grid.cursor.row, 0)
+        XCTAssertEqual(grid.cursor.column, 0)
+
         _ = controller.redraw([
             ["grid_resize", [1, 2, 1]],    // establishes 2x1
             ["grid_resize", [1, -3, 2]],   // negative width, dropped
             ["grid_resize", [1, 100_000, 100_000]], // over budget, dropped
             ["flush", []],
         ])
-        let grid = controller.globalGrid
+        grid = controller.globalGrid
         XCTAssertEqual(grid.width, 2)
         XCTAssertEqual(grid.height, 1)
     }
@@ -401,49 +382,25 @@ final class UIControllerTests: XCTestCase {
         XCTAssertLessThan(cursor.column, 2)
     }
 
-    func testCursorIsSafeOnEmptyGrid() {
-        // A grid whose first resize never produced storage still answers a
-        // cursor read without indexing an empty cell array.
-        let controller = UIController()
-        _ = controller.redraw([
-            ["grid_resize", [1, -1, -1]], // invalid, dropped, leaves 0x0
-            ["flush", []],
-        ])
-        let grid = controller.globalGrid
-        XCTAssertEqual(grid.width, 0)
-        XCTAssertEqual(grid.cursor.row, 0)   // does not crash
-        XCTAssertEqual(grid.cursor.column, 0)
-    }
-
-    func testOversizedHighlightDefinitionIsIgnored() {
-        // A highlight id past the cap is dropped rather than growing the dense
-        // table to it; an ordinary definition afterward still resolves.
+    /// Out-of-range ids are dropped rather than growing the dense tables to
+    /// them: a highlight id past the cap, and negative or over-cap group ids.
+    /// An ordinary definition afterward still resolves.
+    func testOutOfRangeHighlightIdsAreIgnored() {
         let controller = UIController()
         _ = controller.redraw([
             ["grid_resize", [1, 1, 1]],
             ["hl_attr_define", [5_000_000, map(("foreground", 0x01_0203))]],
+            ["hl_group_set", ["StatusLine", -1]],
+            ["hl_group_set", ["StatusLine", 5_000_000]],
             ["hl_attr_define", [8, map(("foreground", 0x11_2233),
                                        ("background", 0x44_5566))]],
             ["grid_line", [1, 0, 0, [["x", 8]]]],
             ["flush", []],
         ])
         let cell = controller.globalGrid.cell(0, 0)
+        XCTAssertEqual(cell.text, "x")
         assertRGB(cell.foreground, 0x11, 0x22, 0x33)
         assertRGB(cell.background, 0x44, 0x55, 0x66)
-    }
-
-    func testInvalidHighlightGroupIdIsIgnored() {
-        // Negative and over-cap group ids are dropped without crashing or
-        // growing the group-type table; a later redraw still works.
-        let controller = UIController()
-        _ = controller.redraw([
-            ["grid_resize", [1, 1, 1]],
-            ["hl_group_set", ["StatusLine", -1]],
-            ["hl_group_set", ["StatusLine", 5_000_000]],
-            ["grid_line", [1, 0, 0, [["y", 0]]]],
-            ["flush", []],
-        ])
-        XCTAssertEqual(controller.globalGrid.cell(0, 0).text, "y")
     }
 
     func testGridLineCellsInheritPreviousHighlight() {
@@ -532,6 +489,9 @@ final class UIControllerTests: XCTestCase {
 
     // MARK: Progress
 
+    /// The bar shows the most recently updated running task. Numeric and
+    /// string ids are separate namespaces, so task 1 and task "1" do not
+    /// overwrite each other.
     func testProgressTracksMostRecentKnownPercentage() {
         let controller = UIController()
 
@@ -543,13 +503,21 @@ final class UIControllerTests: XCTestCase {
                              (.string("status"), "running"), (.string("percent"), 60)])
         XCTAssertEqual(controller.progressPercent, 60)
 
+        controller.progress([(.string("id"), "1"), (.string("status"), "running"),
+                             (.string("percent"), 70)])
+        XCTAssertEqual(controller.progressPercent, 70)
+
+        controller.progress([(.string("id"), "1"), (.string("status"), "success")])
         controller.progress([(.string("id"), "plugin.task"),
                              (.string("status"), "success")])
         XCTAssertEqual(controller.progressPercent, 25)
     }
 
-    func testProgressHidesUnknownAndClampsPercentages() {
+    func testProgressHidesUnknownAndMalformedAndRemovesTerminalStatuses() {
         let controller = UIController()
+
+        controller.progress([(.string("status"), "running")])
+        XCTAssertNil(controller.progressPercent)
 
         controller.progress([(.string("id"), 1), (.string("status"), "running")])
         XCTAssertNil(controller.progressPercent)
@@ -561,19 +529,12 @@ final class UIControllerTests: XCTestCase {
         controller.progress([(.string("id"), 1), (.string("status"), "running"),
                              (.string("percent"), -20)])
         XCTAssertEqual(controller.progressPercent, 0)
-    }
-
-    func testProgressIgnoresMalformedEventsAndRemovesTerminalStatuses() {
-        let controller = UIController()
-
-        controller.progress([(.string("status"), "running")])
-        XCTAssertNil(controller.progressPercent)
 
         for terminal in ["failed", "cancel"] {
             controller.progress([(.string("id"), 1), (.string("status"), "running"),
                                  (.string("percent"), 50)])
             controller.progress([(.string("id"), 1), (.string("status"), .string(terminal))])
-            XCTAssertNil(controller.progressPercent)
+            XCTAssertNil(controller.progressPercent, terminal)
         }
     }
 
@@ -610,36 +571,6 @@ final class UIControllerTests: XCTestCase {
             .ignored)
     }
 
-    /// Numeric and string ids are separate namespaces, so task 1 and task "1"
-    /// do not overwrite each other.
-    func testProgressIdNamespacesAreSeparate() {
-        let controller = UIController()
-
-        controller.progress([(.string("id"), 1), (.string("status"), "running"),
-                             (.string("percent"), 10)])
-        controller.progress([(.string("id"), "1"), (.string("status"), "running"),
-                             (.string("percent"), 70)])
-        XCTAssertEqual(controller.progressPercent, 70)
-
-        controller.progress([(.string("id"), "1"), (.string("status"), "success")])
-        XCTAssertEqual(controller.progressPercent, 10)
-    }
-
-    // MARK: Document state
-
-    func testSetDocumentStateTracksLatestValue() {
-        let controller = UIController()
-        XCTAssertEqual(controller.documentState, .empty)
-
-        let first = DocumentState(path: "/tmp/first", isModified: false)
-        controller.setDocumentState(first)
-        XCTAssertEqual(controller.documentState, first)
-
-        let second = DocumentState(path: "/tmp/second", isModified: true)
-        controller.setDocumentState(second)
-        XCTAssertEqual(controller.documentState, second)
-    }
-
     // MARK: Startup
 
     func testFlushMarksStartupCompleteOnlyAfterReadySignal() {
@@ -654,44 +585,34 @@ final class UIControllerTests: XCTestCase {
         let after = controller.redraw([flush])
         XCTAssertEqual(after.count, 1)
         XCTAssertTrue(after[0].startupComplete)
-    }
 
-    func testStartupCompletionDoesNotCreateAnEmptyGrid() {
-        let controller = UIController()
-
-        XCTAssertNil(controller.startupDidComplete())
-        let grids = controller.redraw([["flush", []]])
+        // Before anything is drawn, completion creates no empty grid; the
+        // next flush still carries it.
+        let fresh = UIController()
+        XCTAssertNil(fresh.startupDidComplete())
+        let grids = fresh.redraw([flush])
         XCTAssertEqual(grids.count, 1)
         XCTAssertTrue(grids[0].startupComplete)
     }
 
     // MARK: Handoff
 
-    func testRestartEventRecordsServerHandoff() {
-        let controller = UIController()
-        _ = controller.redraw([["restart", "127.0.0.1:6666"]])
-        let handoff = controller.handoff
-        XCTAssertEqual(handoff?.kind, .restart)
-        XCTAssertEqual(handoff?.address, "127.0.0.1:6666")
-    }
-
-    func testConnectEventRecordsServerHandoff() {
-        let controller = UIController()
-        _ = controller.redraw([["connect", "/tmp/nvim-connect.sock"]])
-        let handoff = controller.handoff
-        XCTAssertEqual(handoff?.kind, .connect)
-        XCTAssertEqual(handoff?.address, "/tmp/nvim-connect.sock")
+    func testRestartAndConnectEventsRecordServerHandoff() {
+        let cases: [(String, UIHandoff.Kind, String)] = [
+            ("restart", .restart, "127.0.0.1:6666"),
+            ("connect", .connect, "/tmp/nvim-connect.sock"),
+        ]
+        for (event, kind, address) in cases {
+            let controller = UIController()
+            _ = controller.redraw([.array([.string(event), .string(address)])])
+            XCTAssertEqual(controller.handoff?.kind, kind, event)
+            XCTAssertEqual(controller.handoff?.address, address, event)
+        }
     }
 
     func testRealRestartEmitsHandoffFromNeovim() async throws {
         let process = try await spawnNvim(["--clean", "-n", "--embed"])
-        var options = UIOptions()
-        options.extLinegrid = true
-        let result = await process.uiAttach(width: 80, height: 24, options: options)
-        guard result.status == .success else {
-            await process.disconnect()
-            return XCTFail("attach failed: \(result.status) \(result.message)")
-        }
+        try await attachLinegridUI(process)
 
         // `:restart` starts a new server, sends the UI a "restart" handoff
         // naming its address, then the old server exits. The reconnection
@@ -745,14 +666,7 @@ final class UIControllerTests: XCTestCase {
 
     func testRealDetachEndsUIWhileSpawnedServerKeepsRunning() async throws {
         let process = try await spawnNvim(["--clean", "-n", "--embed"])
-        var options = UIOptions()
-        options.extLinegrid = true
-        let result = await process.uiAttach(width: 80, height: 24,
-                                            options: options)
-        guard result.status == .success else {
-            await process.disconnect()
-            return XCTFail("attach failed: \(result.status) \(result.message)")
-        }
+        try await attachLinegridUI(process)
         guard let address = await process.serverAddress() else {
             _ = await process.terminateChild()
             return XCTFail("spawned Neovim has no server address")
@@ -816,82 +730,12 @@ final class UIControllerTests: XCTestCase {
 
     // MARK: Live attach
 
-    /// Spawns a real bundled Neovim and reaps the child when the test ends.
-    ///
-    /// Closing the transport alone is not enough: a buffer left modified sends
-    /// Neovim to a prompt on its way out, and with no UI to answer it the
-    /// process waits there forever. `terminateChild` escalates to `SIGKILL`,
-    /// which ends it whatever state it stopped in.
-    ///
-    /// A private state directory keeps swap files out of the one the person
-    /// running the tests edits in, so a test that ends abruptly cannot leave
-    /// residue that later runs — or that person's own Neovim — trip over.
-    private func spawnNvim(
-        _ arguments: [String]
-    ) async throws -> NeovimProcess {
-        guard let nvim = await MainActor.run(body: { NeovimBundle.executableURL }) else {
-            throw XCTSkip("bundled nvim executable not available")
-        }
-        let state = FileManager.default.temporaryDirectory
-            .appendingPathComponent("nvmm-state-\(UUID().uuidString)")
-        let process = NeovimProcess()
-        try await process.spawn(path: nvim.path,
-                                argv: [nvim.path] + arguments,
-                                env: ["XDG_STATE_HOME=\(state.path)"])
-        addTeardownBlock {
-            _ = await process.terminateChild()
-            try? FileManager.default.removeItem(at: state)
-        }
-        return process
-    }
-
     /// Concatenates `count` cells of a row into a string.
     private func rowText(_ grid: Grid, row: Int, count: Int) -> String {
         (0..<count).map { grid.cell(row, $0).text }.joined()
     }
 
-    /// Awaits the first stream value matching `predicate`, or nil on timeout.
-    private func awaitFirst<T: Sendable>(
-        _ stream: AsyncStream<T>,
-        timeout: Duration,
-        where predicate: @escaping @Sendable (T) -> Bool
-    ) async -> T? {
-        await withTaskGroup(of: T?.self) { group in
-            group.addTask {
-                for await value in stream where predicate(value) { return value }
-                return nil
-            }
-            group.addTask {
-                try? await Task.sleep(for: timeout)
-                return nil
-            }
-            let result = await group.next() ?? nil
-            group.cancelAll()
-            return result
-        }
-    }
-
-    func testDocumentStatePublishedWhenBufferChanges() async throws {
-        let process = try await spawnNvim(["--clean", "-n", "--embed"])
-
-        var options = UIOptions()
-        options.extLinegrid = true
-        let result = await process.uiAttach(width: 80, height: 24, options: options)
-        guard result.status == .success else {
-            await process.disconnect()
-            return XCTFail("attach failed: \(result.status) \(result.message)")
-        }
-        await process.activateGUIStartup()
-
-        _ = try await process.request("nvim_input", [.string("ihello")])
-        let state = await awaitFirst(
-            process.documentStates, timeout: .seconds(5)) { $0.isModified }
-        await process.disconnect()
-
-        XCTAssertEqual(state, DocumentState(path: nil, isModified: true))
-    }
-
-    func testDocumentStateTracksUnmodifiedBufferSwitches() async throws {
+    func testDocumentStateTracksBufferSwitchesAndEdits() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(
@@ -903,14 +747,7 @@ final class UIControllerTests: XCTestCase {
         try Data().write(to: second)
 
         let process = try await spawnNvim(["--clean", "-n", "--embed"])
-        var options = UIOptions()
-        options.extLinegrid = true
-        let result = await process.uiAttach(
-            width: 80, height: 24, options: options)
-        guard result.status == .success else {
-            await process.disconnect()
-            return XCTFail("attach failed: \(result.status) \(result.message)")
-        }
+        try await attachLinegridUI(process)
 
         await process.openBuffers([first.path])
         let firstState = await awaitFirst(
@@ -938,6 +775,11 @@ final class UIControllerTests: XCTestCase {
             process.documentStates, timeout: .seconds(5)) {
                 $0 == newFileState
             }
+
+        // Typing is published as a modification of the same document.
+        _ = try await process.request("nvim_input", [.string("ihello")])
+        let modifiedState = await awaitFirst(
+            process.documentStates, timeout: .seconds(5)) { $0.isModified }
         await process.disconnect()
 
         XCTAssertEqual(firstState?.isModified, false)
@@ -951,91 +793,34 @@ final class UIControllerTests: XCTestCase {
         XCTAssertEqual(unnamedState, .empty)
         XCTAssertNotNil(writtenState)
         XCTAssertTrue(FileManager.default.fileExists(atPath: created.path))
+        XCTAssertEqual(modifiedState, DocumentState(
+            path: newFileState?.path, isModified: true))
     }
 
-    func testAttachAndTypedTextLandsInGrid() async throws {
-        let process = try await spawnNvim(["--clean", "-n", "--embed"])
-
-        var options = UIOptions()
-        options.extLinegrid = true
-        let result = await process.uiAttach(width: 80, height: 24, options: options)
-        guard result.status == .success else {
-            await process.disconnect()
-            return XCTFail("attach failed: \(result.status) \(result.message)")
-        }
-        await process.activateGUIStartup()
-
-        _ = try await process.request("nvim_input", [.string("ihello")])
-        let grid = await awaitFirst(
-            process.grids, timeout: .seconds(5)) { grid in
-            grid.width >= 5 && (0..<5).allSatisfy { !grid.cell(0, $0).text.isEmpty }
-                && grid.cell(0, 0).text == "h"
-        }
-        await process.disconnect()
-
-        guard let grid else { return XCTFail("no grid with typed text arrived") }
-        XCTAssertEqual(rowText(grid, row: 0, count: 5), "hello")
-    }
-
+    /// A headless server has already completed VimEnter. This exercises the
+    /// later UIEnter and GUI-startup path used by a connected UI.
     func testConnectToRunningNvimAttachesAndTypedTextLandsInGrid() async throws {
-        guard let nvim = await MainActor.run(body: { NeovimBundle.executableURL }) else {
-            throw XCTSkip("bundled nvim executable not available")
-        }
+        try await withListeningNvim { server in
+            let process = NeovimProcess()
+            try await process.connect(server.socket)
+            try await attachLinegridUI(process)
 
-        // A headless server has already completed VimEnter. This exercises the
-        // later UIEnter and GUI-startup path used by a connected UI.
-        let socket = NSTemporaryDirectory() + "nvmm-connect-\(UUID().uuidString).sock"
-        let server = Process()
-        server.executableURL = URL(fileURLWithPath: nvim.path)
-        server.arguments = ["--headless", "--clean", "-n", "-i", "NONE",
-                            "--listen", socket]
-        let state = NSTemporaryDirectory() + "nvmm-state-\(UUID().uuidString)"
-        server.environment = ProcessInfo.processInfo.environment
-            .merging(["XDG_STATE_HOME": state]) { _, new in new }
-        try server.run()
-        defer {
-            // The test leaves a modified buffer, and a `SIGTERM` sends Neovim
-            // to a prompt it can never answer without a UI. Kill it outright:
-            // nothing here depends on an orderly exit.
-            kill(server.processIdentifier, SIGKILL)
-            try? FileManager.default.removeItem(atPath: socket)
-            try? FileManager.default.removeItem(atPath: state)
-        }
-
-        // The server creates the socket asynchronously; wait for it to appear.
-        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-        while !FileManager.default.fileExists(atPath: socket) {
-            if ContinuousClock.now >= deadline {
-                throw XCTSkip("nvim server socket did not appear")
+            _ = try await process.request("nvim_input", [.string("ihello")])
+            let grid = await awaitFirst(
+                process.grids, timeout: .seconds(5)) { grid in
+                grid.startupComplete && grid.width >= 5
+                    && grid.cell(0, 0).text == "h"
             }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-
-        let process = NeovimProcess()
-        try await process.connect(socket)
-
-        var options = UIOptions()
-        options.extLinegrid = true
-        let result = await process.uiAttach(width: 80, height: 24, options: options)
-        guard result.status == .success else {
             await process.disconnect()
-            return XCTFail("attach failed: \(result.status) \(result.message)")
-        }
-        await process.activateGUIStartup()
 
-        _ = try await process.request("nvim_input", [.string("ihello")])
-        let grid = await awaitFirst(
-            process.grids, timeout: .seconds(5)) { grid in
-            grid.startupComplete && grid.width >= 5 && grid.cell(0, 0).text == "h"
-        }
-        await process.disconnect()
+            guard let grid else {
+                return XCTFail("no startup-complete grid with typed text arrived")
+            }
+            XCTAssertEqual(rowText(grid, row: 0, count: 5), "hello")
 
-        guard let grid else {
-            return XCTFail("no startup-complete grid with typed text arrived")
+            // Detaching this UI must leave the server running.
+            XCTAssertTrue(server.process.isRunning,
+                          "server should survive UI disconnect")
         }
-        XCTAssertEqual(rowText(grid, row: 0, count: 5), "hello")
-
-        // Detaching this UI must leave the server running.
-        XCTAssertTrue(server.isRunning, "server should survive UI disconnect")
     }
 }

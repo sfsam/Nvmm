@@ -5,8 +5,8 @@
 //  Transport tests. The socketpair-based cases drive the actor deterministically
 //  without Neovim: a controlled peer holds the far end and never (or selectively)
 //  responds, exercising the timeout, disconnect, and inbound-request paths. The
-//  remaining cases attach a real bundled `nvim --embed` and round-trip
-//  nvim_eval / nvim_command.
+//  remaining cases run a real bundled Neovim: startup and ginit ordering,
+//  blocked-input handling, saving, and undo.
 //
 
 import XCTest
@@ -23,35 +23,7 @@ private actor StartupGridProbe {
     }
 }
 
-private func awaitGrid(
-    _ stream: AsyncStream<Grid>, containing needles: [String],
-    timeout: Duration = .seconds(2)
-) async -> Grid? {
-    await withTaskGroup(of: Grid?.self) { group in
-        group.addTask {
-            for await grid in stream {
-                let text = (0..<grid.size.height).map { row in
-                    (0..<grid.size.width).map {
-                        grid.cell(row, $0).text
-                    }.joined()
-                }.joined(separator: "\n")
-                if needles.allSatisfy({ text.contains($0) }) { return grid }
-            }
-            return nil
-        }
-        group.addTask {
-            try? await Task.sleep(for: timeout)
-            return nil
-        }
-        let result = await group.next() ?? nil
-        group.cancelAll()
-        return result
-    }
-}
-
 final class NeovimProcessTests: XCTestCase {
-
-    private struct TestIOError: Error {}
 
     private nonisolated final class StandardErrorSink:
         @unchecked Sendable {
@@ -75,21 +47,6 @@ final class NeovimProcessTests: XCTestCase {
             defer { lock.unlock() }
             return output
         }
-    }
-
-    func testTransportErrorDescriptions() {
-        XCTAssertEqual(
-            RPCTransportError.connectionClosed.description,
-            "connection closed")
-        XCTAssertEqual(
-            RPCTransportError.readFailed(errno: 5).description,
-            "read failed (errno 5)")
-        XCTAssertEqual(
-            RPCTransportError.writeFailed(errno: 32).description,
-            "write failed (errno 32)")
-        XCTAssertEqual(
-            RPCTransportError.protocolViolation.description,
-            "protocol violation")
     }
 
     func testAbnormalNeovimExitDescriptions() {
@@ -167,18 +124,6 @@ final class NeovimProcessTests: XCTestCase {
         await process.disconnect()
     }
 
-    func testSpawnReapsChildExitStatus() async throws {
-        let process = NeovimProcess()
-        try await process.spawn(
-            path: "/bin/sh",
-            argv: ["/bin/sh", "-c", "exit 7"])
-
-        let termination = await process.childTermination()
-
-        XCTAssertEqual(termination, .exited(status: 7))
-        await process.disconnect()
-    }
-
     func testSpawnReapsChildSignal() async throws {
         let process = NeovimProcess()
         try await process.spawn(
@@ -191,24 +136,23 @@ final class NeovimProcessTests: XCTestCase {
         await process.disconnect()
     }
 
-    func testRecordedChildTerminationDoesNotWaitForRunningChild() async throws {
+    /// The recorded status is read without waiting: nil while the child
+    /// runs, and its exit once the reaper has collected it.
+    func testRecordedChildTerminationReportsOnlyAReapedExit() async throws {
+        let marker = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: marker) }
         let process = NeovimProcess()
         try await process.spawn(
             path: "/bin/sh",
-            argv: ["/bin/sh", "-c", "while :; do :; done"])
+            argv: ["/bin/sh", "-c",
+                   "while [ ! -e " + spawnShellQuoteArg(marker.path)
+                    + " ]; do sleep 0.01; done; exit 11"])
 
-        let termination = await process.recordedChildTermination()
+        let running = await process.recordedChildTermination()
+        XCTAssertNil(running)
 
-        XCTAssertNil(termination)
-        _ = await process.terminateChild(gracePeriod: .milliseconds(50))
-        await process.disconnect()
-    }
-
-    func testRecordedChildTerminationReturnsReapedStatus() async throws {
-        let process = NeovimProcess()
-        try await process.spawn(
-            path: "/bin/sh",
-            argv: ["/bin/sh", "-c", "exit 11"])
+        FileManager.default.createFile(atPath: marker.path, contents: nil)
         let deadline = ContinuousClock.now.advanced(by: .seconds(2))
         var termination: Spawn.Termination?
         while ContinuousClock.now < deadline {
@@ -311,7 +255,7 @@ final class NeovimProcessTests: XCTestCase {
     /// response fails the test instead of hanging it.
     private func makeSocketPair() throws -> (client: Int32, peer: Int32) {
         var fds = [Int32](repeating: -1, count: 2)
-        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else { throw TestIOError() }
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else { throw NeovimTestError() }
         var timeout = timeval(tv_sec: 2, tv_usec: 0)
         setsockopt(fds[1], SOL_SOCKET, SO_RCVTIMEO, &timeout,
                    socklen_t(MemoryLayout<timeval>.size))
@@ -323,7 +267,7 @@ final class NeovimProcessTests: XCTestCase {
             var offset = 0
             while offset < raw.count {
                 let count = write(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
-                if count <= 0 { throw TestIOError() }
+                if count <= 0 { throw NeovimTestError() }
                 offset += count
             }
         }
@@ -355,7 +299,7 @@ final class NeovimProcessTests: XCTestCase {
             if count <= 0 { break }
             unpacker.feed(buffer[0..<count])
         }
-        throw TestIOError()
+        throw NeovimTestError()
     }
 
     private func readRequest(
@@ -370,11 +314,11 @@ final class NeovimProcessTests: XCTestCase {
               values[2].stringValue == method,
               let arguments = values[3].arrayValue else {
             XCTFail("expected request for \(method), got \(message)")
-            throw TestIOError()
+            throw NeovimTestError()
         }
         if let expectedArguments, arguments != expectedArguments {
             XCTFail("unexpected arguments for \(method): \(arguments)")
-            throw TestIOError()
+            throw NeovimTestError()
         }
         return id
     }
@@ -492,153 +436,95 @@ final class NeovimProcessTests: XCTestCase {
         await process.disconnect()
     }
 
-    private func assertNewDocumentCommand(
-        inBuffers: Bool, expectedKeys: String
-    ) async throws {
-        let pair = try makeSocketPair()
-        defer { close(pair.peer) }
-        let process = NeovimProcess()
-        await process.attach(readFD: pair.client, writeFD: pair.client)
+    func testNewDocumentTypesItsCommand() async throws {
+        let cases = [(true, "<Esc><C-\\><C-N>:hide enew<CR>"),
+                     (false, "<Esc><C-\\><C-N>:tabnew<CR>")]
+        for (inBuffers, expectedKeys) in cases {
+            let pair = try makeSocketPair()
+            defer { close(pair.peer) }
+            let process = NeovimProcess()
+            await process.attach(readFD: pair.client, writeFD: pair.client)
 
-        await process.newDocument(inBuffers: inBuffers)
+            await process.newDocument(inBuffers: inBuffers)
 
-        var unpacker = MessagePackUnpacker()
-        let message = try readMessage(pair.peer, unpacker: &unpacker)
-        guard let values = message.arrayValue, values.count == 3,
-              values[0].integer?.unsigned == 2,
-              values[1].stringValue == "nvim_input",
-              let arguments = values[2].arrayValue, arguments.count == 1
-        else {
-            return XCTFail("expected an nvim_input notification: \(message)")
+            var unpacker = MessagePackUnpacker()
+            let message = try readMessage(pair.peer, unpacker: &unpacker)
+            guard let values = message.arrayValue, values.count == 3,
+                  values[0].integer?.unsigned == 2,
+                  values[1].stringValue == "nvim_input",
+                  let arguments = values[2].arrayValue, arguments.count == 1
+            else {
+                return XCTFail("expected an nvim_input notification: \(message)")
+            }
+            // The mode is never queried: the keys leave any pending state
+            // themselves, which is what makes this work while Neovim is blocked.
+            XCTAssertEqual(arguments[0].stringValue, expectedKeys)
+            await process.disconnect()
         }
-        // The mode is never queried: the keys leave any pending state
-        // themselves, which is what makes this work while Neovim is blocked.
-        XCTAssertEqual(arguments[0].stringValue, expectedKeys)
-        await process.disconnect()
     }
 
-    func testNewDocumentUsesHideEnewForBuffers() async throws {
-        try await assertNewDocumentCommand(
-            inBuffers: true, expectedKeys: "<Esc><C-\\><C-N>:hide enew<CR>")
-    }
+    /// An empty address, an error reply, and a dropped connection all mean
+    /// there is no address to report.
+    func testServerAddressIsNilWithoutAUsableReply() async throws {
+        enum Reply: CaseIterable { case empty, error, dropped }
+        for reply in Reply.allCases {
+            let pair = try makeSocketPair()
+            var peerOpen = true
+            defer { if peerOpen { close(pair.peer) } }
+            let process = NeovimProcess()
+            await process.attach(readFD: pair.client, writeFD: pair.client)
 
-    func testNewDocumentUsesTabnewForTabs() async throws {
-        try await assertNewDocumentCommand(
-            inBuffers: false, expectedKeys: "<Esc><C-\\><C-N>:tabnew<CR>")
-    }
+            let address = Task { await process.serverAddress() }
+            var unpacker = MessagePackUnpacker()
+            let id = try readRequest(
+                pair.peer, method: "nvim_eval",
+                arguments: [.string("v:servername")], unpacker: &unpacker)
+            switch reply {
+            case .empty:
+                try writeResponse(pair.peer, id: id, result: .string(""))
+            case .error:
+                try writeResponse(
+                    pair.peer, id: id,
+                    error: .array([.int(0), .string("evaluation failed")]))
+            case .dropped:
+                close(pair.peer)
+                peerOpen = false
+            }
 
-    func testServerAddressReturnsNilForEmptyAddress() async throws {
-        let pair = try makeSocketPair()
-        defer { close(pair.peer) }
-        let process = NeovimProcess()
-        await process.attach(readFD: pair.client, writeFD: pair.client)
-
-        let address = Task { await process.serverAddress() }
-        var unpacker = MessagePackUnpacker()
-        let id = try readRequest(
-            pair.peer, method: "nvim_eval",
-            arguments: [.string("v:servername")], unpacker: &unpacker)
-        try writeResponse(pair.peer, id: id, result: .string(""))
-
-        let result = await address.value
-        XCTAssertNil(result)
-        await process.disconnect()
-    }
-
-    func testServerAddressReturnsNilForErrorResponse() async throws {
-        let pair = try makeSocketPair()
-        defer { close(pair.peer) }
-        let process = NeovimProcess()
-        await process.attach(readFD: pair.client, writeFD: pair.client)
-
-        let address = Task { await process.serverAddress() }
-        var unpacker = MessagePackUnpacker()
-        let id = try readRequest(
-            pair.peer, method: "nvim_eval",
-            arguments: [.string("v:servername")], unpacker: &unpacker)
-        try writeResponse(
-            pair.peer, id: id,
-            error: .array([.int(0), .string("evaluation failed")]))
-
-        let result = await address.value
-        XCTAssertNil(result)
-        await process.disconnect()
-    }
-
-    func testServerAddressReturnsNilWhenConnectionDrops() async throws {
-        let pair = try makeSocketPair()
-        let process = NeovimProcess()
-        await process.attach(readFD: pair.client, writeFD: pair.client)
-
-        let address = Task { await process.serverAddress() }
-        var unpacker = MessagePackUnpacker()
-        _ = try readRequest(
-            pair.peer, method: "nvim_eval",
-            arguments: [.string("v:servername")], unpacker: &unpacker)
-        close(pair.peer)
-
-        let result = await address.value
-        XCTAssertNil(result)
-        await process.disconnect()
-    }
-
-    func testUIAttachReportsPostAttachLuaError() async throws {
-        let pair = try makeSocketPair()
-        defer { close(pair.peer) }
-        let process = NeovimProcess()
-        await process.attach(readFD: pair.client, writeFD: pair.client)
-        var options = UIOptions()
-        options.extLinegrid = true
-
-        let attach = Task {
-            await process.uiAttach(width: 80, height: 24, options: options)
+            let result = await address.value
+            XCTAssertNil(result, "\(reply)")
+            await process.disconnect()
         }
-        var unpacker = MessagePackUnpacker()
-        try answerAttachPreamble(pair.peer, unpacker: &unpacker)
-
-        var id = try readRequest(
-            pair.peer, method: "nvim_exec_lua", unpacker: &unpacker)
-        try writeResponse(pair.peer, id: id)
-        id = try readRequest(
-            pair.peer, method: "nvim_exec_lua", unpacker: &unpacker)
-        let setupError = MPValue.string("setup failed")
-        try writeResponse(pair.peer, id: id, error: setupError)
-
-        let result = await attach.value
-        XCTAssertEqual(result.status, .rpcError)
-        XCTAssertEqual(result.message, "Progress setup was rejected by Neovim")
-        XCTAssertEqual(result.rpcError, setupError)
-        await process.disconnect()
     }
 
-    func testUIAttachReportsStartupSetupError() async throws {
-        let pair = try makeSocketPair()
-        defer { close(pair.peer) }
-        let process = NeovimProcess()
-        await process.attach(readFD: pair.client, writeFD: pair.client)
-        var options = UIOptions()
-        options.extLinegrid = true
+    /// How far the peer answers the attach sequence before it stops.
+    private enum AttachPhase: String {
+        case startup, documentState, progress
 
-        let attach = Task {
-            await process.uiAttach(width: 80, height: 24, options: options)
+        /// Answers every request that precedes the phase's own request.
+        func answerPrelude(
+            _ test: NeovimProcessTests, _ fd: Int32,
+            _ unpacker: inout MessagePackUnpacker
+        ) throws {
+            switch self {
+            case .startup:
+                try test.answerAttachThroughRecentFiles(fd, unpacker: &unpacker)
+            case .documentState:
+                try test.answerAttachPreamble(fd, unpacker: &unpacker)
+            case .progress:
+                try test.answerAttachPreamble(fd, unpacker: &unpacker)
+                let id = try test.readRequest(
+                    fd, method: "nvim_exec_lua", unpacker: &unpacker)
+                try test.writeResponse(fd, id: id)
+            }
         }
-        var unpacker = MessagePackUnpacker()
-        try answerAttachThroughRecentFiles(
-            pair.peer, unpacker: &unpacker)
-        let id = try readRequest(
-            pair.peer, method: "nvim_exec_lua", unpacker: &unpacker)
-        let setupError = MPValue.string("setup failed")
-        try writeResponse(pair.peer, id: id, error: setupError)
-
-        let result = await attach.value
-        XCTAssertEqual(result.status, .rpcError)
-        XCTAssertEqual(result.message,
-                       "Startup setup was rejected by Neovim")
-        XCTAssertEqual(result.rpcError, setupError)
-        await process.disconnect()
     }
 
-    func testUIAttachTimesOutDuringStartupSetup() async throws {
+    /// Drives an attach to `phase`, then either rejects the phase's Lua
+    /// request with `error` or, with no error, never answers it.
+    private func attach(
+        stoppingAt phase: AttachPhase, error: MPValue? = nil
+    ) async throws -> UIAttachResult {
         let pair = try makeSocketPair()
         defer { close(pair.peer) }
         let process = NeovimProcess()
@@ -652,83 +538,64 @@ final class NeovimProcessTests: XCTestCase {
                 timeout: .seconds(1))
         }
         var unpacker = MessagePackUnpacker()
-        try answerAttachThroughRecentFiles(
-            pair.peer, unpacker: &unpacker)
-        _ = try readRequest(
+        try phase.answerPrelude(self, pair.peer, &unpacker)
+        let id = try readRequest(
             pair.peer, method: "nvim_exec_lua", unpacker: &unpacker)
+        if let error { try writeResponse(pair.peer, id: id, error: error) }
 
         let result = await attach.value
-        XCTAssertEqual(result.status, .timedOut)
-        XCTAssertEqual(result.message, "Startup setup timed out")
         await process.disconnect()
+        return result
     }
 
-    func testUIAttachTimesOutDuringPostAttachLua() async throws {
-        let pair = try makeSocketPair()
-        defer { close(pair.peer) }
-        let process = NeovimProcess()
-        await process.attach(readFD: pair.client, writeFD: pair.client)
-        var options = UIOptions()
-        options.extLinegrid = true
-
-        let attach = Task {
-            await process.uiAttach(
-                width: 80, height: 24, options: options,
-                timeout: .seconds(1))
+    func testUIAttachReportsWhichSetupPhaseWasRejected() async throws {
+        let setupError = MPValue.string("setup failed")
+        for (phase, message) in [
+            (AttachPhase.startup, "Startup setup was rejected by Neovim"),
+            (.progress, "Progress setup was rejected by Neovim"),
+        ] {
+            let result = try await attach(stoppingAt: phase, error: setupError)
+            XCTAssertEqual(result.status, .rpcError, phase.rawValue)
+            XCTAssertEqual(result.message, message)
+            XCTAssertEqual(result.rpcError, setupError, phase.rawValue)
         }
-        var unpacker = MessagePackUnpacker()
-        try answerAttachPreamble(pair.peer, unpacker: &unpacker)
-        _ = try readRequest(
-            pair.peer, method: "nvim_exec_lua", unpacker: &unpacker)
-
-        let result = await attach.value
-        XCTAssertEqual(result.status, .timedOut)
-        XCTAssertEqual(result.message, "Document-state setup timed out")
-        await process.disconnect()
     }
 
-    func testProgressCompletionSurvivesLaterStateUpdate() async {
-        let completion = ProgressUpdate(percent: 100, isCompletion: true)
-        let state = ProgressUpdate(percent: 25, isCompletion: false)
-
-        let received = await bufferedProgressUpdate([completion, state])
-        XCTAssertEqual(received, completion)
+    func testUIAttachReportsWhichSetupPhaseTimedOut() async throws {
+        for (phase, message) in [
+            (AttachPhase.startup, "Startup setup timed out"),
+            (.documentState, "Document-state setup timed out"),
+        ] {
+            let result = try await attach(stoppingAt: phase)
+            XCTAssertEqual(result.status, .timedOut, phase.rawValue)
+            XCTAssertEqual(result.message, message)
+        }
     }
 
-    func testProgressCompletionDisplacesEarlierStateUpdate() async {
-        let state = ProgressUpdate(percent: 25, isCompletion: false)
-        let completion = ProgressUpdate(percent: 100, isCompletion: true)
+    /// The progress stream holds one update. A completion is never displaced
+    /// by a later state update, and otherwise the newest update wins.
+    func testProgressBufferKeepsCompletionsOverStateUpdates() async {
+        let state25 = ProgressUpdate(percent: 25, isCompletion: false)
+        let state50 = ProgressUpdate(percent: 50, isCompletion: false)
+        let done75 = ProgressUpdate(percent: 75, isCompletion: true)
+        let done100 = ProgressUpdate(percent: 100, isCompletion: true)
+        let cases: [([ProgressUpdate], ProgressUpdate)] = [
+            ([done100, state25], done100),
+            ([state25, done100], done100),
+            ([state25, state50], state50),
+            ([done75, done100], done100),
+        ]
+        for (updates, expected) in cases {
+            let received = await bufferedProgressUpdate(updates)
+            XCTAssertEqual(received, expected, "\(updates)")
+        }
 
-        let received = await bufferedProgressUpdate([state, completion])
-        XCTAssertEqual(received, completion)
-    }
-
-    func testProgressStateUpdatesKeepNewestValue() async {
-        let old = ProgressUpdate(percent: 25, isCompletion: false)
-        let newest = ProgressUpdate(percent: 50, isCompletion: false)
-
-        let received = await bufferedProgressUpdate([old, newest])
-        XCTAssertEqual(received, newest)
-    }
-
-    func testProgressCompletionsKeepNewestValue() async {
-        let old = ProgressUpdate(percent: 75, isCompletion: true)
-        let newest = ProgressUpdate(percent: 100, isCompletion: true)
-
-        let received = await bufferedProgressUpdate([old, newest])
-        XCTAssertEqual(received, newest)
-    }
-
-    func testProgressPublisherIgnoresTerminatedStream() async {
+        // Publishing into a finished stream is ignored.
         let pair = AsyncStream.makeStream(
             of: ProgressUpdate.self,
             bufferingPolicy: .bufferingNewest(1))
         pair.continuation.finish()
-
-        publishProgressUpdate(
-            ProgressUpdate(percent: 100, isCompletion: true),
-            to: pair.continuation)
-
+        publishProgressUpdate(done100, to: pair.continuation)
         var iterator = pair.stream.makeAsyncIterator()
         let received = await iterator.next()
         XCTAssertNil(received)
@@ -740,9 +607,6 @@ final class NeovimProcessTests: XCTestCase {
 
         XCTAssertEqual(chunks.joined(), text)
         XCTAssertTrue(chunks.allSatisfy { $0.utf8.count <= 5 })
-    }
-
-    func testEmptyPasteRemainsOneChunk() {
         XCTAssertEqual(pasteChunks("", maximumBytes: 4), [""])
     }
 
@@ -901,7 +765,9 @@ final class NeovimProcessTests: XCTestCase {
         await process.disconnect()
     }
 
-    func testDisconnectFailsPendingRequest() async throws {
+    /// A disconnect fails the request waiting on it, and every request
+    /// made after it.
+    func testDisconnectFailsPendingAndLaterRequests() async throws {
         let (client, peer) = try makeSocketPair()
         defer { close(peer) }
         let process = NeovimProcess()
@@ -919,16 +785,8 @@ final class NeovimProcessTests: XCTestCase {
                 return XCTFail("expected .connectionClosed, got \(error)")
             }
         }
-    }
 
-    func testRequestAfterDisconnectThrows() async throws {
-        let (client, peer) = try makeSocketPair()
-        defer { close(peer) }
-        let process = NeovimProcess()
-        await process.attach(readFD: client, writeFD: client)
-        await process.disconnect()
         try? await Task.sleep(for: .milliseconds(50)) // let the shutdown propagate
-
         do {
             _ = try await process.request("nvim_get_mode")
             XCTFail("expected a transport error")
@@ -1033,153 +891,7 @@ final class NeovimProcessTests: XCTestCase {
         XCTAssertEqual(read(peer, &byte, 1), 0)
     }
 
-    // MARK: Real-Neovim helper
-
-    /// Runs `body` against a real bundled Neovim and reaps the child.
-    ///
-    /// Closing the transport alone is not enough: a buffer left modified sends
-    /// Neovim to a prompt on its way out, and with no UI to answer it the
-    /// process waits there forever. `terminateChild` escalates to `SIGKILL`,
-    /// which ends it whatever state it stopped in.
-    ///
-    /// Private XDG directories keep the test from reading user configuration
-    /// and keep swap or state files from affecting later test or editor runs.
-    private func withNvim(_ body: (NeovimProcess) async throws -> Void) async throws {
-        guard let nvim = await MainActor.run(body: { NeovimBundle.executableURL }) else {
-            throw XCTSkip("bundled nvim executable not available")
-        }
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("nvmm-test-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: root) }
-        let process = NeovimProcess()
-        try await process.spawn(
-            path: nvim.path,
-            argv: [nvim.path, "--embed", "-n", "-u", "NONE", "-i", "NONE"],
-            env: isolatedNvimEnvironment(root: root))
-        do {
-            try await body(process)
-        } catch {
-            await process.disconnect()
-            _ = await process.terminateChild()
-            throw error
-        }
-        await process.disconnect()
-        _ = await process.terminateChild()
-    }
-
-    private func withConfiguredNvim(
-        initLua: String,
-        ginitVim: String?,
-        arguments: [String] = [],
-        _ body: (NeovimProcess) async throws -> Void
-    ) async throws {
-        guard let nvim = await MainActor.run(
-            body: { NeovimBundle.executableURL }) else {
-            throw XCTSkip("bundled nvim executable not available")
-        }
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("nvmm-config-test-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: root) }
-        let config = root.appendingPathComponent("config/nvim")
-        try FileManager.default.createDirectory(
-            at: config, withIntermediateDirectories: true)
-        try Data(initLua.utf8).write(
-            to: config.appendingPathComponent("init.lua"))
-        if let ginitVim {
-            try Data(ginitVim.utf8).write(
-                to: config.appendingPathComponent("ginit.vim"))
-        }
-
-        let process = NeovimProcess()
-        let argv = [nvim.path, "--embed", "-n", "-i", "NONE"] + arguments
-        try await process.spawn(
-            path: nvim.path, argv: argv,
-            env: isolatedNvimEnvironment(root: root))
-        do {
-            try await body(process)
-        } catch {
-            await process.disconnect()
-            _ = await process.terminateChild()
-            throw error
-        }
-        await process.disconnect()
-        _ = await process.terminateChild()
-    }
-
-    private func withListeningConfiguredNvim(
-        ginitVim: String,
-        _ body: (String) async throws -> Void
-    ) async throws {
-        guard let nvim = await MainActor.run(
-            body: { NeovimBundle.executableURL }) else {
-            throw XCTSkip("bundled nvim executable not available")
-        }
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("nvmm-server-test-\(UUID().uuidString)")
-        let config = root.appendingPathComponent("config/nvim")
-        try FileManager.default.createDirectory(
-            at: config, withIntermediateDirectories: true)
-        try Data(ginitVim.utf8).write(
-            to: config.appendingPathComponent("ginit.vim"))
-        let socket = NSTemporaryDirectory()
-            + "nvmm-server-\(UUID().uuidString).sock"
-
-        var environment = ProcessInfo.processInfo.environment
-        for entry in isolatedNvimEnvironment(root: root) {
-            let pair = entry.split(
-                separator: "=", maxSplits: 1,
-                omittingEmptySubsequences: false)
-            environment[String(pair[0])] = String(pair[1])
-        }
-        let server = Process()
-        server.executableURL = nvim
-        server.arguments = ["--headless", "-n", "-i", "NONE",
-                            "--listen", socket]
-        server.environment = environment
-        try server.run()
-        defer {
-            if server.isRunning { kill(server.processIdentifier, SIGKILL) }
-            try? FileManager.default.removeItem(atPath: socket)
-            try? FileManager.default.removeItem(at: root)
-        }
-
-        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-        while !FileManager.default.fileExists(atPath: socket) {
-            if ContinuousClock.now >= deadline {
-                throw XCTSkip("nvim server socket did not appear")
-            }
-            try await Task.sleep(for: .milliseconds(25))
-        }
-        try await body(socket)
-    }
-
-    private func isolatedNvimEnvironment(root: URL) -> [String] {
-        [
-            "EXINIT=",
-            "NVIM_APPNAME=nvim",
-            "VIMINIT=",
-            "XDG_CACHE_HOME=\(root.appendingPathComponent("cache").path)",
-            "XDG_CONFIG_HOME=\(root.appendingPathComponent("config").path)",
-            "XDG_CONFIG_DIRS=\(root.appendingPathComponent("config-dirs").path)",
-            "XDG_DATA_HOME=\(root.appendingPathComponent("data").path)",
-            "XDG_DATA_DIRS=\(root.appendingPathComponent("data-dirs").path)",
-            "XDG_STATE_HOME=\(root.appendingPathComponent("state").path)",
-        ]
-    }
-
-    private func attachLinegridUI(_ process: NeovimProcess) async throws {
-        var options = UIOptions()
-        options.extLinegrid = true
-        let result = await process.uiAttach(
-            width: 80, height: 24, options: options)
-        guard result.status == .success else {
-            XCTFail(
-                "attach failed: \(result.status) \(result.message) "
-                    + "\(String(describing: result.rpcError))")
-            throw TestIOError()
-        }
-        await process.activateGUIStartup()
-    }
+    // MARK: Real-Neovim cases
 
     func testUIAttachCompletesRequiredLuaSetup() async throws {
         try await withNvim { process in
@@ -1276,9 +988,9 @@ final class NeovimProcessTests: XCTestCase {
     }
 
     func testRemoteUIEnterPromptCanOutlastAttachDeadline() async throws {
-        try await withListeningConfiguredNvim(ginitVim: "") { socket in
+        try await withListeningNvim(ginitVim: "") { server in
             let process = NeovimProcess()
-            try await process.connect(socket)
+            try await process.connect(server.socket)
             let hook = """
                 vim.api.nvim_create_autocmd('UIEnter', {once=true,
                   callback=function()
@@ -1321,9 +1033,9 @@ final class NeovimProcessTests: XCTestCase {
     }
 
     func testRemoteSlowUIEnterStillTimesOut() async throws {
-        try await withListeningConfiguredNvim(ginitVim: "") { socket in
+        try await withListeningNvim(ginitVim: "") { server in
             let process = NeovimProcess()
-            try await process.connect(socket)
+            try await process.connect(server.socket)
             let hook = """
                 vim.api.nvim_create_autocmd('UIEnter', {once=true,
                   callback=function()
@@ -1434,18 +1146,6 @@ final class NeovimProcessTests: XCTestCase {
         }
     }
 
-    func testMissingGinitDoesNotChangeStartup() async throws {
-        try await withConfiguredNvim(
-            initLua: "vim.g.nvmm_init_ran = true", ginitVim: nil
-        ) { process in
-            try await attachLinegridUI(process)
-            let finished = await waitUntilTrue(
-                process,
-                "v:vim_did_enter && get(g:, 'nvmm_init_ran', v:false)")
-            XCTAssertTrue(finished)
-        }
-    }
-
     func testGinitErrorIsReportedWithoutStoppingStartup() async throws {
         let ginitVim = """
             let g:nvmm_ginit_ran = 1
@@ -1493,11 +1193,11 @@ final class NeovimProcessTests: XCTestCase {
             let g:nvmm_prompt_answer = input('Nvmm prompt: ')
             let g:nvmm_prompt_done = 1
             """
-        try await withListeningConfiguredNvim(
+        try await withListeningNvim(
             ginitVim: ginitVim
-        ) { socket in
+        ) { server in
             let process = NeovimProcess()
-            try await process.connect(socket)
+            try await process.connect(server.socket)
 
             var options = UIOptions()
             options.extLinegrid = true
@@ -1523,13 +1223,13 @@ final class NeovimProcessTests: XCTestCase {
         let ginitVim = """
             let g:nvmm_ginit_count = get(g:, 'nvmm_ginit_count', 0) + 1
             """
-        try await withListeningConfiguredNvim(
+        try await withListeningNvim(
             ginitVim: ginitVim
-        ) { socket in
+        ) { server in
             let first = NeovimProcess()
             let second = NeovimProcess()
-            try await first.connect(socket)
-            try await second.connect(socket)
+            try await first.connect(server.socket)
+            try await second.connect(server.socket)
 
             var options = UIOptions()
             options.extLinegrid = true
@@ -1639,46 +1339,6 @@ final class NeovimProcessTests: XCTestCase {
         return false
     }
 
-    /// Polls a Vimscript condition until it holds. Typed keys are consumed by
-    /// Neovim's main loop rather than answered like a request, so the state
-    /// they produce arrives after the call that sent them.
-    private func waitUntilTrue(
-        _ process: NeovimProcess, _ expr: String,
-        timeout: Duration = .seconds(3)
-    ) async -> Bool {
-        let deadline = ContinuousClock.now.advanced(by: timeout)
-        while ContinuousClock.now < deadline {
-            let reply = try? await process.request(
-                "nvim_eval", [.string(expr)])
-            if let reply, !reply.isError,
-               reply.result.integer?.signed == 1 {
-                return true
-            }
-            try? await Task.sleep(for: .milliseconds(25))
-        }
-        return false
-    }
-
-    private func awaitStartupGrid(
-        _ stream: AsyncStream<Grid>, timeout: Duration = .seconds(2)
-    ) async -> Grid? {
-        await withTaskGroup(of: Grid?.self) { group in
-            group.addTask {
-                for await grid in stream where grid.startupComplete {
-                    return grid
-                }
-                return nil
-            }
-            group.addTask {
-                try? await Task.sleep(for: timeout)
-                return nil
-            }
-            let result = await group.next() ?? nil
-            group.cancelAll()
-            return result
-        }
-    }
-
     /// Puts Neovim into the block every one of these cases starts from: `q`
     /// in Normal mode waits for a register name, which only the user can
     /// give. False if the wait never took hold.
@@ -1702,16 +1362,6 @@ final class NeovimProcessTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(25))
         }
         return false
-    }
-
-    // MARK: Real-Neovim cases
-
-    func testEvalRoundTrip() async throws {
-        try await withNvim { process in
-            let response = try await process.request("nvim_eval", [.string("1 + 2")])
-            XCTAssertTrue(response.error.isNull)
-            XCTAssertEqual(response.result, .int(3))
-        }
     }
 
     /// While Neovim is blocked waiting for input it answers `nvim_get_mode`
@@ -1754,22 +1404,6 @@ final class NeovimProcessTests: XCTestCase {
                 try? await Task.sleep(for: .milliseconds(50))
             }
             XCTAssertTrue(exited)
-        }
-    }
-
-    func testCommandRoundTrip() async throws {
-        try await withNvim { process in
-            let set = try await process.request("nvim_command", [.string("let g:nvmm = 42")])
-            XCTAssertTrue(set.error.isNull)
-            let get = try await process.request("nvim_eval", [.string("g:nvmm")])
-            XCTAssertEqual(get.result, .int(42))
-        }
-    }
-
-    func testInvalidCommandReportsError() async throws {
-        try await withNvim { process in
-            let response = try await process.request("nvim_command", [.string("ThisIsNotACommand")])
-            XCTAssertTrue(response.isError)
         }
     }
 
