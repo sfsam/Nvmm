@@ -140,6 +140,87 @@ nonisolated enum CLIEndpoint {
     }
 }
 
+/// The helper's end of one control connection: it writes the request and
+/// reads the replies.
+///
+/// The app may answer and close before the request has been written or read.
+/// It does that when it refuses a connection it will not serve, such as one
+/// over the pending-connection cap. What it wrote before closing stays
+/// readable, so a closed peer is not treated as a failure until the reply has
+/// been looked for.
+nonisolated struct CLIClient {
+    let descriptor: Int32
+
+    init(descriptor: Int32) {
+        self.descriptor = descriptor
+    }
+
+    func send(_ request: CLIRequest) throws {
+        let data = try request.encodedLine(
+            maximumBytes: CLIProtocol.maximumRequestBytes)
+        try data.withUnsafeBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let count = Darwin.write(descriptor,
+                                         bytes.baseAddress! + offset,
+                                         bytes.count - offset)
+                if count == -1 {
+                    if errno == EINTR { continue }
+                    // The app has closed its end; its reply, if it sent one,
+                    // is still waiting to be read. Darwin reports the closed
+                    // peer as any of these, depending on how far its close
+                    // had got.
+                    if errno == EPIPE || errno == ECONNRESET
+                        || errno == ENOTCONN { return }
+                    throw CLIError(String(cString: strerror(errno)))
+                }
+                offset += count
+            }
+        }
+    }
+
+    func readResponse(waitForever: Bool) throws -> CLIResponse {
+        var timeout = waitForever
+            ? timeval(tv_sec: 0, tv_usec: 0)
+            : timeval(tv_sec: 10, tv_usec: 0)
+        // Darwin refuses the option once the peer has disconnected. A
+        // disconnected socket cannot block, so the read goes ahead untimed.
+        guard setsockopt(
+            descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+            socklen_t(MemoryLayout<timeval>.size)
+        ) == 0 || errno == EINVAL || errno == ENOTCONN else {
+            throw CLIError(String(cString: strerror(errno)))
+        }
+
+        var data = Data()
+        while data.count <= CLIProtocol.maximumResponseBytes {
+            var byte: UInt8 = 0
+            let count = Darwin.read(descriptor, &byte, 1)
+            if count == 0 {
+                throw CLIError("Nvmm closed the control connection.")
+            }
+            if count == -1 {
+                if errno == EINTR { continue }
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    throw CLIError("Timed out waiting for Nvmm.")
+                }
+                throw CLIError(String(cString: strerror(errno)))
+            }
+            if byte == 0x0a {
+                let response = try JSONDecoder().decode(CLIResponse.self,
+                                                        from: data)
+                guard response.version == CLIProtocol.version else {
+                    throw CLIError(
+                        "Nvmm uses an incompatible control protocol.")
+                }
+                return response
+            }
+            data.append(byte)
+        }
+        throw CLIError("Nvmm sent an oversized response.")
+    }
+}
+
 /// A failure to report to a person: a sentence, and the `errno` it came from
 /// when there was one.
 ///

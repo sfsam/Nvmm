@@ -319,6 +319,8 @@ final class ControlServerTests: XCTestCase {
         return request
     }
 
+    /// Runs one request through the helper's own client, the way `nvmm`
+    /// does: the acknowledgement, then the close for an accepted wait.
     private nonisolated static func exchange(
         _ request: CLIRequest, path: String
     ) throws -> [CLIResponse] {
@@ -327,36 +329,12 @@ final class ControlServerTests: XCTestCase {
             throw CLIError.system(result.error)
         }
         defer { close(result.fd) }
-        try setReceiveTimeout(result.fd)
+        let client = CLIClient(descriptor: result.fd)
+        try client.send(request)
 
-        var requestData = try JSONEncoder().encode(request)
-        requestData.append(0x0a)
-        try requestData.withUnsafeBytes { bytes in
-            var offset = 0
-            while offset < bytes.count {
-                let count = Darwin.write(result.fd,
-                                         bytes.baseAddress! + offset,
-                                         bytes.count - offset)
-                guard count > 0 else {
-                    throw CLIError.system(errno)
-                }
-                offset += count
-            }
-        }
-
-        var input = Data()
-        var responses: [CLIResponse] = []
-        var byte: UInt8 = 0
-        while Darwin.read(result.fd, &byte, 1) == 1 {
-            if byte == 0x0a {
-                responses.append(try JSONDecoder().decode(
-                    CLIResponse.self, from: input))
-                input.removeAll(keepingCapacity: true)
-            } else {
-                input.append(byte)
-            }
-        }
-        return responses
+        let first = try client.readResponse(waitForever: false)
+        guard request.wait, first.status == .accepted else { return [first] }
+        return [first, try client.readResponse(waitForever: false)]
     }
 
     private nonisolated static func exchangeAsync(
