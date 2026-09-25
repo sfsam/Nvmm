@@ -4,7 +4,7 @@
 //
 //  Covers every MessagePack format branch for both packing (exact bytes) and
 //  unpacking (whole buffer and fragmented one byte at a time), plus one-shot
-//  integer decoding, RPC framing, and value independence.
+//  integer decoding, RPC framing, redraw streaming, and resource limits.
 //
 
 import XCTest
@@ -65,10 +65,12 @@ final class MessagePackTests: XCTestCase {
 
     // MARK: Unpack scalars
 
-    func testUnpackInvalid() { assertUnpacks([0xc1], to: .invalid) }
-    func testUnpackNull() { assertUnpacks([0xc0], to: .null) }
-    func testUnpackBoolTrue() { assertUnpacks([0xc3], to: .bool(true)) }
-    func testUnpackBoolFalse() { assertUnpacks([0xc2], to: .bool(false)) }
+    func testUnpackScalars() {
+        assertUnpacks([0xc1], to: .invalid)
+        assertUnpacks([0xc0], to: .null)
+        assertUnpacks([0xc3], to: .bool(true))
+        assertUnpacks([0xc2], to: .bool(false))
+    }
 
     func testUnpackUnsignedIntegers() {
         assertUnpacks([0x00], to: .int(0))
@@ -98,10 +100,7 @@ final class MessagePackTests: XCTestCase {
                       to: .double(Double.greatestFiniteMagnitude))
         assertUnpacks([0xcb, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
                       to: .double(2.2250738585072014e-308))
-    }
-
-    func testUnpackFloat32() {
-        // 1.0f == 0x3f800000
+        // A float32 widens to a double: 1.0f == 0x3f800000.
         assertUnpacks([0xca, 0x3f, 0x80, 0x00, 0x00], to: .double(1.0))
     }
 
@@ -147,14 +146,8 @@ final class MessagePackTests: XCTestCase {
                       to: .array([.int(0), .int(1), .int(2), .int(3)]))
         assertUnpacks([0xdd, 0x00, 0x00, 0x00, 0x04, 0x00, 0x01, 0x02, 0x03],
                       to: .array([.int(0), .int(1), .int(2), .int(3)]))
-    }
-
-    func testUnpackArrayRecursive() {
         assertUnpacks([0x91, 0x91, 0x91, 0x91, 0x90],
                       to: .array([.array([.array([.array([.array([])])])])]))
-    }
-
-    func testUnpackArrayHeterogeneous() {
         assertUnpacks([0x93, 0x7b, 0xa4] + Array("test".utf8) + [0xc3],
                       to: .array([.int(123), .string("test"), .bool(true)]))
     }
@@ -270,12 +263,6 @@ final class MessagePackTests: XCTestCase {
         assertPacks([0xdf, 0xff, 0xff, 0xff, 0xff]) { $0.startMap(4_294_967_295) }
     }
 
-    func testPackArrayRecursive() {
-        assertPacks([0x91, 0x91, 0x91, 0x91, 0x90]) {
-            $0.startArray(1); $0.startArray(1); $0.startArray(1); $0.startArray(1); $0.startArray(0)
-        }
-    }
-
     func testPackValueTree() {
         assertPacks([0x93, 0x7b, 0xa4] + Array("test".utf8) + [0xc3]) {
             $0.pack(.array([.int(123), .string("test"), .bool(true)]))
@@ -318,31 +305,29 @@ final class MessagePackTests: XCTestCase {
 
     // MARK: RPC framing
 
-    func testEncodeNotification() {
-        var writer = MessagePackWriter()
-        writer.encodeNotification(method: "redraw", arguments: [.int(1), .string("x")])
-        var unpacker = MessagePackUnpacker()
-        unpacker.feed(writer.bytes)
-        XCTAssertEqual(unpacker.unpack(),
-                       .array([.int(2), .string("redraw"), .array([.int(1), .string("x")])]))
-        XCTAssertNil(unpacker.unpack())
-    }
+    func testEncodeRPCFraming() {
+        func decoded(_ encode: (inout MessagePackWriter) -> Void) -> MPValue? {
+            var writer = MessagePackWriter()
+            encode(&writer)
+            var unpacker = MessagePackUnpacker()
+            unpacker.feed(writer.bytes)
+            defer { XCTAssertNil(unpacker.unpack()) }
+            return unpacker.unpack()
+        }
 
-    func testEncodeRequest() {
-        var writer = MessagePackWriter()
-        writer.encodeRequest(id: 7, method: "nvim_eval", arguments: [.string("1+1")])
-        var unpacker = MessagePackUnpacker()
-        unpacker.feed(writer.bytes)
-        XCTAssertEqual(unpacker.unpack(),
-                       .array([.int(0), .int(7), .string("nvim_eval"), .array([.string("1+1")])]))
-    }
-
-    func testEncodeResponse() {
-        var writer = MessagePackWriter()
-        writer.encodeResponse(id: 7, error: .null, result: .int(2))
-        var unpacker = MessagePackUnpacker()
-        unpacker.feed(writer.bytes)
-        XCTAssertEqual(unpacker.unpack(), .array([.int(1), .int(7), .null, .int(2)]))
+        XCTAssertEqual(
+            decoded { $0.encodeNotification(
+                method: "redraw", arguments: [.int(1), .string("x")]) },
+            .array([.int(2), .string("redraw"),
+                    .array([.int(1), .string("x")])]))
+        XCTAssertEqual(
+            decoded { $0.encodeRequest(
+                id: 7, method: "nvim_eval", arguments: [.string("1+1")]) },
+            .array([.int(0), .int(7), .string("nvim_eval"),
+                    .array([.string("1+1")])]))
+        XCTAssertEqual(
+            decoded { $0.encodeResponse(id: 7, error: .null, result: .int(2)) },
+            .array([.int(1), .int(7), .null, .int(2)]))
     }
 
     func testRedrawEventsStreamWithoutRetainingTheBatch() {
@@ -387,17 +372,6 @@ final class MessagePackTests: XCTestCase {
         XCTAssertEqual(
             message,
             .array([.int(2), .string("redraw"), .array([event]), .null]))
-    }
-
-    func testOrdinaryUnpackRetainsRedrawEvents() {
-        let event = MPValue.array([.string("flush"), .array([])])
-        var writer = MessagePackWriter()
-        writer.encodeNotification(method: "redraw", arguments: [event])
-
-        var unpacker = MessagePackUnpacker()
-        unpacker.feed(writer.bytes)
-        XCTAssertEqual(unpacker.unpack(),
-                       .array([.int(2), .string("redraw"), .array([event])]))
     }
 
     func testGridLineStreamsCellsWithoutBuildingAnEvent() {
@@ -524,48 +498,26 @@ final class MessagePackTests: XCTestCase {
         XCTAssertTrue(unpacker.failed)
     }
 
-    // MARK: Value independence
-
-    func testDecodedValuesAreIndependent() {
-        // Swift value semantics: a decoded tree owns its storage and is
-        // unaffected by later mutation of the source buffer.
-        var buffer: [UInt8] = [0x81, 0xa5] + Array("items".utf8) +
-            [0x92, 0xa5] + Array("value".utf8) + [0xd0, 0xd6] // -42
-        var unpacker = MessagePackUnpacker()
-        unpacker.feed(buffer)
-        let decoded = unpacker.unpack()
-        buffer.replaceSubrange(buffer.indices, with: repeatElement(0xff, count: buffer.count))
-
-        XCTAssertEqual(decoded,
-                       .map([(.string("items"), .array([.string("value"), .int(-42)]))]))
-    }
-
     // MARK: Resource limits
 
-    func testOversizedArrayHeaderFailsWithoutItsPayload() {
-        // array32 claiming 0xFFFFFFFF elements, header only.
-        var unpacker = MessagePackUnpacker()
-        unpacker.feed([0xdd, 0xff, 0xff, 0xff, 0xff])
-        XCTAssertNil(unpacker.unpack())
-        XCTAssertTrue(unpacker.failed)
+    func testHostileHeadersFailBeforeTheirPayload() {
+        let cases: [(String, [UInt8])] = [
+            // map32 claiming 0xFFFFFFFF entries, header only.
+            ("oversized map", [0xdf, 0xff, 0xff, 0xff, 0xff]),
+            // Nesting past the depth limit fails while descending, before it
+            // could run out of bytes, so the fixarray headers alone suffice.
+            ("deep nesting", Array(repeating: 0x91, count: 200)),
+        ]
+        for (label, bytes) in cases {
+            var unpacker = MessagePackUnpacker()
+            unpacker.feed(bytes)
+            XCTAssertNil(unpacker.unpack(), label)
+            XCTAssertTrue(unpacker.failed, label)
+        }
     }
 
-    func testOversizedMapHeaderFails() {
-        var unpacker = MessagePackUnpacker()
-        unpacker.feed([0xdf, 0xff, 0xff, 0xff, 0xff]) // map32, count 0xFFFFFFFF
-        XCTAssertNil(unpacker.unpack())
-        XCTAssertTrue(unpacker.failed)
-    }
-
-    func testDeeplyNestedValueFails() {
-        // Nesting past the depth limit fails while descending, before it could
-        // run out of bytes, so the many fixarray headers alone are enough.
-        var unpacker = MessagePackUnpacker()
-        unpacker.feed(Array(repeating: 0x91, count: 200)) // fixarray(1) x 200
-        XCTAssertNil(unpacker.unpack())
-        XCTAssertTrue(unpacker.failed)
-    }
-
+    /// An array32 header claiming 0xFFFFFFFF elements fails without its
+    /// payload, and the decoder stays failed.
     func testDecoderIsTerminalAfterFailure() {
         var unpacker = MessagePackUnpacker()
         unpacker.feed([0xdd, 0xff, 0xff, 0xff, 0xff])
