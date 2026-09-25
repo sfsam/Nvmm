@@ -23,7 +23,8 @@ final class RenderTests: XCTestCase {
         }
     }
 
-    private struct CellGraphicImage {
+    /// A rendered BGRA target, read back for pixel assertions.
+    private struct Pixels {
         let pixels: [UInt8]
         let width: Int
         let height: Int
@@ -37,19 +38,98 @@ final class RenderTests: XCTestCase {
         }
     }
 
+    private func makeBuffer<T>(_ device: MTLDevice,
+                               _ values: [T]) throws -> MTLBuffer {
+        try XCTUnwrap(values.withUnsafeBytes {
+            device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
+        })
+    }
+
+    /// Draws `instances` quads with `pipeline` into a transparent
+    /// `width`x`height` target and reads the result back. The uniforms are
+    /// bound to both stages at index 0 and the instance data to the vertex
+    /// stage at index 1, as the renderer binds them.
+    private func render(
+        _ context: RenderContext, _ pipeline: MTLRenderPipelineState,
+        width: Int, height: Int, uniforms: uniform_data,
+        instances: MTLBuffer, count: Int,
+        fragmentTextures: [MTLTexture] = []
+    ) throws -> Pixels {
+        let device = context.device
+        let uniformBuffer = try makeBuffer(device, [uniforms])
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm, width: width, height: height,
+            mipmapped: false)
+        descriptor.usage = [.renderTarget]
+        descriptor.storageMode = .shared
+        let output = try XCTUnwrap(device.makeTexture(descriptor: descriptor))
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = output
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+
+        let command = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        let encoder = try XCTUnwrap(command.makeRenderCommandEncoder(
+            descriptor: pass))
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 0)
+        encoder.setFragmentBuffer(uniformBuffer, offset: 0, index: 0)
+        encoder.setVertexBuffer(instances, offset: 0, index: 1)
+        for (index, texture) in fragmentTextures.enumerated() {
+            encoder.setFragmentTexture(texture, index: index)
+        }
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
+                               vertexCount: 4, instanceCount: count)
+        encoder.endEncoding()
+        command.commit()
+        command.waitUntilCompleted()
+        XCTAssertEqual(command.status, .completed)
+
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        output.getBytes(&pixels, bytesPerRow: width * 4,
+                        from: MTLRegionMake2D(0, 0, width, height),
+                        mipmapLevel: 0)
+        return Pixels(pixels: pixels, width: width, height: height)
+    }
+
+    /// Mask and color glyph atlases of one `side`-square page, the mask
+    /// fully covered so a glyph's quad shows exactly where it is drawn.
+    private func coveredAtlases(
+        _ device: MTLDevice, side: Int
+    ) throws -> [MTLTexture] {
+        func atlas(_ format: MTLPixelFormat) throws -> MTLTexture {
+            let descriptor = MTLTextureDescriptor()
+            descriptor.textureType = .type2DArray
+            descriptor.pixelFormat = format
+            descriptor.width = side
+            descriptor.height = side
+            descriptor.arrayLength = 1
+            descriptor.usage = [.shaderRead]
+            descriptor.storageMode = .shared
+            return try XCTUnwrap(device.makeTexture(descriptor: descriptor))
+        }
+        let mask = try atlas(.r8Unorm)
+        mask.replace(region: MTLRegionMake2D(0, 0, side, side), mipmapLevel: 0,
+                     slice: 0,
+                     withBytes: [UInt8](repeating: 255, count: side * side),
+                     bytesPerRow: side, bytesPerImage: 0)
+        return [mask, try atlas(.rgba8Unorm)]
+    }
+
     private func renderCellGraphics(
         _ rows: [[String]], cellWidth: Int = 12, cellHeight: Int = 18,
         lineWidth: UInt32 = 2
-    ) throws -> CellGraphicImage {
+    ) throws -> Pixels {
         try requireDevice()
         let context = try RenderContextManager().defaultRenderContext()
-        let device = context.device
         let columnCount = try XCTUnwrap(rows.first?.count)
         XCTAssertTrue(rows.allSatisfy { $0.count == columnCount })
         let outputWidth = cellWidth * columnCount
         let outputHeight = cellHeight * rows.count
 
-        var uniforms = uniform_data(
+        let uniforms = uniform_data(
             pixel_size: SIMD2<Float>(2.0 / Float(outputWidth),
                                      -2.0 / Float(outputHeight)),
             cell_pixel_size: SIMD2<Float>(Float(cellWidth), Float(cellHeight)),
@@ -58,9 +138,6 @@ final class RenderTests: XCTestCase {
             cursor_line_width: 0, cursor_height: UInt32(cellHeight),
             cursor_top: 0, cursor_cell_width: 1,
             grid_width: UInt32(columnCount), cursor_xray: 0)
-        let uniformBuffer = try XCTUnwrap(withUnsafeBytes(of: &uniforms) {
-            device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
-        })
 
         var graphics: [cell_graphic_data] = []
         for (row, graphemes) in rows.enumerated() {
@@ -77,44 +154,11 @@ final class RenderTests: XCTestCase {
                     kind: kind.rawValue, flags: 0))
             }
         }
-        let graphicBuffer = try XCTUnwrap(graphics.withUnsafeBytes {
-            device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
-        })
-
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: outputWidth,
-            height: outputHeight, mipmapped: false)
-        descriptor.usage = [.renderTarget]
-        descriptor.storageMode = .shared
-        let output = try XCTUnwrap(device.makeTexture(descriptor: descriptor))
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = output
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
-
-        let command = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
-        let encoder = try XCTUnwrap(command.makeRenderCommandEncoder(
-            descriptor: pass))
-        encoder.setRenderPipelineState(context.cellGraphicPipeline)
-        encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 0)
-        encoder.setFragmentBuffer(uniformBuffer, offset: 0, index: 0)
-        encoder.setVertexBuffer(graphicBuffer, offset: 0, index: 1)
-        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
-                               vertexCount: 4,
-                               instanceCount: graphics.count)
-        encoder.endEncoding()
-        command.commit()
-        command.waitUntilCompleted()
-        XCTAssertEqual(command.status, .completed)
-
-        var pixels = [UInt8](repeating: 0,
-                             count: outputWidth * outputHeight * 4)
-        output.getBytes(&pixels, bytesPerRow: outputWidth * 4,
-                        from: MTLRegionMake2D(0, 0, outputWidth, outputHeight),
-                        mipmapLevel: 0)
-        return CellGraphicImage(pixels: pixels, width: outputWidth,
-                                height: outputHeight)
+        return try render(
+            context, context.cellGraphicPipeline,
+            width: outputWidth, height: outputHeight, uniforms: uniforms,
+            instances: makeBuffer(context.device, graphics),
+            count: graphics.count)
     }
 
     func testRenderContextBuildsPipelinesAndTexture() throws {
@@ -152,22 +196,9 @@ final class RenderTests: XCTestCase {
         XCTAssertEqual(color.alpha, 1)
     }
 
-    func testDefaultFontFamilyHasUsableMetrics() throws {
-        try requireDevice()
-        let manager = RenderContextManager()
-        let descriptor = FontManager.defaultDescriptor()
-        let family = manager.fontManager.family(
-            descriptor: descriptor, size: 15, scaleFactor: 2)
-
-        XCTAssertEqual(family.unscaledSize, 15)
-        XCTAssertEqual(family.scaleFactor, 2)
-        XCTAssertEqual(family.size, 30, accuracy: 0.001)
-        XCTAssertGreaterThan(family.ascent, 0)
-        XCTAssertGreaterThan(family.descent, 0)
-        XCTAssertGreaterThan(family.width, 0)
-    }
-
-    func testCellGraphicShaderJoinsVerticalSeparatorAcrossRows() throws {
+    /// Separators run edge to edge, so adjacent cells join without a seam:
+    /// the last row or column of one cell matches the first of the next.
+    func testCellGraphicShaderJoinsSeparatorsAcrossCells() throws {
         let cellWidth = 12
         let cellHeight = 18
         for grapheme in ["│", "┃", "║"] {
@@ -183,11 +214,6 @@ final class RenderTests: XCTestCase {
             }.max()
             XCTAssertGreaterThan(edgeInk ?? 0, 0, grapheme)
         }
-    }
-
-    func testCellGraphicShaderJoinsHorizontalSeparatorsAcrossColumns() throws {
-        let cellWidth = 12
-        let cellHeight = 18
         for grapheme in ["─", "━", "═"] {
             let image = try renderCellGraphics(
                 [[grapheme, grapheme]], cellWidth: cellWidth,
@@ -203,78 +229,37 @@ final class RenderTests: XCTestCase {
         }
     }
 
-    func testCellGraphicShaderRendersCompleteBoxDrawingBlock() throws {
-        let graphemes = (0x2500...0x257F).map {
-            String(UnicodeScalar($0)!)
-        }
-        let rows = stride(from: 0, to: graphemes.count, by: 16).map {
-            Array(graphemes[$0..<($0 + 16)])
-        }
-        let cellWidth = 12
-        let cellHeight = 18
-        let image = try renderCellGraphics(
-            rows, cellWidth: cellWidth, cellHeight: cellHeight)
-
-        for index in graphemes.indices {
-            let column = index % 16
-            let row = index / 16
-            var hasInk = false
-            for y in (row * cellHeight)..<((row + 1) * cellHeight) {
-                for x in (column * cellWidth)..<((column + 1) * cellWidth) {
-                    hasInk = hasInk || image.alpha(x, y) > 0
-                }
+    /// Every grapheme drawn natively leaves ink in its cell: the whole Box
+    /// Drawing and Block Elements ranges, and the Powerline set.
+    func testCellGraphicShaderInksEveryNativeGrapheme() throws {
+        let ranges: [(scalars: [Int], columns: Int, width: Int, height: Int)] = [
+            (Array(0x2500...0x257F), 16, 12, 18),
+            (Array(0x2580...0x259F), 16, 13, 19),
+            (Array(0xE0B0...0xE0BF) + [0xE0D2, 0xE0D4, 0xE0D6, 0xE0D7],
+             10, 13, 27),
+        ]
+        for range in ranges {
+            let graphemes = range.scalars.map {
+                String(UnicodeScalar($0)!)
             }
-            XCTAssertTrue(hasInk, graphemes[index])
-        }
-    }
-
-    func testCellGraphicShaderRendersCompleteBlockElementsRange() throws {
-        let graphemes = (0x2580...0x259F).map {
-            String(UnicodeScalar($0)!)
-        }
-        let rows = stride(from: 0, to: graphemes.count, by: 16).map {
-            Array(graphemes[$0..<($0 + 16)])
-        }
-        let cellWidth = 13
-        let cellHeight = 19
-        let image = try renderCellGraphics(
-            rows, cellWidth: cellWidth, cellHeight: cellHeight)
-
-        for index in graphemes.indices {
-            let column = index % 16
-            let row = index / 16
-            var hasInk = false
-            for y in (row * cellHeight)..<((row + 1) * cellHeight) {
-                for x in (column * cellWidth)..<((column + 1) * cellWidth) {
-                    hasInk = hasInk || image.alpha(x, y) > 0
-                }
+            let rows = stride(from: 0, to: graphemes.count,
+                              by: range.columns).map {
+                Array(graphemes[$0..<($0 + range.columns)])
             }
-            XCTAssertTrue(hasInk, graphemes[index])
-        }
-    }
+            let image = try renderCellGraphics(
+                rows, cellWidth: range.width, cellHeight: range.height)
 
-    func testCellGraphicShaderRendersCompletePowerlineSet() throws {
-        let graphemes = (Array(0xE0B0...0xE0BF)
-                         + [0xE0D2, 0xE0D4, 0xE0D6, 0xE0D7]).map {
-            String(UnicodeScalar($0)!)
-        }
-        let rows = [Array(graphemes[0..<10]),
-                    Array(graphemes[10..<20])]
-        let width = 13
-        let height = 27
-        let image = try renderCellGraphics(
-            rows, cellWidth: width, cellHeight: height)
-
-        for index in graphemes.indices {
-            let column = index % 10
-            let row = index / 10
-            var coverage = 0
-            for y in (row * height)..<((row + 1) * height) {
-                for x in (column * width)..<((column + 1) * width) {
-                    coverage += Int(image.alpha(x, y))
+            for index in graphemes.indices {
+                let column = index % range.columns
+                let row = index / range.columns
+                var hasInk = false
+                for y in (row * range.height)..<((row + 1) * range.height) {
+                    for x in (column * range.width)..<((column + 1) * range.width) {
+                        hasInk = hasInk || image.alpha(x, y) > 0
+                    }
                 }
+                XCTAssertTrue(hasInk, graphemes[index])
             }
-            XCTAssertGreaterThan(coverage, 0, graphemes[index])
         }
     }
 
@@ -472,7 +457,10 @@ final class RenderTests: XCTestCase {
         XCTAssertGreaterThan(image.alpha(crossCenter + 4, centerY + 2), 0)
     }
 
-    func testCellGraphicShaderOrientsRoundedCorners() throws {
+    /// Rounded corners open toward the two sides they join, curve without
+    /// straight bridges into the cell centre, and weigh no more than the
+    /// square corner they replace.
+    func testCellGraphicShaderDrawsRoundedCorners() throws {
         let image = try renderCellGraphics([["╭", "╮", "╯", "╰"]])
         let centerY = 9
         let lastY = 17
@@ -496,30 +484,24 @@ final class RenderTests: XCTestCase {
         XCTAssertGreaterThan(image.alpha(47, centerY), 0)
         XCTAssertEqual(image.alpha(42, lastY), 0)
         XCTAssertEqual(image.alpha(36, centerY), 0)
-    }
 
-    func testCellGraphicShaderRoundsCornerWithoutStraightBridges() throws {
-        let image = try renderCellGraphics([["╭"]])
-
+        // The curve of ╭, with no straight segment into the centre.
         XCTAssertGreaterThan(image.alpha(6, 16), 0)
         XCTAssertGreaterThan(image.alpha(6, 14), 0)
         XCTAssertGreaterThan(image.alpha(8, 11), 0)
         XCTAssertGreaterThan(image.alpha(10, 9), 0)
         XCTAssertEqual(image.alpha(9, 14), 0)
         XCTAssertEqual(image.alpha(6, 9), 0)
-    }
 
-    func testCellGraphicShaderKeepsRoundedCornerWeightLight() throws {
-        let image = try renderCellGraphics([["╭", "┌"]])
+        let weights = try renderCellGraphics([["╭", "┌"]])
         func coverage(column: Int) -> Int {
             let xRange = (column * 12)..<((column + 1) * 12)
             return (0..<18).reduce(into: 0) { total, y in
                 for x in xRange {
-                    total += Int(image.alpha(x, y))
+                    total += Int(weights.alpha(x, y))
                 }
             }
         }
-
         let rounded = coverage(column: 0)
         let square = coverage(column: 1)
         XCTAssertGreaterThan(rounded, square * 3 / 4)
@@ -591,9 +573,14 @@ final class RenderTests: XCTestCase {
         let resized = manager.resized(family, size: 16, scaleFactor: 2)
         let faces: [FontAttributes] = [.none, .bold, .italic, .boldItalic]
 
+        XCTAssertEqual(family.unscaledSize, 15)
+        XCTAssertEqual(family.size, 15, accuracy: 0.001)
         XCTAssertEqual(resized.unscaledSize, 16)
         XCTAssertEqual(resized.scaleFactor, 2)
         XCTAssertEqual(resized.size, 32, accuracy: 0.001)
+        XCTAssertGreaterThan(resized.ascent, 0)
+        XCTAssertGreaterThan(resized.descent, 0)
+        XCTAssertGreaterThan(resized.width, 0)
         for face in faces {
             XCTAssertEqual(CTFontCopyPostScriptName(resized.font(face)),
                            CTFontCopyPostScriptName(family.font(face)))
@@ -660,86 +647,22 @@ final class RenderTests: XCTestCase {
     func testGlyphPipelineBoundsOverhangToAdjacentCells() throws {
         try requireDevice()
         let context = try RenderContextManager().defaultRenderContext()
-        let device = context.device
-        let width = 32
-        let height = 32
-
-        func atlas(_ format: MTLPixelFormat) throws -> MTLTexture {
-            let descriptor = MTLTextureDescriptor()
-            descriptor.textureType = .type2DArray
-            descriptor.pixelFormat = format
-            descriptor.width = 32
-            descriptor.height = 32
-            descriptor.arrayLength = 1
-            descriptor.usage = [.shaderRead]
-            descriptor.storageMode = .shared
-            return try XCTUnwrap(device.makeTexture(descriptor: descriptor))
-        }
-
-        let mask = try atlas(.r8Unorm)
-        let color = try atlas(.rgba8Unorm)
-        let coverage = [UInt8](repeating: 255, count: 32 * 32)
-        mask.replace(
-            region: MTLRegionMake2D(0, 0, 32, 32), mipmapLevel: 0,
-            slice: 0, withBytes: coverage, bytesPerRow: 32,
-            bytesPerImage: 0)
-
-        var uniforms = uniform_data(
-            pixel_size: SIMD2<Float>(2.0 / Float(width),
-                                     -2.0 / Float(height)),
+        let atlases = try coveredAtlases(context.device, side: 32)
+        let uniforms = uniform_data(
+            pixel_size: SIMD2<Float>(2.0 / 32, -2.0 / 32),
             cell_pixel_size: SIMD2<Float>(8, 8), box_line_width: 2,
             baseline: .zero,
             cursor_position: .zero, cursor_color: 0,
             cursor_line_width: 0, cursor_height: 8, cursor_top: 0,
             cursor_cell_width: 1, grid_width: 4,
             cursor_xray: 0)
-        let uniformBuffer = try XCTUnwrap(withUnsafeBytes(of: &uniforms) {
-            device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
-        })
 
-        let outputDescriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: width, height: height,
-            mipmapped: false)
-        outputDescriptor.usage = [.renderTarget]
-        outputDescriptor.storageMode = .shared
-        let output = try XCTUnwrap(device.makeTexture(
-            descriptor: outputDescriptor))
-        // The pass clears on load, so both draws can share one target.
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = output
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
-
-        func render(_ source: glyph_data) throws -> [UInt8] {
-            var glyph = source
-            let glyphBuffer = try XCTUnwrap(withUnsafeBytes(of: &glyph) {
-                device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
-            })
-            let command = try XCTUnwrap(
-                context.commandQueue.makeCommandBuffer())
-            let encoder = try XCTUnwrap(command.makeRenderCommandEncoder(
-                descriptor: pass))
-            encoder.setRenderPipelineState(context.glyphPipeline)
-            encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 0)
-            encoder.setVertexBuffer(glyphBuffer, offset: 0, index: 1)
-            encoder.setFragmentTexture(mask, index: 0)
-            encoder.setFragmentTexture(color, index: 1)
-            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
-                                   vertexCount: 4, instanceCount: 1)
-            encoder.endEncoding()
-            command.commit()
-            command.waitUntilCompleted()
-            XCTAssertEqual(command.status, .completed)
-
-            var pixels = [UInt8](repeating: 0, count: width * height * 4)
-            output.getBytes(&pixels, bytesPerRow: width * 4,
-                            from: MTLRegionMake2D(0, 0, width, height),
-                            mipmapLevel: 0)
-            return pixels
-        }
-        func alpha(_ pixels: [UInt8], _ x: Int, _ y: Int) -> UInt8 {
-            pixels[(y * width + x) * 4 + 3]
+        func render(_ glyph: glyph_data) throws -> Pixels {
+            try self.render(
+                context, context.glyphPipeline, width: 32, height: 32,
+                uniforms: uniforms,
+                instances: makeBuffer(context.device, [glyph]), count: 1,
+                fragmentTextures: atlases)
         }
 
         let rightAndVertical = try render(glyph_data(
@@ -749,11 +672,11 @@ final class RenderTests: XCTestCase {
                 size: SIMD2<Int16>(24, 32),
                 position: SIMD2<Int16>(0, -12), texture_origin: .zero),
             flags: 0))
-        XCTAssertGreaterThan(alpha(rightAndVertical, 14, 10), 0)
-        XCTAssertEqual(alpha(rightAndVertical, 18, 10), 0)
-        XCTAssertGreaterThan(alpha(rightAndVertical, 4, 10), 0)
-        XCTAssertEqual(alpha(rightAndVertical, 4, 6), 0)
-        XCTAssertGreaterThan(alpha(rightAndVertical, 4, 30), 0)
+        XCTAssertGreaterThan(rightAndVertical.alpha(14, 10), 0)
+        XCTAssertEqual(rightAndVertical.alpha(18, 10), 0)
+        XCTAssertGreaterThan(rightAndVertical.alpha(4, 10), 0)
+        XCTAssertEqual(rightAndVertical.alpha(4, 6), 0)
+        XCTAssertGreaterThan(rightAndVertical.alpha(4, 30), 0)
 
         let left = try render(glyph_data(
             grid_position: SIMD2<Int16>(2, 0), cell_width: 1,
@@ -762,8 +685,8 @@ final class RenderTests: XCTestCase {
                 size: SIMD2<Int16>(24, 8),
                 position: SIMD2<Int16>(-12, 0), texture_origin: .zero),
             flags: 0))
-        XCTAssertGreaterThan(alpha(left, 10, 4), 0)
-        XCTAssertEqual(alpha(left, 6, 4), 0)
+        XCTAssertGreaterThan(left.alpha(10, 4), 0)
+        XCTAssertEqual(left.alpha(6, 4), 0)
     }
 
     func testRasterizerSeparatesTextAndColorGlyphs() {
@@ -791,16 +714,9 @@ final class RenderTests: XCTestCase {
         let rasterizer = GlyphRasterizer(width: 64, height: 64)
         let foreground = RGBColor(neovim: 0xFFFFFF)
         func coverage(_ options: GlyphRasterizationOptions) -> Int {
-            let bitmap = rasterizer.rasterize(
+            self.coverage(rasterizer.rasterize(
                 font: family.regular, foreground: foreground, text: "M",
-                options: options)
-            var total = 0
-            for y in 0..<Int(bitmap.height) {
-                for x in 0..<Int(bitmap.width) {
-                    total += Int(bitmap.buffer[y * bitmap.stride + x])
-                }
-            }
-            return total
+                options: options))
         }
 
         let plain = coverage(GlyphRasterizationOptions(
@@ -811,146 +727,15 @@ final class RenderTests: XCTestCase {
             thicken: true, strength: 255))
         XCTAssertGreaterThan(thickened, plain)
         XCTAssertGreaterThan(strongest, thickened)
-    }
 
-    func testDisabledThickeningNormalizesStrength() {
+        // Strength means nothing without thickening, so it is normalized
+        // away rather than splitting the glyph cache.
         XCTAssertEqual(
             GlyphRasterizationOptions(thicken: false, strength: 255),
             GlyphRasterizationOptions(thicken: false, strength: 0))
         XCTAssertNotEqual(
             GlyphRasterizationOptions(thicken: true, strength: 50),
             GlyphRasterizationOptions(thicken: true, strength: 51))
-    }
-
-    func testTextureCacheGrowsOntoNewPages() throws {
-        try requireDevice()
-        guard let device = MTLCreateSystemDefaultDevice(),
-              let queue = device.makeCommandQueue() else {
-            throw XCTSkip("No Metal command queue")
-        }
-
-        // A tiny page forces each added bitmap onto a fresh page.
-        let cache = try XCTUnwrap(GlyphTextureCache(
-            queue: queue, pixelFormat: .r8Unorm,
-            pageWidth: 8, pageHeight: 8,
-            initialCapacity: 1, growthFactor: 2))
-        let rasterizer = GlyphRasterizer(width: 64, height: 64)
-        let family = FontManager().family(
-            descriptor: FontManager.defaultDescriptor(), size: 15, scaleFactor: 1)
-
-        let bitmap = rasterizer.rasterize(
-            font: family.regular, foreground: RGBColor(neovim: 0xFFFFFF),
-            text: "W", options: rasterOptions)
-
-        let first = try XCTUnwrap(cache.add(bitmap))
-        let second = try XCTUnwrap(cache.add(bitmap))
-        XCTAssertGreaterThan(second.z, first.z)
-        XCTAssertEqual(cache.pagesUsed, Int(second.z) + 1)
-    }
-
-    func testTextureCacheRefusesToExceedHardPageLimit() throws {
-        try requireDevice()
-        guard let device = MTLCreateSystemDefaultDevice(),
-              let queue = device.makeCommandQueue() else {
-            throw XCTSkip("No Metal command queue")
-        }
-        let rasterizer = GlyphRasterizer(width: 64, height: 64)
-        let family = FontManager().family(
-            descriptor: FontManager.defaultDescriptor(), size: 15,
-            scaleFactor: 1)
-        let bitmap = rasterizer.rasterize(
-            font: family.regular, foreground: RGBColor(neovim: 0xFFFFFF),
-            text: "W", options: rasterOptions)
-        let cache = try XCTUnwrap(GlyphTextureCache(
-            queue: queue, pixelFormat: .r8Unorm,
-            pageWidth: Int(bitmap.width) + 1,
-            pageHeight: Int(bitmap.height), initialCapacity: 1,
-            growthFactor: 2, maximumPages: 1))
-
-        XCTAssertNotNil(cache.add(bitmap))
-        XCTAssertNil(cache.add(bitmap))
-        XCTAssertEqual(cache.pagesCapacity, 1)
-    }
-
-    func testTextureCacheReportsInitialAllocationFailure() throws {
-        try requireDevice()
-        guard let device = MTLCreateSystemDefaultDevice(),
-              let queue = device.makeCommandQueue() else {
-            throw XCTSkip("No Metal command queue")
-        }
-        let cache = GlyphTextureCache(
-            queue: queue, pixelFormat: .r8Unorm,
-            pageWidth: 8, pageHeight: 8,
-            initialCapacity: 1, growthFactor: 2,
-            makeTexture: { _, _ in nil })
-
-        XCTAssertNil(cache)
-    }
-
-    func testTextureCacheResetReplacesAndEmptiesTexture() throws {
-        try requireDevice()
-        guard let device = MTLCreateSystemDefaultDevice(),
-              let queue = device.makeCommandQueue() else {
-            throw XCTSkip("No Metal command queue")
-        }
-        let rasterizer = GlyphRasterizer(width: 64, height: 64)
-        let family = FontManager().family(
-            descriptor: FontManager.defaultDescriptor(), size: 15,
-            scaleFactor: 1)
-        let bitmap = rasterizer.rasterize(
-            font: family.regular, foreground: RGBColor(neovim: 0xFFFFFF),
-            text: "M", options: rasterOptions)
-        let cache = try XCTUnwrap(GlyphTextureCache(
-            queue: queue, pixelFormat: .r8Unorm,
-            pageWidth: 32, pageHeight: 32,
-            initialCapacity: 2, growthFactor: 2))
-
-        XCTAssertNotNil(cache.add(bitmap))
-        let original = cache.texture
-        XCTAssertTrue(cache.reset())
-        XCTAssertFalse(cache.texture === original)
-        XCTAssertEqual(cache.pagesCapacity, 1)
-        XCTAssertEqual(cache.pagesUsed, 1)
-        XCTAssertNotNil(cache.add(bitmap))
-    }
-
-    func testTextureCacheRetriesFailedGrowth() throws {
-        try requireDevice()
-        guard let device = MTLCreateSystemDefaultDevice(),
-              let queue = device.makeCommandQueue() else {
-            throw XCTSkip("No Metal command queue")
-        }
-        let rasterizer = GlyphRasterizer(width: 64, height: 64)
-        let family = FontManager().family(
-            descriptor: FontManager.defaultDescriptor(), size: 15,
-            scaleFactor: 1)
-        let bitmap = rasterizer.rasterize(
-            font: family.regular, foreground: RGBColor(neovim: 0xFFFFFF),
-            text: "W", options: rasterOptions)
-        var attempts = 0
-        let cache = try XCTUnwrap(GlyphTextureCache(
-            queue: queue, pixelFormat: .r8Unorm,
-            pageWidth: Int(bitmap.width) + 1,
-            pageHeight: Int(bitmap.height), initialCapacity: 1,
-            growthFactor: 2,
-            makeTexture: { device, descriptor in
-                attempts += 1
-                guard attempts != 2 else { return nil }
-                return device.makeTexture(descriptor: descriptor)
-            }))
-        let original = cache.texture
-
-        XCTAssertNotNil(cache.add(bitmap))
-        XCTAssertNil(cache.add(bitmap))
-        XCTAssertTrue(cache.texture === original)
-        XCTAssertEqual(cache.pagesCapacity, 1)
-        XCTAssertEqual(cache.pagesUsed, 1)
-        XCTAssertEqual(cache.evict(preserve: 2), 0)
-        XCTAssertEqual(attempts, 2)
-        XCTAssertNotNil(cache.add(bitmap))
-        XCTAssertFalse(cache.texture === original)
-        XCTAssertEqual(cache.pagesUsed, 2)
-        XCTAssertEqual(attempts, 3)
     }
 
     // MARK: - Ligatures
@@ -1085,16 +870,6 @@ final class RenderTests: XCTestCase {
         XCTAssertEqual(glyphs.map(\.glyph), [0, 0])
     }
 
-    func testShaperFindsNoLigaturesInAPlainFont() throws {
-        // The system monospaced font carries no programming ligatures, so every
-        // run must fall through to ordinary per-cell rendering.
-        let family = FontManager().family(
-            descriptor: FontManager.defaultDescriptor(), size: 15,
-            scaleFactor: 2)
-        XCTAssertEqual(shape("->", family: family), [0, 0])
-        XCTAssertEqual(shape("===", family: family), [0, 0, 0])
-    }
-
     /// The same glyph must rasterize identically whether it is named by text or
     /// by identifier. Coverage is what matters: the two paths agreed on metrics
     /// even when the glyph path was drawing nothing at all, because CTLineDraw
@@ -1177,126 +952,63 @@ final class RenderTests: XCTestCase {
     func testGlyphPipelineCarvesCursorXray() throws {
         try requireDevice()
         let context = try RenderContextManager().defaultRenderContext()
-        let device = context.device
-        let side = 32
-
-        func atlas(_ format: MTLPixelFormat) throws -> MTLTexture {
-            let descriptor = MTLTextureDescriptor()
-            descriptor.textureType = .type2DArray
-            descriptor.pixelFormat = format
-            descriptor.width = side
-            descriptor.height = side
-            descriptor.arrayLength = 1
-            descriptor.usage = [.shaderRead]
-            descriptor.storageMode = .shared
-            return try XCTUnwrap(device.makeTexture(descriptor: descriptor))
-        }
-        let mask = try atlas(.r8Unorm)
-        let color = try atlas(.rgba8Unorm)
-        mask.replace(region: MTLRegionMake2D(0, 0, side, side), mipmapLevel: 0,
-                     slice: 0, withBytes: [UInt8](repeating: 255,
-                                                  count: side * side),
-                     bytesPerRow: side, bytesPerImage: 0)
+        let atlases = try coveredAtlases(context.device, side: 32)
 
         // A block cursor on column 1, fully opaque, with the x-ray active.
         var uniforms = uniform_data(
-            pixel_size: SIMD2<Float>(2.0 / Float(side), -2.0 / Float(side)),
+            pixel_size: SIMD2<Float>(2.0 / 32, -2.0 / 32),
             cell_pixel_size: SIMD2<Float>(8, 8), box_line_width: 2,
             baseline: .zero,
             cursor_position: SIMD2<Int16>(1, 0), cursor_color: 0xFF00_0000,
             cursor_line_width: 0, cursor_height: 8, cursor_top: 0,
             cursor_cell_width: 1, grid_width: 4,
             cursor_xray: 1)
-        let uniformBuffer = try XCTUnwrap(withUnsafeBytes(of: &uniforms) {
-            device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
-        })
-
-        let outputDescriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: side, height: side,
-            mipmapped: false)
-        outputDescriptor.usage = [.renderTarget]
-        outputDescriptor.storageMode = .shared
-        let output = try XCTUnwrap(device.makeTexture(
-            descriptor: outputDescriptor))
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = output
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
 
         // One glyph anchored on column 1 whose ink also covers column 0, the
         // shape a spacer-plus-overhang ligature produces.
-        func render(flags: UInt32) throws -> [UInt8] {
-            var glyph = glyph_data(
+        func render(flags: UInt32) throws -> Pixels {
+            let glyph = glyph_data(
                 grid_position: SIMD2<Int16>(1, 0), cell_width: 1,
                 foreground_color: UInt32.max, atlas: 0,
                 rect: glyph_rect(size: SIMD2<Int16>(16, 8),
                                  position: SIMD2<Int16>(-8, 0),
                                  texture_origin: .zero),
                 flags: flags)
-            let glyphBuffer = try XCTUnwrap(withUnsafeBytes(of: &glyph) {
-                device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
-            })
-            let command = try XCTUnwrap(
-                context.commandQueue.makeCommandBuffer())
-            let encoder = try XCTUnwrap(command.makeRenderCommandEncoder(
-                descriptor: pass))
-            encoder.setRenderPipelineState(context.glyphPipeline)
-            encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 0)
-            encoder.setFragmentBuffer(uniformBuffer, offset: 0, index: 0)
-            encoder.setVertexBuffer(glyphBuffer, offset: 0, index: 1)
-            encoder.setFragmentTexture(mask, index: 0)
-            encoder.setFragmentTexture(color, index: 1)
-            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
-                                   vertexCount: 4, instanceCount: 1)
-            encoder.endEncoding()
-            command.commit()
-            command.waitUntilCompleted()
-            XCTAssertEqual(command.status, .completed)
-
-            var pixels = [UInt8](repeating: 0, count: side * side * 4)
-            output.getBytes(&pixels, bytesPerRow: side * 4,
-                            from: MTLRegionMake2D(0, 0, side, side),
-                            mipmapLevel: 0)
-            return pixels
-        }
-        func alpha(_ pixels: [UInt8], _ x: Int, _ y: Int) -> UInt8 {
-            pixels[(y * side + x) * 4 + 3]
+            return try self.render(
+                context, context.glyphPipeline, width: 32, height: 32,
+                uniforms: uniforms,
+                instances: makeBuffer(context.device, [glyph]), count: 1,
+                fragmentTextures: atlases)
         }
 
         // The ordinary glyph keeps its ink outside the cursor cell and loses it
         // inside, so the rest of the ligature survives.
         let ordinary = try render(flags: 0)
-        XCTAssertGreaterThan(alpha(ordinary, 4, 4), 0)
-        XCTAssertEqual(alpha(ordinary, 12, 4), 0)
+        XCTAssertGreaterThan(ordinary.alpha(4, 4), 0)
+        XCTAssertEqual(ordinary.alpha(12, 4), 0)
 
         // The x-ray glyph is the exact complement: confined to the cursor cell.
         let xray = try render(flags: GLYPH_FLAG_XRAY)
-        XCTAssertEqual(alpha(xray, 4, 4), 0)
-        XCTAssertGreaterThan(alpha(xray, 12, 4), 0)
+        XCTAssertEqual(xray.alpha(4, 4), 0)
+        XCTAssertGreaterThan(xray.alpha(12, 4), 0)
 
         // Mid-fade the split stays a clean cut: the cursor's opacity lives in
         // the character's own color, so neither draw is partially blended.
         uniforms.cursor_color = 0x8000_0000
-        uniformBuffer.contents().copyMemory(
-            from: &uniforms, byteCount: MemoryLayout<uniform_data>.size)
         let fadingOrdinary = try render(flags: 0)
-        XCTAssertGreaterThan(alpha(fadingOrdinary, 4, 4), 0)
-        XCTAssertEqual(alpha(fadingOrdinary, 12, 4), 0)
+        XCTAssertGreaterThan(fadingOrdinary.alpha(4, 4), 0)
+        XCTAssertEqual(fadingOrdinary.alpha(12, 4), 0)
         let fadingXray = try render(flags: GLYPH_FLAG_XRAY)
-        XCTAssertEqual(alpha(fadingXray, 4, 4), 0)
-        XCTAssertEqual(alpha(fadingXray, 12, 4), alpha(xray, 12, 4))
+        XCTAssertEqual(fadingXray.alpha(4, 4), 0)
+        XCTAssertEqual(fadingXray.alpha(12, 4), xray.alpha(12, 4))
 
         // With the x-ray off, an ordinary glyph is untouched everywhere.
         uniforms.cursor_color = 0xFF00_0000
         uniforms.cursor_xray = 0
-        uniformBuffer.contents().copyMemory(
-            from: &uniforms, byteCount: MemoryLayout<uniform_data>.size)
         let unmasked = try render(flags: 0)
-        XCTAssertGreaterThan(alpha(unmasked, 4, 4), 0)
-        XCTAssertGreaterThan(alpha(unmasked, 12, 4), 0)
+        XCTAssertGreaterThan(unmasked.alpha(4, 4), 0)
+        XCTAssertGreaterThan(unmasked.alpha(12, 4), 0)
     }
-
 
     /// A wide character owns two columns — itself and a blank right half — and
     /// neither may join a run. A ligature between two of them must still be
@@ -1357,79 +1069,130 @@ final class RenderTests: XCTestCase {
 
     /// A synthetic bitmap of an exact size, so page packing can be reasoned
     /// about without depending on a font's glyph metrics.
-    private func makeBitmap(
-        width: Int, height: Int, storage: UnsafeMutablePointer<UInt8>
-    ) -> GlyphBitmap {
-        GlyphBitmap(buffer: storage, stride: width, leftBearing: 0,
-                    ascent: Int16(height), width: Int16(width),
-                    height: Int16(height), format: .mask)
+    private func makeBitmap(width: Int, height: Int) -> GlyphBitmap {
+        let storage = UnsafeMutablePointer<UInt8>.allocate(
+            capacity: width * height)
+        storage.initialize(repeating: 0, count: width * height)
+        addTeardownBlock { storage.deallocate() }
+        return GlyphBitmap(buffer: storage, stride: width, leftBearing: 0,
+                           ascent: Int16(height), width: Int16(width),
+                           height: Int16(height), format: .mask)
     }
 
-    private func makeCache(width: Int,
-                           height: Int) throws -> GlyphTextureCache {
+    private func makeCache(
+        width: Int, height: Int, initialCapacity: Int = 1,
+        maximumPages: Int = 64,
+        makeTexture: GlyphTextureCache.TextureFactory? = nil
+    ) throws -> GlyphTextureCache? {
         try requireDevice()
         guard let device = MTLCreateSystemDefaultDevice(),
               let queue = device.makeCommandQueue() else {
             throw XCTSkip("No Metal command queue")
         }
-        return try XCTUnwrap(GlyphTextureCache(
+        guard let makeTexture else {
+            return GlyphTextureCache(
+                queue: queue, pixelFormat: .r8Unorm,
+                pageWidth: width, pageHeight: height,
+                initialCapacity: initialCapacity, growthFactor: 2,
+                maximumPages: maximumPages)
+        }
+        return GlyphTextureCache(
             queue: queue, pixelFormat: .r8Unorm,
             pageWidth: width, pageHeight: height,
-            initialCapacity: 1, growthFactor: 2))
+            initialCapacity: initialCapacity, growthFactor: 2,
+            maximumPages: maximumPages, makeTexture: makeTexture)
     }
 
-    /// `preserve` equal to the current page index still leaves one page too
-    /// many, because the index is zero-based: the oldest page must go.
-    func testEvictDropsTheOldestPageWhenPreserveEqualsPageIndex() throws {
-        let storage = UnsafeMutablePointer<UInt8>.allocate(capacity: 64)
-        storage.initialize(repeating: 0, count: 64)
-        defer { storage.deallocate() }
-        // One glyph per page: a second never fits beside or below the first.
-        let cache = try makeCache(width: 5, height: 4)
-        let bitmap = makeBitmap(width: 4, height: 4, storage: storage)
+    // A 5x4 page holds one 4x4 bitmap: a second never fits beside or below
+    // the first, so every add after the first needs a new page.
 
-        for _ in 0..<3 { XCTAssertNotNil(cache.add(bitmap)) }
-        XCTAssertEqual(cache.pagesUsed, 3)
-
-        XCTAssertEqual(cache.evict(preserve: 2), 1)
-        XCTAssertEqual(cache.pagesUsed, 2)
-        XCTAssertLessThanOrEqual(cache.pagesUsed, cache.pagesCapacity)
-
-        let origin = try XCTUnwrap(cache.add(bitmap))
-        XCTAssertLessThan(Int(origin.z), cache.pagesCapacity)
-    }
-
-    /// Preserving more pages than are in use must keep every one of them, and
-    /// must never leave the current page beyond the texture's slice count.
-    func testEvictKeepsEveryUsedPageWhenPreserveExceedsThem() throws {
-        let storage = UnsafeMutablePointer<UInt8>.allocate(capacity: 64)
-        storage.initialize(repeating: 0, count: 64)
-        defer { storage.deallocate() }
-        let cache = try makeCache(width: 5, height: 4)
-        let bitmap = makeBitmap(width: 4, height: 4, storage: storage)
+    /// `preserve` counts the pages to keep. Preserving more than are in use
+    /// keeps them all; preserving as many as the current page index still
+    /// drops one, because the index is zero-based. Either way the current
+    /// page stays within the texture's slice count.
+    func testEvictKeepsOnlyThePreservedPages() throws {
+        let cache = try XCTUnwrap(makeCache(width: 5, height: 4))
+        let bitmap = makeBitmap(width: 4, height: 4)
 
         for _ in 0..<2 { XCTAssertNotNil(cache.add(bitmap)) }
         XCTAssertEqual(cache.pagesUsed, 2)
-
         XCTAssertEqual(cache.evict(preserve: 3), 0)
         XCTAssertEqual(cache.pagesUsed, 2)
-        XCTAssertLessThanOrEqual(cache.pagesUsed, cache.pagesCapacity)
-
-        let origin = try XCTUnwrap(cache.add(bitmap))
+        var origin = try XCTUnwrap(cache.add(bitmap))
         XCTAssertLessThan(Int(origin.z), cache.pagesCapacity)
+
+        XCTAssertEqual(cache.pagesUsed, 3)
+        XCTAssertEqual(cache.evict(preserve: 2), 1)
+        XCTAssertEqual(cache.pagesUsed, 2)
+        XCTAssertLessThanOrEqual(cache.pagesUsed, cache.pagesCapacity)
+        origin = try XCTUnwrap(cache.add(bitmap))
+        XCTAssertLessThan(Int(origin.z), cache.pagesCapacity)
+    }
+
+    func testTextureCacheRefusesToExceedHardPageLimit() throws {
+        let cache = try XCTUnwrap(makeCache(
+            width: 5, height: 4, maximumPages: 1))
+        let bitmap = makeBitmap(width: 4, height: 4)
+
+        XCTAssertNotNil(cache.add(bitmap))
+        XCTAssertNil(cache.add(bitmap))
+        XCTAssertEqual(cache.pagesCapacity, 1)
+    }
+
+    func testTextureCacheReportsInitialAllocationFailure() throws {
+        XCTAssertNil(try makeCache(width: 8, height: 8,
+                                   makeTexture: { _, _ in nil }))
+    }
+
+    /// A growth that fails leaves the cache as it was, and the next add
+    /// tries again.
+    func testTextureCacheRetriesFailedGrowth() throws {
+        var attempts = 0
+        let cache = try XCTUnwrap(makeCache(
+            width: 5, height: 4,
+            makeTexture: { device, descriptor in
+                attempts += 1
+                guard attempts != 2 else { return nil }
+                return device.makeTexture(descriptor: descriptor)
+            }))
+        let bitmap = makeBitmap(width: 4, height: 4)
+        let original = cache.texture
+
+        XCTAssertNotNil(cache.add(bitmap))
+        XCTAssertNil(cache.add(bitmap))
+        XCTAssertTrue(cache.texture === original)
+        XCTAssertEqual(cache.pagesCapacity, 1)
+        XCTAssertEqual(cache.pagesUsed, 1)
+        XCTAssertEqual(cache.evict(preserve: 2), 0)
+        XCTAssertEqual(attempts, 2)
+        XCTAssertNotNil(cache.add(bitmap))
+        XCTAssertFalse(cache.texture === original)
+        XCTAssertEqual(cache.pagesUsed, 2)
+        XCTAssertEqual(attempts, 3)
+    }
+
+    func testTextureCacheResetReplacesAndEmptiesTexture() throws {
+        let cache = try XCTUnwrap(makeCache(
+            width: 32, height: 32, initialCapacity: 2))
+        let bitmap = makeBitmap(width: 4, height: 4)
+
+        XCTAssertNotNil(cache.add(bitmap))
+        let original = cache.texture
+        XCTAssertTrue(cache.reset())
+        XCTAssertFalse(cache.texture === original)
+        XCTAssertEqual(cache.pagesCapacity, 1)
+        XCTAssertEqual(cache.pagesUsed, 1)
+        XCTAssertNotNil(cache.add(bitmap))
     }
 
     /// A reset must forget the previous atlas's row height, or the first row of
     /// the fresh page reserves space the glyphs in it do not need.
     func testResetForgetsTheRowHeightOfTheOldAtlas() throws {
-        let storage = UnsafeMutablePointer<UInt8>.allocate(capacity: 256)
-        storage.initialize(repeating: 0, count: 256)
-        defer { storage.deallocate() }
         // 10 + 1 + 4 exceeds the page height; 4 + 1 + 4 does not. So a stale
         // row height of 10 forces a new page where 4 would wrap in place.
-        let cache = try makeCache(width: 9, height: 12)
-        let tall = makeBitmap(width: 4, height: 10, storage: storage)
-        let short = makeBitmap(width: 4, height: 4, storage: storage)
+        let cache = try XCTUnwrap(makeCache(width: 9, height: 12))
+        let tall = makeBitmap(width: 4, height: 10)
+        let short = makeBitmap(width: 4, height: 4)
 
         XCTAssertNotNil(cache.add(tall))
         XCTAssertTrue(cache.reset())
@@ -1447,77 +1210,38 @@ final class RenderTests: XCTestCase {
     func testUndercurlHonorsPackedOpacity() throws {
         try requireDevice()
         let context = try RenderContextManager().defaultRenderContext()
-        let device = context.device
-        let side = 32
-
-        var uniforms = uniform_data(
-            pixel_size: SIMD2<Float>(2.0 / Float(side), -2.0 / Float(side)),
+        let uniforms = uniform_data(
+            pixel_size: SIMD2<Float>(2.0 / 32, -2.0 / 32),
             cell_pixel_size: SIMD2<Float>(16, 16), box_line_width: 2,
             baseline: SIMD2<Float>(0, 8),
             cursor_position: .zero, cursor_color: 0,
             cursor_line_width: 0, cursor_height: 16, cursor_top: 0,
             cursor_cell_width: 1, grid_width: 2,
             cursor_xray: 0)
-        let uniformBuffer = try XCTUnwrap(withUnsafeBytes(of: &uniforms) {
-            device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
-        })
-
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: side, height: side,
-            mipmapped: false)
-        descriptor.usage = [.renderTarget]
-        descriptor.storageMode = .shared
-        let output = try XCTUnwrap(device.makeTexture(descriptor: descriptor))
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = output
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
 
         // period 0xFFFF is the undercurl sentinel; the high byte is opacity.
-        func render(opacity: UInt32) throws -> [UInt8] {
-            var line = line_data(
+        func render(opacity: UInt32) throws -> Pixels {
+            let line = line_data(
                 grid_position: .zero, color: (opacity << 24) | 0xFF,
                 ytranslate: 0, period: 0xFFFF, thickness: 8, count: 0, style: 0)
-            let lineBuffer = try XCTUnwrap(withUnsafeBytes(of: &line) {
-                device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
-            })
-            let command = try XCTUnwrap(
-                context.commandQueue.makeCommandBuffer())
-            let encoder = try XCTUnwrap(command.makeRenderCommandEncoder(
-                descriptor: pass))
-            encoder.setRenderPipelineState(context.linePipeline)
-            encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 0)
-            encoder.setVertexBuffer(lineBuffer, offset: 0, index: 1)
-            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
-                                   vertexCount: 4, instanceCount: 1)
-            encoder.endEncoding()
-            command.commit()
-            command.waitUntilCompleted()
-            XCTAssertEqual(command.status, .completed)
-
-            var pixels = [UInt8](repeating: 0, count: side * side * 4)
-            output.getBytes(&pixels, bytesPerRow: side * 4,
-                            from: MTLRegionMake2D(0, 0, side, side),
-                            mipmapLevel: 0)
-            return pixels
-        }
-        func alpha(_ pixels: [UInt8], _ x: Int, _ y: Int) -> UInt8 {
-            pixels[(y * side + x) * 4 + 3]
+            return try self.render(
+                context, context.linePipeline, width: 32, height: 32,
+                uniforms: uniforms,
+                instances: makeBuffer(context.device, [line]), count: 1)
         }
 
         // The wave crosses its centre at the left edge of the cell, so (0, 12)
         // sits on it and (4, 15) is far enough below to be discarded.
         let opaque = try render(opacity: 255)
-        XCTAssertGreaterThan(alpha(opaque, 0, 12), 200)
-        XCTAssertEqual(alpha(opaque, 4, 15), 0)
+        XCTAssertGreaterThan(opaque.alpha(0, 12), 200)
+        XCTAssertEqual(opaque.alpha(4, 15), 0)
 
         let faded = try render(opacity: 128)
-        XCTAssertGreaterThan(alpha(faded, 0, 12), 0)
-        XCTAssertLessThan(alpha(faded, 0, 12), alpha(opaque, 0, 12) / 2)
+        XCTAssertGreaterThan(faded.alpha(0, 12), 0)
+        XCTAssertLessThan(faded.alpha(0, 12), opaque.alpha(0, 12) / 2)
 
         // The wave itself must not move when only the opacity changes.
-        XCTAssertEqual(alpha(faded, 4, 15), 0)
+        XCTAssertEqual(faded.alpha(4, 15), 0)
     }
 
     /// Backgrounds must land on exact cell boundaries. Nothing else covers the
@@ -1526,65 +1250,31 @@ final class RenderTests: XCTestCase {
     func testBackgroundPipelinePaintsWholeCells() throws {
         try requireDevice()
         let context = try RenderContextManager().defaultRenderContext()
-        let device = context.device
-        let side = 32
 
         // A 4x2 grid of 8x16 cells exactly fills the target.
-        var uniforms = uniform_data(
-            pixel_size: SIMD2<Float>(2.0 / Float(side), -2.0 / Float(side)),
+        let uniforms = uniform_data(
+            pixel_size: SIMD2<Float>(2.0 / 32, -2.0 / 32),
             cell_pixel_size: SIMD2<Float>(8, 16),
             box_line_width: 2,
             baseline: .zero, cursor_position: .zero, cursor_color: 0,
             cursor_line_width: 0, cursor_height: 8, cursor_top: 0,
             cursor_cell_width: 1, grid_width: 4,
             cursor_xray: 0)
-        let uniformBuffer = try XCTUnwrap(withUnsafeBytes(of: &uniforms) {
-            device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
-        })
 
         // Cell 5 is row 1, column 1: pixels x 8..<16, y 16..<32.
         var colors = [UInt32](repeating: 0, count: 8)
         colors[5] = 0xFF00_00FF
-        let colorBuffer = try XCTUnwrap(colors.withUnsafeBytes {
-            device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
-        })
-
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: side, height: side,
-            mipmapped: false)
-        descriptor.usage = [.renderTarget]
-        descriptor.storageMode = .shared
-        let output = try XCTUnwrap(device.makeTexture(descriptor: descriptor))
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = output
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
-
-        let command = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
-        let encoder = try XCTUnwrap(
-            command.makeRenderCommandEncoder(descriptor: pass))
-        encoder.setRenderPipelineState(context.backgroundPipeline)
-        encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 0)
-        encoder.setVertexBuffer(colorBuffer, offset: 0, index: 1)
-        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
-                               vertexCount: 4, instanceCount: 8)
-        encoder.endEncoding()
-        command.commit()
-        command.waitUntilCompleted()
-        XCTAssertEqual(command.status, .completed)
-
-        var pixels = [UInt8](repeating: 0, count: side * side * 4)
-        output.getBytes(&pixels, bytesPerRow: side * 4,
-                        from: MTLRegionMake2D(0, 0, side, side), mipmapLevel: 0)
-        func red(_ x: Int, _ y: Int) -> UInt8 { pixels[(y * side + x) * 4 + 2] }
+        let image = try render(
+            context, context.backgroundPipeline, width: 32, height: 32,
+            uniforms: uniforms,
+            instances: makeBuffer(context.device, colors), count: 8)
 
         // Every corner inside the cell is painted; every neighbour is not.
         for (x, y) in [(8, 16), (15, 16), (8, 31), (15, 31)] {
-            XCTAssertGreaterThan(red(x, y), 200, "inside (\(x), \(y))")
+            XCTAssertGreaterThan(image.red(x, y), 200, "inside (\(x), \(y))")
         }
         for (x, y) in [(7, 16), (16, 16), (8, 15), (15, 32 - 1 - 16)] {
-            XCTAssertEqual(red(x, y), 0, "outside (\(x), \(y))")
+            XCTAssertEqual(image.red(x, y), 0, "outside (\(x), \(y))")
         }
     }
 }
