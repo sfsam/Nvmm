@@ -67,7 +67,7 @@ final class SettingsTests: XCTestCase {
     }
 
     @MainActor
-    func testEditorAppearanceMapping() {
+    func testAppearanceMappings() throws {
         XCTAssertNil(editorAppearanceName(mode: .system,
                                            neovimBackgroundOption: .dark))
         XCTAssertEqual(editorAppearanceName(mode: .light,
@@ -84,10 +84,8 @@ final class SettingsTests: XCTestCase {
                        .darkAqua)
         XCTAssertNil(editorAppearanceName(mode: .neovimBackground,
                                            neovimBackgroundOption: nil))
-    }
 
-    @MainActor
-    func testEffectiveOSAppearanceMapping() throws {
+        // The effective system appearance, as published to Neovim.
         let cases: [(NSAppearance.Name, Bool, OSAppearance)] = [
             (.aqua, false, .light),
             (.darkAqua, false, .dark),
@@ -104,28 +102,22 @@ final class SettingsTests: XCTestCase {
     }
 
     @MainActor
-    func testCursorTrailStrengthIsClamped() {
+    func testRangedSettingsAreClamped() {
         let defaults = UserDefaults.standard
-        let key = Settings.cursorTrailStrengthKey
-        let saved = defaults.object(forKey: key)
-        defer { defaults.set(saved, forKey: key) }
+        let keys = [Settings.cursorTrailStrengthKey, Settings.fontThicknessKey]
+        let saved = keys.map { ($0, defaults.object(forKey: $0)) }
+        defer {
+            for (key, value) in saved { defaults.set(value, forKey: key) }
+        }
 
-        defaults.set(-1, forKey: key)
+        defaults.set(-1, forKey: Settings.cursorTrailStrengthKey)
         XCTAssertEqual(Settings.cursorTrailStrength, 0)
-        defaults.set(4, forKey: key)
+        defaults.set(4, forKey: Settings.cursorTrailStrengthKey)
         XCTAssertEqual(Settings.cursorTrailStrength, 3)
-    }
 
-    @MainActor
-    func testFontThicknessIsClamped() {
-        let defaults = UserDefaults.standard
-        let key = Settings.fontThicknessKey
-        let saved = defaults.object(forKey: key)
-        defer { defaults.set(saved, forKey: key) }
-
-        defaults.set(-1, forKey: key)
+        defaults.set(-1, forKey: Settings.fontThicknessKey)
         XCTAssertEqual(Settings.fontThickness, 0)
-        defaults.set(256, forKey: key)
+        defaults.set(256, forKey: Settings.fontThicknessKey)
         XCTAssertEqual(Settings.fontThickness, 255)
     }
 

@@ -28,30 +28,30 @@ final class ScrollerTests: XCTestCase {
 
     /// Before any viewport arrives, and for a report that says nothing (an
     /// empty buffer, or a window with no lines in it), the track is empty.
-    func testDegenerateReportsGiveAnEmptyTrack() {
+    /// So it is for a buffer that fits on screen: with nothing to scroll, no
+    /// knob is drawn and the bar is disabled.
+    func testUnscrollableReportsGiveAnEmptyTrack() {
         var model = ScrollerModel()
         XCTAssertEqual(model.update(topline: 0, botline: 0, lineCount: 0), .empty)
         XCTAssertEqual(model.update(topline: 5, botline: 5, lineCount: 100), .empty)
         // A botline that has not caught up with topline is not usable either.
         XCTAssertEqual(model.update(topline: 9, botline: 4, lineCount: 100), .empty)
-    }
-
-    /// A buffer that fits on screen has nothing to scroll, so no knob is drawn
-    /// and the bar is disabled.
-    func testBufferThatFitsHasNoKnob() {
-        var model = ScrollerModel()
         XCTAssertEqual(model.update(topline: 0, botline: 20, lineCount: 20), .empty)
         XCTAssertEqual(model.update(topline: 0, botline: 24, lineCount: 20), .empty)
     }
 
     /// At the top of a long buffer the knob is at 0 and covers the share of the
-    /// buffer that is on screen.
+    /// buffer that is on screen. A very long buffer would give a knob too
+    /// small to grab, so it is floored.
     func testKnobAtTopOfBuffer() {
         var model = ScrollerModel()
         let knob = model.update(topline: 0, botline: 25, lineCount: 100)
         XCTAssertTrue(knob.enabled)
         XCTAssertEqual(knob.position, 0, accuracy: 1e-9)
         XCTAssertEqual(knob.proportion, 0.25, accuracy: 1e-9)
+
+        let floored = model.update(topline: 0, botline: 25, lineCount: 1_000_000)
+        XCTAssertEqual(floored.proportion, 0.01, accuracy: 1e-9)
     }
 
     /// The position is the top line's share of the travel, which ends with the
@@ -64,14 +64,6 @@ final class ScrollerTests: XCTestCase {
 
         let end = model.update(topline: 100, botline: 101, lineCount: 101)
         XCTAssertEqual(end.position, 1.0, accuracy: 1e-9)
-    }
-
-    /// A very long buffer would give a knob too small to grab, so it is
-    /// floored.
-    func testKnobHasAMinimumSize() {
-        var model = ScrollerModel()
-        let knob = model.update(topline: 0, botline: 25, lineCount: 1_000_000)
-        XCTAssertEqual(knob.proportion, 0.01, accuracy: 1e-9)
     }
 
     /// The last screenful of a buffer holds fewer lines than the window fits,
@@ -89,19 +81,14 @@ final class ScrollerTests: XCTestCase {
     }
 
     /// A window that grew is a real change in height, even when the report
-    /// comes from the end of the buffer.
-    func testWindowGrowthUpdatesVisibleLines() {
+    /// comes from the end of the buffer. So is a window that shrank, which
+    /// shows as a shorter report with more buffer still below.
+    func testWindowResizeUpdatesVisibleLines() {
         var model = ScrollerModel()
         _ = model.update(topline: 0, botline: 25, lineCount: 100)
         _ = model.update(topline: 60, botline: 100, lineCount: 100)
         XCTAssertEqual(model.visibleLines, 40)
-    }
 
-    /// So is a window that shrank, which shows as a shorter report with more
-    /// buffer still below.
-    func testWindowShrinkUpdatesVisibleLines() {
-        var model = ScrollerModel()
-        _ = model.update(topline: 0, botline: 40, lineCount: 100)
         _ = model.update(topline: 10, botline: 30, lineCount: 100)
         XCTAssertEqual(model.visibleLines, 20)
     }
@@ -130,26 +117,17 @@ final class ScrollerTests: XCTestCase {
         XCTAssertEqual(model.targetLine(part: .pageDown, position: 1), 101)
     }
 
-    /// A click on anything else (the legacy arrows) stays put.
-    func testOtherPartsStayPut() {
+    /// A click on anything else (the legacy arrows) stays put, and a target
+    /// is never zero or past the end, whatever the position says — nor,
+    /// before any viewport, does it divide by a zero line count.
+    func testTargetLineEdgeCases() {
         var model = ScrollerModel()
-        _ = model.update(topline: 0, botline: 25, lineCount: 101)
-        XCTAssertEqual(model.targetLine(part: .other, position: 0.5), 51)
-    }
-
-    /// A target line is never zero or past the end, whatever the position says.
-    func testTargetLineIsClamped() {
-        var model = ScrollerModel()
-        _ = model.update(topline: 0, botline: 25, lineCount: 50)
-        XCTAssertEqual(model.targetLine(part: .absolute, position: -1), 1)
-        XCTAssertEqual(model.targetLine(part: .absolute, position: 2), 50)
-    }
-
-    /// With no viewport yet the model still answers, rather than dividing by a
-    /// zero line count.
-    func testTargetLineBeforeAnyViewport() {
-        let model = ScrollerModel()
         XCTAssertEqual(model.targetLine(part: .absolute, position: 0.5), 1)
         XCTAssertEqual(model.targetLine(part: .pageDown, position: 0), 1)
+
+        _ = model.update(topline: 0, botline: 25, lineCount: 101)
+        XCTAssertEqual(model.targetLine(part: .other, position: 0.5), 51)
+        XCTAssertEqual(model.targetLine(part: .absolute, position: -1), 1)
+        XCTAssertEqual(model.targetLine(part: .absolute, position: 2), 101)
     }
 }

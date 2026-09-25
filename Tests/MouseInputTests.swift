@@ -24,21 +24,16 @@ final class MouseInputTests: XCTestCase {
             location: second, modifiers: "", enabled: true))
         XCTAssertTrue(tracker.shouldSend(
             location: second, modifiers: "S-", enabled: true))
-    }
 
-    func testTrackerResetsWhenInactive() {
-        var tracker = MouseMoveTracker()
-        let location = GridPoint(row: 2, column: 3)
-
-        XCTAssertTrue(tracker.shouldSend(
-            location: location, modifiers: "", enabled: true))
+        // Going inactive, or leaving the grid, forgets the last position, so
+        // the same cell is sent again afterward.
         XCTAssertFalse(tracker.shouldSend(
-            location: location, modifiers: "", enabled: false))
+            location: second, modifiers: "S-", enabled: false))
         XCTAssertTrue(tracker.shouldSend(
-            location: location, modifiers: "", enabled: true))
+            location: second, modifiers: "S-", enabled: true))
         XCTAssertFalse(tracker.shouldSend(
-            location: nil, modifiers: "", enabled: true))
+            location: nil, modifiers: "S-", enabled: true))
         XCTAssertTrue(tracker.shouldSend(
-            location: location, modifiers: "", enabled: true))
+            location: second, modifiers: "S-", enabled: true))
     }
 }

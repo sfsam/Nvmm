@@ -72,20 +72,15 @@ final class LookupTests: XCTestCase {
         XCTAssertEqual(token?.endColumn, 10)
     }
 
-    func testTokenIsNilOnABlankCell() {
+    func testTokenIsNilOffAWord() {
         var grid = makeGrid(width: 8)
-        write("ab cd", into: &grid)
+        write("ab cd =", into: &grid)
         XCTAssertNil(LookupController.token(at: GridPoint(row: 0, column: 2),
+                                            in: grid))
+        XCTAssertNil(LookupController.token(at: GridPoint(row: 0, column: 6),
                                             in: grid))
         // A cell Neovim never drew is blank too.
         XCTAssertNil(LookupController.token(at: GridPoint(row: 0, column: 7),
-                                            in: grid))
-    }
-
-    func testTokenIsNilOnPunctuation() {
-        var grid = makeGrid(width: 8)
-        write("a = b", into: &grid)
-        XCTAssertNil(LookupController.token(at: GridPoint(row: 0, column: 2),
                                             in: grid))
     }
 
@@ -153,6 +148,8 @@ final class LookupTests: XCTestCase {
                 .array(lines.map { .string($0) })])
     }
 
+    /// Screen positions are one-based, and a selection made backwards is
+    /// reported in screen order.
     func testParsesVisualSelection() {
         let reply = selectionReply(mode: "v",
                                    start: screenpos(row: 3, col: 5),
@@ -162,16 +159,14 @@ final class LookupTests: XCTestCase {
         XCTAssertEqual(selection?.start, GridPoint(row: 2, column: 4))
         XCTAssertEqual(selection?.end, GridPoint(row: 3, column: 1))
         XCTAssertEqual(selection?.text, "alpha\nbeta")
-    }
 
-    func testParsesBackwardsSelectionInScreenOrder() {
-        let reply = selectionReply(mode: "V",
-                                   start: screenpos(row: 6, col: 3),
-                                   cursor: screenpos(row: 2, col: 8),
-                                   lines: ["one"])
-        let selection = parseVisualSelection(reply)
-        XCTAssertEqual(selection?.start, GridPoint(row: 1, column: 7))
-        XCTAssertEqual(selection?.end, GridPoint(row: 5, column: 2))
+        let backwards = parseVisualSelection(
+            selectionReply(mode: "V",
+                           start: screenpos(row: 6, col: 3),
+                           cursor: screenpos(row: 2, col: 8),
+                           lines: ["one"]))
+        XCTAssertEqual(backwards?.start, GridPoint(row: 1, column: 7))
+        XCTAssertEqual(backwards?.end, GridPoint(row: 5, column: 2))
     }
 
     func testRejectsNonVisualAndMalformedReplies() {

@@ -10,78 +10,52 @@ import XCTest
 
 final class EditMenuTests: XCTestCase {
 
-    func testNormalModesUseNormalCommands() {
-        let modes: [NvimMode] = [
-            .normal, .normalCtrlIInsert, .normalCtrlIReplace,
-            .normalCtrlIVirtualReplace,
+    /// Normal modes undo directly, Insert and Replace modes run one Normal
+    /// command with CTRL-O, interruptible modes cancel with CTRL-C first, and
+    /// modes that cannot take a command get no input at all.
+    func testUndoAndRedoKeysFollowTheMode() {
+        let groups: [([NvimMode], String?, String?)] = [
+            ([.normal, .normalCtrlIInsert, .normalCtrlIReplace,
+              .normalCtrlIVirtualReplace],
+             "u", "\u{12}"),
+            ([.insert, .insertCompletion, .insertCompletionCtrlX,
+              .replace, .replaceCompletion, .replaceCompletionCtrlX,
+              .replaceVirtual],
+             "\u{0f}u", "\u{0f}\u{12}"),
+            ([.commandLine,
+              .operatorPending, .operatorPendingForcedChar,
+              .operatorPendingForcedLine, .operatorPendingForcedBlock,
+              .visualChar, .visualLine, .visualBlock,
+              .selectChar, .selectLine, .selectBlock],
+             "\u{03}u", "\u{03}\u{12}"),
+            ([.cancelled, .timedOut, .unknown,
+              .exModeVim, .exMode,
+              .promptEnter, .promptMore, .promptConfirm,
+              .terminal, .shell],
+             nil, nil),
         ]
-
-        for mode in modes {
-            XCTAssertEqual(undoKeys(for: mode), "u")
-            XCTAssertEqual(redoKeys(for: mode), "\u{12}")
+        for (modes, undo, redo) in groups {
+            for mode in modes {
+                XCTAssertEqual(undoKeys(for: mode), undo, "\(mode)")
+                XCTAssertEqual(redoKeys(for: mode), redo, "\(mode)")
+            }
         }
     }
 
-    func testInsertAndReplaceModesUseOneNormalCommand() {
-        let modes: [NvimMode] = [
-            .insert, .insertCompletion, .insertCompletionCtrlX,
-            .replace, .replaceCompletion, .replaceCompletionCtrlX,
-            .replaceVirtual,
-        ]
-
-        for mode in modes {
-            XCTAssertEqual(undoKeys(for: mode), "\u{0f}u")
-            XCTAssertEqual(redoKeys(for: mode), "\u{0f}\u{12}")
-        }
-    }
-
-    func testInterruptibleModesCancelBeforeCommand() {
-        let modes: [NvimMode] = [
-            .commandLine,
-            .operatorPending, .operatorPendingForcedChar,
-            .operatorPendingForcedLine, .operatorPendingForcedBlock,
-            .visualChar, .visualLine, .visualBlock,
-            .selectChar, .selectLine, .selectBlock,
-        ]
-
-        for mode in modes {
-            XCTAssertEqual(undoKeys(for: mode), "\u{03}u")
-            XCTAssertEqual(redoKeys(for: mode), "\u{03}\u{12}")
-        }
-    }
-
-    func testUnsupportedModesProduceNoInput() {
-        let modes: [NvimMode] = [
-            .cancelled, .timedOut, .unknown,
-            .exModeVim, .exMode,
-            .promptEnter, .promptMore, .promptConfirm,
-            .terminal, .shell,
-        ]
-
-        for mode in modes {
-            XCTAssertNil(undoKeys(for: mode))
-            XCTAssertNil(redoKeys(for: mode))
-        }
-    }
-
+    /// A moved sequence position is a change; an unmoved one is the end of
+    /// the undo history; a missing one means the outcome is unknown.
     func testUndoRedoOutcomeComparesSequencePositions() {
-        XCTAssertEqual(
-            undoRedoOutcome(before: MPInteger(2), after: MPInteger(1)),
-            .changed)
-        XCTAssertEqual(
-            undoRedoOutcome(before: MPInteger(1), after: MPInteger(2)),
-            .changed)
-        XCTAssertEqual(
-            undoRedoOutcome(before: MPInteger(2), after: MPInteger(2)),
-            .boundary)
-    }
-
-    func testUndoRedoOutcomeRequiresBothPositions() {
-        XCTAssertEqual(
-            undoRedoOutcome(before: nil, after: MPInteger(1)),
-            .unavailable)
-        XCTAssertEqual(
-            undoRedoOutcome(before: MPInteger(1), after: nil),
-            .unavailable)
+        let cases: [(MPInteger?, MPInteger?, UndoRedoOutcome)] = [
+            (MPInteger(2), MPInteger(1), .changed),
+            (MPInteger(1), MPInteger(2), .changed),
+            (MPInteger(2), MPInteger(2), .boundary),
+            (nil, MPInteger(1), .unavailable),
+            (MPInteger(1), nil, .unavailable),
+        ]
+        for (before, after, expected) in cases {
+            XCTAssertEqual(undoRedoOutcome(before: before, after: after),
+                           expected, "\(String(describing: before)) → "
+                               + "\(String(describing: after))")
+        }
     }
 }

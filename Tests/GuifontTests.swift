@@ -2,10 +2,10 @@
 //  NvmmTests
 //  GuifontTests.swift
 //
-//  Coverage for `parseGuifont`: single and multiple entries, the `:h<size>`
-//  suffix, the default size fallback, backslash-escaped commas, and space
-//  handling around separators. Pure value logic, so it is exempt from the
-//  RenderTests teardown crash.
+//  Coverage for `guifontSpec` and `parseGuifont`: single and multiple entries,
+//  the `:h<size>` suffix, the default size fallback, backslash-escaped commas,
+//  and space handling around separators. Pure value logic, so it is exempt
+//  from the RenderTests teardown crash.
 //
 
 import CoreGraphics
@@ -14,109 +14,57 @@ import XCTest
 
 final class GuifontTests: XCTestCase {
 
-    func testFontPanelSelectionProducesConcreteSpec() {
-        XCTAssertEqual(
-            guifontSpec(fontName: "Menlo-Regular", pointSize: 13),
-            "Menlo-Regular:h13")
-        XCTAssertEqual(
-            guifontSpec(fontName: "Menlo-Regular", pointSize: 13.75),
-            "Menlo-Regular:h13")
+    /// The Font panel's choice becomes a concrete spec: the size is truncated
+    /// to whole points and clamped to the supported range.
+    func testFontPanelSelectionSpec() {
+        let cases: [(String, CGFloat, String?)] = [
+            ("Menlo-Regular", 13, "Menlo-Regular:h13"),
+            ("Menlo-Regular", 13.75, "Menlo-Regular:h13"),
+            ("Menlo-Regular", 0, "Menlo-Regular:h1"),
+            ("Menlo-Regular", 513, "Menlo-Regular:h512"),
+            ("", 13, nil),
+            ("Menlo-Regular", .nan, nil),
+        ]
+        for (name, size, expected) in cases {
+            XCTAssertEqual(guifontSpec(fontName: name, pointSize: size),
+                           expected, "\(name) \(size)")
+        }
     }
 
-    func testInvalidFontPanelSelectionIsRejected() {
-        XCTAssertNil(guifontSpec(fontName: "", pointSize: 13))
-        XCTAssertNil(guifontSpec(fontName: "Menlo-Regular", pointSize: .nan))
-    }
-
-    func testFontPanelSelectionIsClampedToSupportedSize() {
-        XCTAssertEqual(
-            guifontSpec(fontName: "Menlo-Regular", pointSize: 0),
-            "Menlo-Regular:h1")
-        XCTAssertEqual(
-            guifontSpec(fontName: "Menlo-Regular", pointSize: 513),
-            "Menlo-Regular:h512")
-    }
-
-    func testEmptyStringYieldsNoEntries() {
-        XCTAssertEqual(parseGuifont("", defaultSize: 15), [])
-    }
-
-    func testNameWithoutSizeUsesDefault() {
-        XCTAssertEqual(parseGuifont("Menlo", defaultSize: 15),
-                       [GuifontEntry(name: "Menlo", size: 15)])
-    }
-
-    func testHeightSuffixSetsSize() {
-        XCTAssertEqual(parseGuifont("Menlo:h13", defaultSize: 15),
-                       [GuifontEntry(name: "Menlo", size: 13)])
-    }
-
-    func testMultiDigitSize() {
-        XCTAssertEqual(parseGuifont("Menlo:h120", defaultSize: 15),
-                       [GuifontEntry(name: "Menlo", size: 120)])
-    }
-
-    func testSpaceInName() {
-        XCTAssertEqual(parseGuifont("Fira Code:h14", defaultSize: 15),
-                       [GuifontEntry(name: "Fira Code", size: 14)])
-    }
-
-    func testMultipleEntriesInOrder() {
-        XCTAssertEqual(
-            parseGuifont("Menlo:h13,Fira Code:h14", defaultSize: 15),
-            [GuifontEntry(name: "Menlo", size: 13),
-             GuifontEntry(name: "Fira Code", size: 14)])
-    }
-
-    func testSpacesAfterSeparatorAreSkipped() {
-        XCTAssertEqual(
-            parseGuifont("Menlo:h13,  Fira Code", defaultSize: 15),
-            [GuifontEntry(name: "Menlo", size: 13),
-             GuifontEntry(name: "Fira Code", size: 15)])
-    }
-
-    func testEscapedCommaStaysInName() {
-        // A backslash-escaped comma does not split the list; the whole name,
-        // backslash retained, is one entry.
-        XCTAssertEqual(
-            parseGuifont("Weird\\,Font:h12", defaultSize: 15),
-            [GuifontEntry(name: "Weird\\,Font", size: 12)])
-    }
-
-    func testTrailingCommaDoesNotAddEmptyEntry() {
-        XCTAssertEqual(parseGuifont("Menlo,", defaultSize: 15),
-                       [GuifontEntry(name: "Menlo", size: 15)])
-    }
-
-    func testColonWithoutHeightIsPartOfName() {
-        // Only a `:h` suffix is a size; a bare colon-digit stays in the name.
-        XCTAssertEqual(parseGuifont("Menlo:13", defaultSize: 15),
-                       [GuifontEntry(name: "Menlo:13", size: 15)])
-    }
-
-    func testAllDigitsNameKeepsDefaultSize() {
-        XCTAssertEqual(parseGuifont("123", defaultSize: 15),
-                       [GuifontEntry(name: "123", size: 15)])
-    }
-
-    func testLeadingZeroesInSizeAreAccepted() {
-        XCTAssertEqual(parseGuifont("Menlo:h0007", defaultSize: 15),
-                       [GuifontEntry(name: "Menlo", size: 7)])
-    }
-
-    /// A size is read most significant digit first and saturates out of range,
-    /// so padding it cannot overflow into being treated as part of the name.
-    func testExcessiveLeadingZeroesStillYieldASize() {
-        let padded = "Menlo:h" + String(repeating: "0", count: 20) + "7"
-        XCTAssertEqual(parseGuifont(padded, defaultSize: 15),
-                       [GuifontEntry(name: "Menlo", size: 7)])
-    }
-
-    func testOverflowingAndExcessiveSizesAreNotApplied() {
+    func testParseGuifont() {
+        func entry(_ name: String, _ size: CGFloat = 15) -> GuifontEntry {
+            GuifontEntry(name: name, size: size)
+        }
         let huge = "Menlo:h" + String(repeating: "9", count: 100)
-        XCTAssertEqual(parseGuifont(huge, defaultSize: 15),
-                       [GuifontEntry(name: huge, size: 15)])
-        XCTAssertEqual(parseGuifont("Menlo:h513", defaultSize: 15),
-                       [GuifontEntry(name: "Menlo:h513", size: 15)])
+        let cases: [(String, [GuifontEntry])] = [
+            ("", []),
+            ("Menlo", [entry("Menlo")]),
+            ("Menlo:h13", [entry("Menlo", 13)]),
+            ("Menlo:h120", [entry("Menlo", 120)]),
+            ("Fira Code:h14", [entry("Fira Code", 14)]),
+            ("Menlo:h13,Fira Code:h14",
+             [entry("Menlo", 13), entry("Fira Code", 14)]),
+            // Spaces after a separator are skipped.
+            ("Menlo:h13,  Fira Code", [entry("Menlo", 13), entry("Fira Code")]),
+            // A backslash-escaped comma does not split the list; the whole
+            // name, backslash retained, is one entry.
+            ("Weird\\,Font:h12", [entry("Weird\\,Font", 12)]),
+            ("Menlo,", [entry("Menlo")]),
+            // Only a `:h` suffix is a size; a bare colon-digit stays in the name.
+            ("Menlo:13", [entry("Menlo:13")]),
+            ("123", [entry("123")]),
+            ("Menlo:h0007", [entry("Menlo", 7)]),
+            // A size is read most significant digit first and saturates out of
+            // range, so padding cannot overflow it into being part of the name.
+            ("Menlo:h" + String(repeating: "0", count: 20) + "7",
+             [entry("Menlo", 7)]),
+            // A size that overflows or exceeds the limit is not applied.
+            (huge, [entry(huge)]),
+            ("Menlo:h513", [entry("Menlo:h513")]),
+        ]
+        for (value, expected) in cases {
+            XCTAssertEqual(parseGuifont(value, defaultSize: 15), expected,
+                           value)
+        }
     }
 }

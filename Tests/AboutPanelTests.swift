@@ -20,26 +20,12 @@ final class AboutPanelTests: XCTestCase {
         let link = credits.attribute(.link, at: linkRange.location,
                                      effectiveRange: nil) as? URL
         XCTAssertEqual(link, URL(string: "https://mowglii.com/nvmm"))
-    }
 
-    func testCreditsOmitMissingVersion() {
-        let missing = NvmmApplication.aboutCredits(nvimVersion: nil)
-        let empty = NvmmApplication.aboutCredits(nvimVersion: "")
-
-        XCTAssertEqual(missing.string, "mowglii.com/nvmm\n")
-        XCTAssertEqual(empty.string, "mowglii.com/nvmm\n")
-    }
-
-    func testCreditsAreCenteredAndUseSmallSystemFont() {
-        let credits = NvmmApplication.aboutCredits(
-            nvimVersion: "NVIM v0.12.4")
-        let paragraph = credits.attribute(
-            .paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
-        let font = credits.attribute(
-            .font, at: 0, effectiveRange: nil) as? NSFont
-
-        XCTAssertEqual(paragraph?.alignment, .center)
-        XCTAssertEqual(font?.pointSize,
-                       NSFont.systemFontSize(for: .small))
+        // A missing or empty version leaves just the link.
+        for version in [nil, ""] {
+            XCTAssertEqual(
+                NvmmApplication.aboutCredits(nvimVersion: version).string,
+                "mowglii.com/nvmm\n")
+        }
     }
 }

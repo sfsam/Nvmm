@@ -37,37 +37,49 @@ final class CellGraphicTests: XCTestCase {
         | (mirror ? CELL_GRAPHIC_POWERLINE_MIRROR : 0)
     }
 
-    func testCompleteBoxDrawingBlockUsesNativeGraphics() throws {
+    /// Counts, per graphic family, the kinds `values` map to; a family of 0
+    /// is a grapheme drawn natively without a family bit.
+    private func families(_ values: [Int]) throws -> [UInt32: Int] {
         var families: [UInt32: Int] = [:]
-        for value in 0x2500...0x257F {
-            let grapheme = String(UnicodeScalar(value)!)
+        for value in values {
             let graphic = try XCTUnwrap(CellGraphicKind(
-                grapheme: grapheme, nativePowerlineSymbols: true),
+                grapheme: String(UnicodeScalar(value)!),
+                nativePowerlineSymbols: true),
                 "U+\(String(value, radix: 16))")
             families[graphic.rawValue & CELL_GRAPHIC_FAMILY_MASK,
                      default: 0] += 1
         }
-
-        XCTAssertEqual(families[CELL_GRAPHIC_BOX_SEGMENTS], 109)
-        XCTAssertEqual(families[CELL_GRAPHIC_BOX_DASHED], 12)
-        XCTAssertEqual(families[CELL_GRAPHIC_BOX_ARC], 4)
-        XCTAssertEqual(families[0], 3)
+        return families
     }
 
-    func testCompleteBlockElementsRangeUsesNativeGraphics() throws {
-        var families: [UInt32: Int] = [:]
-        for value in 0x2580...0x259F {
-            let grapheme = String(UnicodeScalar(value)!)
-            let graphic = try XCTUnwrap(CellGraphicKind(
-                grapheme: grapheme, nativePowerlineSymbols: true),
-                "U+\(String(value, radix: 16))")
-            families[graphic.rawValue & CELL_GRAPHIC_FAMILY_MASK,
-                     default: 0] += 1
-        }
+    /// Every grapheme in the Box Drawing and Block Elements ranges and the
+    /// supported Powerline set is drawn natively, in the expected families.
+    func testCompleteRangesUseNativeGraphics() throws {
+        XCTAssertEqual(try families(Array(0x2500...0x257F)), [
+            CELL_GRAPHIC_BOX_SEGMENTS: 109, CELL_GRAPHIC_BOX_DASHED: 12,
+            CELL_GRAPHIC_BOX_ARC: 4, 0: 3,
+        ])
+        XCTAssertEqual(try families(Array(0x2580...0x259F)), [
+            CELL_GRAPHIC_BLOCK_RECT: 18, CELL_GRAPHIC_BLOCK_QUADRANTS: 10,
+            0: 4,
+        ])
 
-        XCTAssertEqual(families[CELL_GRAPHIC_BLOCK_RECT], 18)
-        XCTAssertEqual(families[CELL_GRAPHIC_BLOCK_QUADRANTS], 10)
-        XCTAssertEqual(families[0], 4)
+        let powerline = Array(0xE0B0...0xE0BF)
+            + [0xE0D2, 0xE0D4, 0xE0D6, 0xE0D7]
+        XCTAssertEqual(try families(powerline),
+                       [CELL_GRAPHIC_POWERLINE: 16, 0: 4])
+        // Only the supported set is native, and only while the setting is on.
+        let supported = Set(powerline)
+        for value in 0xE0B0...0xE0D7 {
+            let grapheme = String(UnicodeScalar(value)!)
+            XCTAssertEqual(CellGraphicKind(
+                grapheme: grapheme,
+                nativePowerlineSymbols: true) != nil,
+                           supported.contains(value),
+                           "U+\(String(value, radix: 16))")
+            XCTAssertNil(CellGraphicKind(
+                grapheme: grapheme, nativePowerlineSymbols: false))
+        }
     }
 
     func testRepresentativeBlockElementEncodings() throws {
@@ -94,35 +106,6 @@ final class CellGraphicTests: XCTestCase {
                        | CELL_GRAPHIC_QUADRANT_TOP_RIGHT
                        | CELL_GRAPHIC_QUADRANT_BOTTOM_LEFT
                        | CELL_GRAPHIC_QUADRANT_BOTTOM_RIGHT)
-    }
-
-    func testCompletePowerlineSetUsesNativeGraphics() throws {
-        let values = Array(0xE0B0...0xE0BF)
-            + [0xE0D2, 0xE0D4, 0xE0D6, 0xE0D7]
-        var families: [UInt32: Int] = [:]
-        for value in values {
-            let grapheme = String(UnicodeScalar(value)!)
-            let graphic = try XCTUnwrap(CellGraphicKind(
-                grapheme: grapheme, nativePowerlineSymbols: true),
-                "U+\(String(value, radix: 16))")
-            families[graphic.rawValue & CELL_GRAPHIC_FAMILY_MASK,
-                     default: 0] += 1
-            XCTAssertNil(CellGraphicKind(
-                grapheme: grapheme, nativePowerlineSymbols: false))
-        }
-
-        XCTAssertEqual(families[CELL_GRAPHIC_POWERLINE], 16)
-        XCTAssertEqual(families[0], 4)
-
-        let supported = Set(values)
-        for value in 0xE0B0...0xE0D7 {
-            let grapheme = String(UnicodeScalar(value)!)
-            XCTAssertEqual(CellGraphicKind(
-                grapheme: grapheme,
-                nativePowerlineSymbols: true) != nil,
-                           supported.contains(value),
-                           "U+\(String(value, radix: 16))")
-        }
     }
 
     func testRepresentativePowerlineEncodings() throws {

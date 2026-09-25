@@ -19,9 +19,8 @@ final class SpawnTests: XCTestCase {
         XCTAssertEqual(spawnShellQuoteArg("abc"), "'abc'")
         XCTAssertEqual(spawnShellQuoteArg("a b"), "'a b'")
         XCTAssertEqual(spawnShellQuoteArg("a'b"), "'a'\\''b'")
-    }
 
-    func testShellQuoteArgProtectsShellMetacharacters() {
+        // Inside single quotes every other metacharacter is literal.
         let input = "a; touch /tmp/nope | $HOME `whoami` [x] * ? ( ) < > &"
         XCTAssertEqual(spawnShellQuoteArg(input), "'\(input)'")
     }
@@ -82,6 +81,35 @@ final class SpawnTests: XCTestCase {
         XCTAssertEqual(termination, .exited(status: 0))
     }
 
+    /// The environment a spawned `/usr/bin/env` reports, one entry per line.
+    /// `env` reports what it was handed; a shell would rebuild its own
+    /// environment first, and report one entry either way.
+    private func environmentOfChild(
+        env: [String], base: [String: String]? = nil
+    ) async throws -> [String] {
+        let output = Spawn.openPipe()
+        XCTAssertEqual(output.error, 0)
+        defer { close(output.pipe.readEnd) }
+        let result = Spawn.spawn(
+            path: "/usr/bin/env", argv: ["/usr/bin/env"],
+            env: env, base: base, workingDirectory: nil,
+            streams: Spawn.Streams(output: output.pipe.writeEnd))
+        close(output.pipe.writeEnd)
+        XCTAssertEqual(result.error, 0)
+
+        var reported = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = read(output.pipe.readEnd, &buffer, buffer.count)
+            if count <= 0 { break }
+            reported.append(contentsOf: buffer[0..<count])
+        }
+        let termination = await Spawn.wait(forChild: result.pid)
+        XCTAssertEqual(termination, .exited(status: 0))
+        return String(decoding: reported, as: UTF8.self)
+            .split(separator: "\n").map(String.init)
+    }
+
     /// An entry replaces the inherited value for its key. Two entries for one
     /// key would leave the inherited one first, which is the one a `getenv`
     /// in the child answers with.
@@ -92,30 +120,10 @@ final class SpawnTests: XCTestCase {
         let replacement = "/nvmm-spawn-test"
         let inherited = try XCTUnwrap(ProcessInfo.processInfo.environment[key])
         XCTAssertNotEqual(inherited, replacement)
-        // `env` reports what it was handed. A shell would rebuild its own
-        // environment first, and report one entry either way.
-        let output = Spawn.openPipe()
-        XCTAssertEqual(output.error, 0)
-        defer { close(output.pipe.readEnd) }
-        let result = Spawn.spawn(
-            path: "/usr/bin/env", argv: ["/usr/bin/env"],
-            env: ["\(key)=\(replacement)"], workingDirectory: nil,
-            streams: Spawn.Streams(output: output.pipe.writeEnd))
-        close(output.pipe.writeEnd)
-        XCTAssertEqual(result.error, 0)
+        let reported = try await environmentOfChild(
+            env: ["\(key)=\(replacement)"])
 
-        var reported = Data()
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        while true {
-            let count = read(output.pipe.readEnd, &buffer, buffer.count)
-            if count <= 0 { break }
-            reported.append(contentsOf: buffer[0..<count])
-        }
-        let termination = await Spawn.wait(forChild: result.pid)
-        XCTAssertEqual(termination, .exited(status: 0))
-
-        let entries = String(decoding: reported, as: UTF8.self)
-            .split(separator: "\n").filter { $0.hasPrefix("\(key)=") }
+        let entries = reported.filter { $0.hasPrefix("\(key)=") }
         XCTAssertEqual(entries, ["\(key)=\(replacement)"])
     }
 
@@ -125,30 +133,10 @@ final class SpawnTests: XCTestCase {
         // HOME is exported by the parent; its absence from the child proves
         // the base replaced the parent environment rather than merged in.
         XCTAssertNotNil(ProcessInfo.processInfo.environment["HOME"])
-        let output = Spawn.openPipe()
-        XCTAssertEqual(output.error, 0)
-        defer { close(output.pipe.readEnd) }
-        let result = Spawn.spawn(
-            path: "/usr/bin/env", argv: ["/usr/bin/env"],
-            env: ["OVERRIDE=b"],
-            base: ["ONLY": "a", "OVERRIDE": "a"],
-            workingDirectory: nil,
-            streams: Spawn.Streams(output: output.pipe.writeEnd))
-        close(output.pipe.writeEnd)
-        XCTAssertEqual(result.error, 0)
+        let reported = try await environmentOfChild(
+            env: ["OVERRIDE=b"], base: ["ONLY": "a", "OVERRIDE": "a"])
 
-        var reported = Data()
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        while true {
-            let count = read(output.pipe.readEnd, &buffer, buffer.count)
-            if count <= 0 { break }
-            reported.append(contentsOf: buffer[0..<count])
-        }
-        let termination = await Spawn.wait(forChild: result.pid)
-        XCTAssertEqual(termination, .exited(status: 0))
-
-        let entries = Set(String(decoding: reported, as: UTF8.self)
-            .split(separator: "\n").map(String.init))
+        let entries = Set(reported)
         XCTAssertEqual(entries, ["ONLY=a", "OVERRIDE=b"])
     }
 

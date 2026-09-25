@@ -129,11 +129,19 @@ final class CompositionTests: XCTestCase {
 
     // MARK: Committed-text transport
 
+    /// Short text goes through `nvim_input`, escaped, with every Unicode
+    /// payload intact; empty text goes nowhere.
     func testRoutesShortCommittedTextThroughInput() {
         let text = routeCommittedText("a<🙂")
         XCTAssertEqual(text.transport, .input)
         XCTAssertEqual(text.utf8, "a<lt>🙂")
         XCTAssertEqual(routeCommittedText("").transport, .none)
+
+        for value in ["é", "☺️", "👍🏽", "👩‍💻", "🇨🇦"] {
+            let operation = routeCommittedText(value)
+            XCTAssertEqual(operation.transport, .input, value)
+            XCTAssertEqual(operation.utf8, value)
+        }
     }
 
     func testRoutesMultilineAndLargeCommittedTextThroughPaste() {
@@ -151,23 +159,13 @@ final class CompositionTests: XCTestCase {
         let multiline = routeCommittedText("a<b\nc<d")
         XCTAssertEqual(multiline.transport, .paste)
         XCTAssertEqual(multiline.utf8, "a<b\nc<d")
-    }
 
-    func testRoutesCommittedTextByEscapedSizeNotRawSize() {
         // Each '<' expands to 4 bytes ("<lt>"), so a raw payload at the input
         // limit can still need a paste once escaping is accounted for.
         let manyLessThans = String(repeating: "<", count: committedTextInputLimit)
-        let operation = routeCommittedText(manyLessThans)
-        XCTAssertEqual(operation.transport, .paste)
-        XCTAssertEqual(operation.utf8, manyLessThans)
-    }
-
-    func testCommittedTextPreservesCompleteUnicodePayloads() {
-        for value in ["é", "☺️", "👍🏽", "👩‍💻", "🇨🇦"] {
-            let operation = routeCommittedText(value)
-            XCTAssertEqual(operation.transport, .input)
-            XCTAssertEqual(operation.utf8, value)
-        }
+        let escaped = routeCommittedText(manyLessThans)
+        XCTAssertEqual(escaped.transport, .paste)
+        XCTAssertEqual(escaped.utf8, manyLessThans)
     }
 
     // MARK: Cocoa event transaction

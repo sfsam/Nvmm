@@ -10,18 +10,17 @@ import XCTest
 
 final class FontZoomTests: XCTestCase {
 
-    func testZoomChangesSizeByDelta() {
-        XCTAssertEqual(WindowController.zoomedFontSize(15, delta: 1), 16)
-        XCTAssertEqual(WindowController.zoomedFontSize(15, delta: -1), 14)
-    }
-
-    func testInclusiveBoundsAreAccepted() {
-        XCTAssertEqual(WindowController.zoomedFontSize(71, delta: 1), 72)
-        XCTAssertEqual(WindowController.zoomedFontSize(7, delta: -1), 6)
-    }
-
-    func testSizesOutsideBoundsAreRejected() {
-        XCTAssertNil(WindowController.zoomedFontSize(72, delta: 1))
-        XCTAssertNil(WindowController.zoomedFontSize(6, delta: -1))
+    /// Zoom moves by the delta within 6...72 points, bounds included, and
+    /// refuses to step outside them.
+    func testZoomStaysWithinBounds() {
+        let cases: [(CGFloat, CGFloat, CGFloat?)] = [
+            (15, 1, 16), (15, -1, 14),
+            (71, 1, 72), (7, -1, 6),
+            (72, 1, nil), (6, -1, nil),
+        ]
+        for (size, delta, expected) in cases {
+            XCTAssertEqual(WindowController.zoomedFontSize(size, delta: delta),
+                           expected, "\(size) \(delta)")
+        }
     }
 }

@@ -3,10 +3,10 @@
 //  FileMenuTests.swift
 //
 //  Coverage for the decisions behind the File menu: classifying the mode a
-//  command is about to be issued in, and parsing the buffer state the save and
-//  close prompts act on. These are the parts that decide whether a command is
-//  sent at all, and which buffer a prompt is about, so they are checked against
-//  the shapes Neovim actually replies with.
+//  command is about to be issued in, and the outcome a save reports. These are
+//  the parts that decide whether a command is sent at all, and whether a save
+//  panel follows, so they are checked against the shapes Neovim actually
+//  replies with.
 //
 
 import XCTest
@@ -25,11 +25,9 @@ final class NvimModeTests: XCTestCase {
         XCTAssertEqual(classifyNvimMode("r?"), .promptConfirm)
         XCTAssertEqual(classifyNvimMode("rm"), .promptMore)
         XCTAssertEqual(classifyNvimMode("t"), .terminal)
-    }
 
-    /// A mode this client does not know is `.unknown`, and `.unknown` is busy,
-    /// so an unrecognized mode refuses commands rather than guessing.
-    func testUnknownShortnameIsBusy() {
+        // A mode this client does not know is `.unknown`, and `.unknown` is
+        // busy, so an unrecognized mode refuses commands rather than guessing.
         XCTAssertEqual(classifyNvimMode("zz"), .unknown)
         XCTAssertTrue(classifyNvimMode("zz").isBusy)
         XCTAssertTrue(NvimMode.timedOut.isBusy)
@@ -56,34 +54,29 @@ final class NvimModeTests: XCTestCase {
         XCTAssertFalse(NvimMode.normal.isOperatorPending)
     }
 
-    func testParsesGetModeReply() {
-        let reply = RPCResponse(error: .null,
-                                result: .map([(.string("mode"), .string("no")),
-                                              (.string("blocking"), .bool(false))]))
-        XCTAssertEqual(parseNvimMode(reply), .operatorPending)
-    }
+    /// A reply names a mode; a timeout or lost connection maps to a busy
+    /// state; an RPC error, or a reply without a mode, cannot be trusted as
+    /// a mode at all.
+    func testParsesModeReplies() {
+        let pending = RPCResponse(error: .null,
+                                  result: .map([(.string("mode"), .string("no")),
+                                                (.string("blocking"), .bool(false))]))
+        XCTAssertEqual(parseNvimMode(pending), .operatorPending)
 
-    func testBoundedModeResultsMapFailuresSafely() {
-        let reply = RPCResponse(
+        let insert = RPCResponse(
             error: .null,
             result: .map([(.string("mode"), .string("i"))]))
-
-        XCTAssertEqual(parseNvimMode(RPCRequestResult.response(reply)), .insert)
+        XCTAssertEqual(parseNvimMode(RPCRequestResult.response(insert)), .insert)
         XCTAssertEqual(parseNvimMode(RPCRequestResult.timedOut), .timedOut)
         XCTAssertEqual(
             parseNvimMode(RPCRequestResult.transport(.connectionClosed)),
             .cancelled)
-    }
 
-    /// An RPC error, or a reply without a mode, cannot be trusted as a mode.
-    func testMalformedRepliesAreUnknown() {
         let errored = RPCResponse(error: .array([.int(0), .string("boom")]),
                                   result: .map([(.string("mode"), .string("n"))]))
         XCTAssertEqual(parseNvimMode(errored), .unknown)
-
         let empty = RPCResponse(error: .null, result: .map([]))
         XCTAssertEqual(parseNvimMode(empty), .unknown)
-
         let wrongType = RPCResponse(error: .null, result: .string("n"))
         XCTAssertEqual(parseNvimMode(wrongType), .unknown)
     }
@@ -113,76 +106,38 @@ final class NvimModeTests: XCTestCase {
         // usable flag is not blocked.
         XCTAssertFalse(parseBlockedAwaitingInput(
             .response(RPCResponse(error: .null, result: .map([])))))
-    }
 
-    /// No answer is not a block. A Neovim too slow to reply, or gone, is not
-    /// waiting on the user, and refusing on that basis would report input
-    /// that does not exist.
-    func testUnansweredModeQueryIsNotABlock() {
+        // No answer is not a block. A Neovim too slow to reply, or gone, is
+        // not waiting on the user, and refusing on that basis would report
+        // input that does not exist.
         XCTAssertFalse(parseBlockedAwaitingInput(.timedOut))
         XCTAssertFalse(
             parseBlockedAwaitingInput(.transport(.connectionClosed)))
     }
 }
 
-final class ModifiedBufferTests: XCTestCase {
-
-    /// The close path matches buffers by `changedtick`, not by number: a buffer
-    /// the user discarded and then edited again is a different version, and
-    /// must be asked about again rather than silently discarded.
-    func testChangedtickDistinguishesVersions() {
-        let discarded = ModifiedBuffer(bufnr: 2, name: "/tmp/a", changedtick: 7)
-        let editedAgain = ModifiedBuffer(bufnr: 2, name: "/tmp/a", changedtick: 9)
-
-        XCTAssertNotEqual(discarded, editedAgain)
-        XCTAssertFalse([discarded].contains(editedAgain))
-        XCTAssertTrue([discarded].contains(
-            ModifiedBuffer(bufnr: 2, name: "/tmp/a", changedtick: 7)))
-    }
-}
-
 final class WriteOutcomeTests: XCTestCase {
 
-    func testSuccessfulWrite() {
-        let response = RPCResponse(error: .null, result: .null)
-        XCTAssertEqual(classifyWriteResponse(response), .written)
-    }
+    func testClassifiesWriteResponses() {
+        func failure(_ message: String) -> RPCResponse {
+            RPCResponse(error: .array([.int(0), .string(message)]),
+                        result: .null)
+        }
+        let e32 = "Vim(write):E32: No file name"
+        let e212 = "Vim(write):E212: Can't open file for writing"
+        let fallback = WriteOutcome.failed("Neovim did not complete the save.")
 
-    func testUnnamedBufferNeedsFilename() {
-        let response = RPCResponse(
-            error: .array([
-                .int(0),
-                .string("Vim(write):E32: No file name"),
-            ]),
-            result: .null)
-        XCTAssertEqual(classifyWriteResponse(response), .needsFilename)
-    }
-
-    func testWriteFailurePreservesNeovimMessage() {
-        let message = "Vim(write):E212: Can't open file for writing"
-        let response = RPCResponse(
-            error: .array([.int(0), .string(message)]),
-            result: .null)
-        XCTAssertEqual(classifyWriteResponse(response), .failed(message))
-    }
-
-    func testExplicitPathTreatsE32AsFailure() {
-        let message = "Vim(write):E32: No file name"
-        let response = RPCResponse(
-            error: .array([.int(0), .string(message)]),
-            result: .null)
+        XCTAssertEqual(classifyWriteResponse(
+            RPCResponse(error: .null, result: .null)), .written)
+        // E32 means an unnamed buffer, which a save panel can answer.
+        XCTAssertEqual(classifyWriteResponse(failure(e32)), .needsFilename)
+        XCTAssertEqual(classifyWriteResponse(failure(e212)), .failed(e212))
+        // With an explicit path there is no unnamed buffer to name.
         XCTAssertEqual(
-            classifyWriteResponse(
-                response, recognizesUnnamedBuffer: false),
-            .failed(message))
-    }
-
-    func testMalformedAndMissingResponsesUseFallback() {
-        let fallback = WriteOutcome.failed(
-            "Neovim did not complete the save.")
-        let malformed = RPCResponse(error: .string("bad"), result: .null)
-
-        XCTAssertEqual(classifyWriteResponse(malformed), fallback)
+            classifyWriteResponse(failure(e32), recognizesUnnamedBuffer: false),
+            .failed(e32))
+        XCTAssertEqual(classifyWriteResponse(
+            RPCResponse(error: .string("bad"), result: .null)), fallback)
         XCTAssertEqual(classifyWriteResponse(nil), fallback)
     }
 }

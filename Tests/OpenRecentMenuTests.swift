@@ -9,6 +9,8 @@ import XCTest
 
 final class OpenRecentMenuTests: XCTestCase {
 
+    /// AppKit manages the Open Recent menu, and hands a chosen item to the
+    /// application delegate.
     func testMainMenuUsesAppKitRecentDocumentsMenu() throws {
         let repository = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -19,9 +21,6 @@ final class OpenRecentMenuTests: XCTestCase {
 
         XCTAssertTrue(source.contains("systemMenu=\"recentDocuments\""))
         XCTAssertTrue(source.contains("selector=\"clearRecentDocuments:\""))
-    }
-
-    func testApplicationDelegateHandlesRecentFileSelections() {
         XCTAssertTrue(AppDelegate.instancesRespond(
             to: NSSelectorFromString("application:openFile:")))
     }

@@ -38,12 +38,11 @@ final class CLIProtocolTests: XCTestCase {
         XCTAssertTrue(parsed.needsNewWindow)
     }
 
-    func testDefaultRequestsNewWindow() throws {
+    func testReuseRequestsAnExistingWindow() throws {
+        // Without --reuse, every invocation opens a new window.
         XCTAssertTrue(try CLIArguments.parse([]).needsNewWindow)
         XCTAssertTrue(try CLIArguments.parse(["one"]).needsNewWindow)
-    }
 
-    func testReuseRequestsAnExistingWindow() throws {
         let parsed = try CLIArguments.parse(["--reuse", "one", "two"])
 
         XCTAssertTrue(parsed.reuseWindow)
@@ -73,22 +72,17 @@ final class CLIProtocolTests: XCTestCase {
         XCTAssertTrue(parsed.arguments.isEmpty)
     }
 
-    func testUnknownOptionFails() {
-        XCTAssertThrowsError(try CLIArguments.parse(["--headless"])) { error in
-            XCTAssertEqual(error as? CLIArgumentError,
-                           .unknownOption("--headless"))
-        }
-    }
-
-    func testRemovedNewWindowOptionFails() {
-        XCTAssertThrowsError(try CLIArguments.parse(["-N"])) { error in
-            XCTAssertEqual(error as? CLIArgumentError, .unknownOption("-N"))
-        }
-    }
-
-    func testMissingCommandFails() {
-        XCTAssertThrowsError(try CLIArguments.parse(["-c"])) { error in
-            XCTAssertEqual(error as? CLIArgumentError, .missingValue("-c"))
+    func testParseErrors() {
+        let cases: [([String], CLIArgumentError)] = [
+            (["--headless"], .unknownOption("--headless")),
+            // -N was removed when every invocation began opening a window.
+            (["-N"], .unknownOption("-N")),
+            (["-c"], .missingValue("-c")),
+        ]
+        for (arguments, expected) in cases {
+            XCTAssertThrowsError(try CLIArguments.parse(arguments)) { error in
+                XCTAssertEqual(error as? CLIArgumentError, expected)
+            }
         }
     }
 
@@ -98,61 +92,33 @@ final class CLIProtocolTests: XCTestCase {
                                  workingDirectory: "/tmp",
                                  forceNewWindow: false, wait: true)
         // An intentionally empty environment is valid; only a missing one
-        // is not.
-        request.environment = [:]
-        let encoded = try JSONEncoder().encode(request)
-        let decoded = try JSONDecoder().decode(CLIRequest.self, from: encoded)
+        // is not. Empty values are valid too.
+        for environment in [[:], ["PATH": "/usr/bin", "EMPTY": ""]] {
+            request.environment = environment
+            let encoded = try JSONEncoder().encode(request)
+            let decoded = try JSONDecoder().decode(CLIRequest.self,
+                                                   from: encoded)
 
-        XCTAssertEqual(decoded, request)
-        XCTAssertNoThrow(try decoded.validate())
-        XCTAssertTrue(decoded.needsNewWindow)
-    }
-
-    func testRequestRejectsUnknownForwardedArgument() {
-        let request = CLIRequest(arguments: ["--headless"], files: [],
-                                 workingDirectory: "/tmp",
-                                 forceNewWindow: false, wait: false)
-
-        XCTAssertThrowsError(try request.validate()) { error in
-            XCTAssertEqual(error as? CLIProtocolError,
-                           .invalidForwardedArguments)
+            XCTAssertEqual(decoded, request)
+            XCTAssertNoThrow(try decoded.validate())
+            XCTAssertTrue(decoded.needsNewWindow)
         }
     }
 
-    // An option the helper consumes itself is not something Neovim may be
-    // given, so a request naming one is not a request the helper built.
-    func testRequestRejectsLocallyConsumedOption() {
-        let request = CLIRequest(arguments: ["--wait"], files: [],
-                                 workingDirectory: "/tmp",
-                                 forceNewWindow: false, wait: false)
+    // A request naming an option the helper would never forward was not
+    // built by the helper: an unknown option, one the helper consumes
+    // itself, or a -c without its value.
+    func testRequestRejectsInvalidForwardedArguments() {
+        for arguments in [["--headless"], ["--wait"], ["-c"]] {
+            let request = CLIRequest(arguments: arguments, files: [],
+                                     workingDirectory: "/tmp",
+                                     forceNewWindow: false, wait: false)
 
-        XCTAssertThrowsError(try request.validate()) { error in
-            XCTAssertEqual(error as? CLIProtocolError,
-                           .invalidForwardedArguments)
+            XCTAssertThrowsError(try request.validate()) { error in
+                XCTAssertEqual(error as? CLIProtocolError,
+                               .invalidForwardedArguments, "\(arguments)")
+            }
         }
-    }
-
-    func testRequestRejectsCommandWithoutItsValue() {
-        let request = CLIRequest(arguments: ["-c"], files: [],
-                                 workingDirectory: "/tmp",
-                                 forceNewWindow: false, wait: false)
-
-        XCTAssertThrowsError(try request.validate()) { error in
-            XCTAssertEqual(error as? CLIProtocolError,
-                           .invalidForwardedArguments)
-        }
-    }
-
-    func testRequestCarriesAndValidatesEnvironment() throws {
-        var request = CLIRequest(
-            arguments: [], files: [], workingDirectory: "/tmp",
-            forceNewWindow: false, wait: false)
-        request.environment = ["PATH": "/usr/bin", "EMPTY": ""]
-        try request.validate()
-
-        let data = try JSONEncoder().encode(request)
-        let decoded = try JSONDecoder().decode(CLIRequest.self, from: data)
-        XCTAssertEqual(decoded, request)
     }
 
     // A v1 request has no environment key. It must decode — the field is a

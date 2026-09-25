@@ -86,8 +86,10 @@ final class ControlServerTests: XCTestCase {
         XCTAssertEqual(server.pendingConnectionCount, 0)
     }
 
+    /// A connection over the pending cap is told why rather than left to
+    /// hang, and the slot frees once the pending connection closes.
     @MainActor
-    func testPendingCapReturnsSpecificError() async throws {
+    func testPendingCapRejectsUntilTheSlotIsReleased() async throws {
         let endpoint = try TestEndpoint()
         defer { endpoint.remove() }
         let limits = ControlServerLimits(
@@ -101,46 +103,25 @@ final class ControlServerTests: XCTestCase {
         defer { server.stop() }
 
         let pending = try Self.connect(to: endpoint.socketPath)
-        defer { close(pending) }
         let reachedCap = await waitUntil {
             server.pendingConnectionCount == 1
         }
         XCTAssertTrue(reachedCap)
 
-        let responses = try await Self.exchangeAsync(
+        let refused = try await Self.exchangeAsync(
             Self.request(), path: endpoint.socketPath)
-        XCTAssertEqual(responses, [CLIResponse.error(
+        XCTAssertEqual(refused, [CLIResponse.error(
             "Too many pending control connections.")])
-    }
 
-    @MainActor
-    func testPendingSlotRecoversAfterEOF() async throws {
-        let endpoint = try TestEndpoint()
-        defer { endpoint.remove() }
-        let limits = ControlServerLimits(
-            maximumPendingConnections: 1,
-            preRequestIdleTimeout: 2,
-            descriptorRetryInterval: 0.05)
-        let server = try ControlServer(path: endpoint.socketPath,
-                                       limits: limits) { _, channel in
-            channel.accepted(wait: false)
-        }
-        defer { server.stop() }
-
-        let pending = try Self.connect(to: endpoint.socketPath)
-        let filledSlot = await waitUntil {
-            server.pendingConnectionCount == 1
-        }
-        XCTAssertTrue(filledSlot)
         close(pending)
         let releasedSlot = await waitUntil {
             server.pendingConnectionCount == 0
         }
         XCTAssertTrue(releasedSlot)
 
-        let responses = try await Self.exchangeAsync(
+        let accepted = try await Self.exchangeAsync(
             Self.request(), path: endpoint.socketPath)
-        XCTAssertEqual(responses, [.accepted])
+        XCTAssertEqual(accepted, [.accepted])
     }
 
     @MainActor

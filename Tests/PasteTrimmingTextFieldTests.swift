@@ -26,23 +26,19 @@ final class PasteTrimmingTextFieldTests: XCTestCase {
         XCTAssertEqual(editor?.isFieldEditor, true)
     }
 
+    /// A paste is trimmed of surrounding whitespace, whether it inserts at
+    /// the caret or replaces a selection.
     func testPasteTrimsSurroundingWhitespace() {
         let editor = makeEditor(initialString: "/tmp/")
         setPasteboardString("  nvim socket \n")
-
         editor.paste(nil)
-
         XCTAssertEqual(editor.string, "/tmp/nvim socket")
-    }
 
-    func testPasteReplacesSelectionWithTrimmedText() {
-        let editor = makeEditor(initialString: "/tmp/old.sock")
-        editor.setSelectedRange(NSRange(location: 5, length: 8))
+        let replacing = makeEditor(initialString: "/tmp/old.sock")
+        replacing.setSelectedRange(NSRange(location: 5, length: 8))
         setPasteboardString(" new.sock ")
-
-        editor.paste(nil)
-
-        XCTAssertEqual(editor.string, "/tmp/new.sock")
+        replacing.paste(nil)
+        XCTAssertEqual(replacing.string, "/tmp/new.sock")
     }
 
     func testOrdinaryInsertionRetainsWhitespace() {

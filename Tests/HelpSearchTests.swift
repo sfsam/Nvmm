@@ -30,23 +30,16 @@ final class HelpTopicIndexTests: XCTestCase {
         XCTAssertEqual(index.search("CTRL i_", limit: 20), [
             HelpTopic(tag: "i_CTRL-X", file: "insert.txt"),
         ])
-    }
-
-    func testExactMatchSortsFirst() {
-        XCTAssertEqual(index.search("help", limit: 20).map(\.tag),
-                       ["help", "help-context"])
-    }
-
-    func testSearchHonorsResultLimitIncludingExactMatch() {
-        XCTAssertEqual(index.search("help", limit: 1).map(\.tag), ["help"])
-        XCTAssertTrue(index.search("help", limit: 0).isEmpty)
-    }
-
-    func testWhitespaceOnlyQueryHasNoResults() {
         XCTAssertTrue(index.search("  \t ", limit: 20).isEmpty)
     }
 
-    func testPartialSearchStopsAtLimitWithoutAnExactMatch() {
+    /// An exact match sorts first and counts toward the limit; without one,
+    /// the partial matches stop at the limit.
+    func testSearchOrderAndLimit() {
+        XCTAssertEqual(index.search("help", limit: 20).map(\.tag),
+                       ["help", "help-context"])
+        XCTAssertEqual(index.search("help", limit: 1).map(\.tag), ["help"])
+        XCTAssertTrue(index.search("help", limit: 0).isEmpty)
         XCTAssertEqual(index.search("help-", limit: 1).map(\.tag),
                        ["help-context"])
     }

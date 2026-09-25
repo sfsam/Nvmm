@@ -8,6 +8,8 @@ import XCTest
 @testable import Nvmm
 
 final class WindowDocumentTests: XCTestCase {
+    /// The proxy icon needs an item that exists on this Mac: a missing path,
+    /// no path, or a path from a remote Neovim resolves to nothing.
     func testRepresentedDocumentURLRequiresExistingLocalItem() throws {
         let file = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
@@ -19,6 +21,8 @@ final class WindowDocumentTests: XCTestCase {
             WindowController.representedDocumentURL(
                 for: state, documentPathsAreLocal: true),
             file.standardizedFileURL)
+        XCTAssertNil(WindowController.representedDocumentURL(
+            for: state, documentPathsAreLocal: false))
 
         let missing = DocumentState(
             path: file.appendingPathExtension("missing").path,
@@ -27,16 +31,5 @@ final class WindowDocumentTests: XCTestCase {
             for: missing, documentPathsAreLocal: true))
         XCTAssertNil(WindowController.representedDocumentURL(
             for: .empty, documentPathsAreLocal: true))
-    }
-
-    func testRemoteDocumentCannotResolveMatchingLocalPath() throws {
-        let file = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-        try Data().write(to: file)
-        defer { try? FileManager.default.removeItem(at: file) }
-
-        let state = DocumentState(path: file.path, isModified: true)
-        XCTAssertNil(WindowController.representedDocumentURL(
-            for: state, documentPathsAreLocal: false))
     }
 }

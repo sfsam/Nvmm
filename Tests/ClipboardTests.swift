@@ -40,38 +40,29 @@ final class ClipboardTests: XCTestCase {
         Clipboard.get([], pasteboard: pasteboard)
     }
 
-    func testCharwiseRoundTrip() {
-        XCTAssertEqual(result(set(["hello"], "v")), .null)
-        XCTAssertEqual(result(get()),
-                       .array([.array([.string("hello")]), .string("c")]))
-    }
-
-    func testLinewiseRegtypePreserved() {
-        _ = set(["alpha", "beta"], "V")
-        XCTAssertEqual(result(get()),
-                       .array([.array([.string("alpha"), .string("beta")]),
-                               .string("l")]))
-    }
-
-    func testBlockwiseRegtypePreserved() {
-        _ = set(["x"], "b")
-        XCTAssertEqual(result(get()),
-                       .array([.array([.string("x")]), .string("b")]))
-    }
-
-    func testMultilineTextSplitsBackToLines() {
-        _ = set(["one", "two", "three"], "v")
-        guard let value = result(get()),
-              case .array(let pair) = value, pair.count == 2 else {
-            return XCTFail("expected a [lines, regtype] pair")
+    /// Each Vim register type survives a round trip, as does the split into
+    /// lines.
+    func testRoundTripPreservesLinesAndRegisterType() {
+        let cases: [([String], String, String)] = [
+            (["hello"], "v", "c"),
+            (["alpha", "beta"], "V", "l"),
+            (["x"], "b", "b"),
+            (["one", "two", "three"], "v", "c"),
+        ]
+        for (lines, regtype, expected) in cases {
+            XCTAssertEqual(result(set(lines, regtype)), .null)
+            XCTAssertEqual(result(get()),
+                           .array([.array(lines.map(MPValue.string)),
+                                   .string(expected)]),
+                           "\(lines) \(regtype)")
         }
-        XCTAssertEqual(pair[0],
-                       .array([.string("one"), .string("two"), .string("three")]))
     }
 
-    func testPlainTextFromOtherAppReadsAsUnknownType() {
-        // No Vim type present: an unknown register type (empty string), which
-        // Neovim treats as charwise.
+    /// Text without a Vim type reads as an unknown register type (an empty
+    /// string), which Neovim treats as charwise; nothing reads as no lines.
+    func testGetWithoutVimType() {
+        XCTAssertEqual(result(get()), .array([.array([]), .string("")]))
+
         pasteboard.declareTypes([.string], owner: nil)
         pasteboard.setString("from another app", forType: .string)
         XCTAssertEqual(result(get()),
@@ -79,64 +70,38 @@ final class ClipboardTests: XCTestCase {
                                .string("")]))
     }
 
-    func testEmptyPasteboardReturnsNoLines() {
-        XCTAssertEqual(result(get()), .array([.array([]), .string("")]))
-    }
-
-    func testSetRejectsWrongArgumentCount() {
-        guard case .error = Clipboard.set([.array([])], pasteboard: pasteboard)
-        else { return XCTFail("expected .error for a single argument") }
-    }
-
-    func testSetRejectsNonArrayLines() {
-        let outcome = Clipboard.set([.string("x"), .string("v")],
-                                    pasteboard: pasteboard)
-        guard case .error = outcome else {
-            return XCTFail("expected .error when lines is not an array")
-        }
-    }
-
-    func testSetRejectsNonStringLine() {
-        let outcome = Clipboard.set([.array([.int(1)]), .string("v")],
-                                    pasteboard: pasteboard)
-        guard case .error = outcome else {
-            return XCTFail("expected .error when a line is not a string")
-        }
-    }
-
-    func testSetRejectsNonStringRegtype() {
-        let outcome = Clipboard.set([.array([.string("x")]), .int(1)],
-                                    pasteboard: pasteboard)
-        guard case .error = outcome else {
-            return XCTFail("expected .error when regtype is not a string")
+    func testSetRejectsMalformedArguments() {
+        let cases: [(String, [MPValue])] = [
+            ("single argument", [.array([])]),
+            ("lines not an array", [.string("x"), .string("v")]),
+            ("line not a string", [.array([.int(1)]), .string("v")]),
+            ("regtype not a string", [.array([.string("x")]), .int(1)]),
+        ]
+        for (label, arguments) in cases {
+            guard case .error = Clipboard.set(arguments, pasteboard: pasteboard)
+            else { return XCTFail("expected .error: \(label)") }
         }
     }
 
     // MARK: - contentForPaste (drives the native paste branch)
 
-    func testContentForPasteEmptyIsNone() {
+    func testContentForPaste() {
         XCTAssertEqual(Clipboard.contentForPaste(pasteboard: pasteboard), .none)
-    }
 
-    func testContentForPastePlainTextFromOtherApp() {
-        pasteboard.declareTypes([.string], owner: nil)
-        pasteboard.setString("hello", forType: .string)
-        XCTAssertEqual(Clipboard.contentForPaste(pasteboard: pasteboard),
-                       .plainText("hello"))
-    }
-
-    func testContentForPasteVimRegisterForValidRegtype() {
         _ = set(["a", "b"], "V")
         XCTAssertEqual(Clipboard.contentForPaste(pasteboard: pasteboard),
                        .vimRegister)
-    }
 
-    func testContentForPasteUnknownRegtypeFallsBackToPlainText() {
         // An unknown register type (e.g. text put on the Vim type by something
         // that did not set a real regtype) is not a usable Vim register, so it
         // is treated as plain text.
         _ = set(["x"], "")
         guard case .plainText = Clipboard.contentForPaste(pasteboard: pasteboard)
         else { return XCTFail("expected .plainText for an unknown register type") }
+
+        pasteboard.declareTypes([.string], owner: nil)
+        pasteboard.setString("hello", forType: .string)
+        XCTAssertEqual(Clipboard.contentForPaste(pasteboard: pasteboard),
+                       .plainText("hello"))
     }
 }

@@ -72,11 +72,19 @@ final class TerminationCoordinatorTests: XCTestCase {
         }
     }
 
+    /// With no sessions, quitting has nothing to wait for; a deregistered
+    /// session leaves the registry empty again.
     func testEmptyRegistryReportsExited() async {
         let coordinator = TerminationCoordinator()
         XCTAssertTrue(coordinator.isEmpty)
         let exited = await coordinator.requestQuitAll(force: false)
         XCTAssertTrue(exited)
+
+        let session = FakeSession(unsaved: false)
+        coordinator.register(session)
+        XCTAssertFalse(coordinator.isEmpty)
+        coordinator.deregister(session)
+        XCTAssertTrue(coordinator.isEmpty)
     }
 
     func testAllCleanSessionsExit() async {
@@ -93,34 +101,27 @@ final class TerminationCoordinatorTests: XCTestCase {
         XCTAssertFalse(a.lastForce)
     }
 
-    func testAnyUnsavedBuffersReflectsSessions() async {
+    /// Any live session with unsaved buffers counts; an exited one is not
+    /// asked at all.
+    func testAnyUnsavedBuffersReflectsLiveSessions() async {
         let coordinator = TerminationCoordinator()
         var unsaved = await coordinator.anyUnsavedBuffers()
         XCTAssertFalse(unsaved)
 
+        let exited = FakeSession(unsaved: true)
+        exited.hasExited = true
         let clean = FakeSession(unsaved: false)
-        let dirty = FakeSession(unsaved: true)
+        coordinator.register(exited)
         coordinator.register(clean)
         unsaved = await coordinator.anyUnsavedBuffers()
         XCTAssertFalse(unsaved)
+        XCTAssertEqual(exited.unsavedQueryCount, 0)
+        XCTAssertEqual(clean.unsavedQueryCount, 1)
+
+        let dirty = FakeSession(unsaved: true)
         coordinator.register(dirty)
         unsaved = await coordinator.anyUnsavedBuffers()
         XCTAssertTrue(unsaved)
-    }
-
-    func testAnyUnsavedBuffersSkipsExitedSessions() async {
-        let coordinator = TerminationCoordinator()
-        let exited = FakeSession(unsaved: true)
-        exited.hasExited = true
-        let live = FakeSession(unsaved: false)
-        coordinator.register(exited)
-        coordinator.register(live)
-
-        let unsaved = await coordinator.anyUnsavedBuffers()
-
-        XCTAssertFalse(unsaved)
-        XCTAssertEqual(exited.unsavedQueryCount, 0)
-        XCTAssertEqual(live.unsavedQueryCount, 1)
     }
 
     func testNonForcedQuitDoesNotExitUnsavedSession() async {
@@ -218,14 +219,5 @@ final class TerminationCoordinatorTests: XCTestCase {
         XCTAssertEqual(blocked.unsavedQueryCount, 0)
         XCTAssertEqual(blocked.quitCount, 0)
         XCTAssertFalse(blocked.hasExited)
-    }
-
-    func testDeregisterRemovesSession() async {
-        let coordinator = TerminationCoordinator()
-        let a = FakeSession(unsaved: false)
-        coordinator.register(a)
-        XCTAssertFalse(coordinator.isEmpty)
-        coordinator.deregister(a)
-        XCTAssertTrue(coordinator.isEmpty)
     }
 }
