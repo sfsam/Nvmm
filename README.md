@@ -45,6 +45,20 @@ Supported options are shown by `nvmm --help`.
 
 Nvmm loads Neovim's normal configuration, then sources `ginit.vim` after the UI enters and input forwarding is ready. Nvmm respects `--clean`, `-u NONE`, and `-u NORC`.
 
+## Choosing a Neovim
+
+Nvmm runs its bundled `nvim` by default. To run a different one, open
+Settings and choose Other… from the Neovim menu, then select an `nvim`
+executable, such as `/opt/homebrew/bin/nvim`. 
+
+The setting applies to every new window, including those opened by `nvmm`.
+Running windows keep the Neovim they started with. The Neovim must be 0.12 or
+newer.
+
+**Note:** Help menu search lists topics from the bundled Neovim's help files 
+and opens them in the frontmost window, or in a new window if there is none.
+A custom Neovim that lacks a topic reports it with its own error.
+
 ## Appearance
 
 Nvmm's Settings panel has options for following the System Appearance,
@@ -121,7 +135,7 @@ The built app is located at:
 build/Release/Nvmm.app
 ```
 
-The app bundles Neovim's executable, libraries, and runtime. It does not use a system Neovim installation.
+The app bundles Neovim's executable, libraries, and runtime, and uses that bundled copy unless Settings chooses another. See [Choosing a Neovim](#choosing-a-neovim).
 
 Run the tests with:
 

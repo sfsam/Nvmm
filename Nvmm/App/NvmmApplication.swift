@@ -32,14 +32,15 @@ final class NvmmApplication: NSApplication {
         credits.append(NSAttributedString(string: "\n"))
 
         if let nvimVersion, !nvimVersion.isEmpty {
-            credits.insert(
-                NSAttributedString(string: nvimVersion + "\n\n"), at: 0)
+            let bundled = String(localized: "Bundled:")
+                + "\n" + nvimVersion + "\n\n"
+            credits.insert(NSAttributedString(string: bundled), at: 0)
         }
 
         // Set small system font and centered text.
         let range = NSRange(location: 0, length: credits.length)
         let fontSize = NSFont.systemFontSize(for: .small)
-        let font = NSFont.systemFont(ofSize: fontSize, weight: .bold)
+        let font = NSFont.systemFont(ofSize: fontSize)
         let para = NSMutableParagraphStyle()
         para.alignment = .center
         credits.addAttribute(.font, value: font, range: range)

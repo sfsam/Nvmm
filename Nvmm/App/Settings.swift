@@ -65,6 +65,14 @@ enum Settings {
     /// programming ligatures form. Off unless the user turns it on.
     static let ligaturesKey = "NVEnableLigatures"
 
+    /// Whether new windows run the Neovim at `customNeovimPathKey` instead of
+    /// the bundled copy. Off unless the user turns it on.
+    static let useCustomNeovimKey = "NVUseCustomNeovim"
+
+    /// The absolute path of the Neovim executable to run when
+    /// `useCustomNeovimKey` is on, stored exactly as entered.
+    static let customNeovimPathKey = "NVCustomNeovimPath"
+
     nonisolated static let cursorTrailStrengthMinimum = 0
     nonisolated static let cursorTrailStrengthMaximum = 3
     nonisolated static let fontThicknessMinimum = 0
@@ -122,6 +130,14 @@ enum Settings {
         UserDefaults.standard.bool(forKey: ligaturesKey)
     }
 
+    static var useCustomNeovim: Bool {
+        UserDefaults.standard.bool(forKey: useCustomNeovimKey)
+    }
+
+    static var customNeovimPath: String {
+        UserDefaults.standard.string(forKey: customNeovimPathKey) ?? ""
+    }
+
     /// The slider detent nearest to an existing thickness default.
     nonisolated static func fontThicknessLevel(for value: Int) -> Int {
         let value = min(max(value, fontThicknessMinimum),
@@ -166,10 +182,13 @@ final class SettingsWindowController: NSWindowController {
 
     private var fontThicknessSlider: NSSlider!
     private var appearancePopup: NSPopUpButton!
+    private var neovimPopup: NSPopUpButton!
     private var appliedFontThicknessLevel = 0
     private var pendingFontThicknessTask: Task<Void, Never>?
 
     convenience init() {
+        let neovimLabel = NSTextField(labelWithString:
+            String(localized: "Neovim"))
         let behaviorLabel = NSTextField(labelWithString:
             String(localized: "Behavior"))
         let appearanceLabel = NSTextField(labelWithString:
@@ -196,6 +215,11 @@ final class SettingsWindowController: NSWindowController {
         let titlebar = Self.checkbox(
             String(localized: "Transparent title bar"),
             key: Settings.titlebarAppearsTransparentKey)
+
+        let neovim = NSPopUpButton(frame: .zero, pullsDown: false)
+        (neovim.cell as? NSPopUpButtonCell)?.lineBreakMode = .byTruncatingMiddle
+        neovim.identifier = .init("neovim")
+        let neovimNote = Self.note(String(localized: "Applies to new windows."))
 
         let appearance = NSPopUpButton(frame: .zero, pullsDown: false)
         appearance.addItems(withTitles: [
@@ -252,7 +276,9 @@ final class SettingsWindowController: NSWindowController {
             options: [.continuouslyUpdatesValue: true])
 
         let empty = NSGridCell.emptyContentView
-        let grid = NSGridView(views: [[appearanceLabel, appearance],
+        let grid = NSGridView(views: [[neovimLabel, neovim],
+                                      [empty, neovimNote],
+                                      [appearanceLabel, appearance],
                                       [behaviorLabel, terminate],
                                       [empty, buffers],
                                       [empty, buffersNote],
@@ -269,9 +295,17 @@ final class SettingsWindowController: NSWindowController {
         grid.column(at: 0).xPlacement = .trailing
         grid.columnSpacing += 6
 
+        // Make Neovim popup same width as Appearance popup.
+        // Needs both popups in the grid, their common ancestor. The Neovim
+        // popup yields so a long path is truncated instead of widening both.
+        neovim.widthAnchor.constraint(equalTo: appearance.widthAnchor)
+            .isActive = true
+        neovim.setContentCompressionResistancePriority(
+            NSLayoutConstraint.Priority(1), for: .horizontal)
+
         // Space below the last control of each group of settings.
-        for item in [buffersNote, appearance, scrollbarNote, ligaturesNote,
-                     thickness] {
+        for item in [neovimNote, buffersNote, appearance, scrollbarNote,
+                     ligaturesNote, thickness] {
             grid.cell(for: item)?.row?.bottomPadding = 12
         }
 
@@ -296,6 +330,10 @@ final class SettingsWindowController: NSWindowController {
 
         fontThicknessSlider = thickness
         appearancePopup = appearance
+        neovimPopup = neovim
+        neovim.target = self
+        neovim.action = #selector(neovimChanged)
+        loadNeovim()
         appearance.target = self
         appearance.action = #selector(appearanceChanged)
         loadAppearance()
@@ -307,6 +345,7 @@ final class SettingsWindowController: NSWindowController {
     override func showWindow(_ sender: Any?) {
         if pendingFontThicknessTask == nil { loadFontThickness() }
         loadAppearance()
+        loadNeovim()
         super.showWindow(sender)
         window?.center()
     }
@@ -335,6 +374,91 @@ final class SettingsWindowController: NSWindowController {
         }
         UserDefaults.standard.set(sender.selectedTag(),
                                   forKey: Settings.appearanceModeKey)
+    }
+
+    /// Picks a custom Neovim executable and selects it.
+    ///
+    /// Aliases are not resolved, so a symlink such as a package manager's
+    /// `bin/nvim` is kept as chosen and survives upgrades of its target.
+    /// The Neovim popup's items, identified by tag.
+    private enum NeovimItem: Int {
+        case bundled, custom, other
+    }
+
+    /// Rebuilds the Neovim popup from the defaults: Bundled, then the chosen
+    /// custom nvim if there is one, then Other…, with the current choice
+    /// selected.
+    private func loadNeovim() {
+        neovimPopup.removeAllItems()
+        let menu = neovimPopup.menu!
+        func add(_ title: String, _ tag: NeovimItem) {
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.tag = tag.rawValue
+            menu.addItem(item)
+        }
+
+        let version = Bundle.main.object(
+            forInfoDictionaryKey: "NvimVersion") as? String ?? ""
+        add(version.isEmpty
+                ? String(localized: "Bundled")
+                : String(localized: "Bundled: \(version)"),
+            .bundled)
+        let path = Settings.customNeovimPath
+        if !path.isEmpty {
+            menu.addItem(.separator())
+            add((path as NSString).abbreviatingWithTildeInPath, .custom)
+            menu.item(withTag: NeovimItem.custom.rawValue)?.toolTip = path
+        }
+        menu.addItem(.separator())
+        add(String(localized: "Other…"), .other)
+
+        let custom = Settings.useCustomNeovim && !path.isEmpty
+        neovimPopup.selectItem(
+            withTag: (custom ? NeovimItem.custom : .bundled).rawValue)
+    }
+
+    @objc private func neovimChanged(_ sender: NSPopUpButton) {
+        switch NeovimItem(rawValue: sender.selectedTag()) {
+        case .bundled:
+            UserDefaults.standard.set(false,
+                                      forKey: Settings.useCustomNeovimKey)
+        case .custom:
+            UserDefaults.standard.set(true,
+                                      forKey: Settings.useCustomNeovimKey)
+        case .other:
+            // Show the current choice again while the panel is up, so a
+            // cancel leaves nothing to undo.
+            loadNeovim()
+            chooseNeovim()
+        case nil:
+            break
+        }
+    }
+
+    /// Picks a custom Neovim executable and selects it.
+    ///
+    /// Aliases are not resolved, so a symlink such as a package manager's
+    /// `bin/nvim` is kept as chosen and survives upgrades of its target.
+    private func chooseNeovim() {
+        guard let window else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.resolvesAliases = false
+        panel.message = String(localized: "Choose a Neovim executable.")
+        let current = Settings.customNeovimPath
+        if current.hasPrefix("/") {
+            panel.directoryURL = URL(fileURLWithPath: current)
+                .deletingLastPathComponent()
+        }
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            let defaults = UserDefaults.standard
+            defaults.set(url.path, forKey: Settings.customNeovimPathKey)
+            defaults.set(true, forKey: Settings.useCustomNeovimKey)
+            self?.loadNeovim()
+        }
     }
 
     private func loadAppearance() {

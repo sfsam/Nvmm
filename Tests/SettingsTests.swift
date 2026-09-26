@@ -28,7 +28,9 @@ final class SettingsTests: XCTestCase {
                     Settings.progressBarKey,
                     Settings.cursorTrailStrengthKey,
                     Settings.fontThicknessKey,
-                    Settings.ligaturesKey]
+                    Settings.ligaturesKey,
+                    Settings.useCustomNeovimKey,
+                    Settings.customNeovimPathKey]
 
         // The user's own values must not decide the outcome, and must survive
         // the test: only the registration domain is under test here.
@@ -52,6 +54,8 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(Settings.cursorTrailStrength, 0)
         XCTAssertEqual(Settings.fontThickness, 50)
         XCTAssertFalse(Settings.ligatures)
+        XCTAssertFalse(Settings.useCustomNeovim)
+        XCTAssertEqual(Settings.customNeovimPath, "")
     }
 
     @MainActor
@@ -171,6 +175,79 @@ final class SettingsTests: XCTestCase {
             $0.title == "Document proxy icon in title bar"
         })
         XCTAssertNotNil(proxyIcon.infoForBinding(.value))
+    }
+
+    /// The Neovim popup lists Bundled, the chosen custom nvim when there is
+    /// one, and Other…, selects the current choice, and records a new one.
+    @MainActor
+    func testNeovimPopupFollowsDefaults() throws {
+        let defaults = UserDefaults.standard
+        let keys = [Settings.useCustomNeovimKey, Settings.customNeovimPathKey]
+        let saved = keys.map { ($0, defaults.object(forKey: $0)) }
+        for key in keys { defaults.removeObject(forKey: key) }
+        defer {
+            for (key, value) in saved { defaults.set(value, forKey: key) }
+        }
+
+        // A control holds its target weakly, so each controller is kept for
+        // the test's length or its popup's actions would go nowhere.
+        var controllers: [SettingsWindowController] = []
+        func popup() throws -> NSPopUpButton {
+            let controller = SettingsWindowController()
+            controllers.append(controller)
+            func descendants(of view: NSView) -> [NSView] {
+                view.subviews + view.subviews.flatMap(descendants)
+            }
+            let content = try XCTUnwrap(controller.window?.contentView)
+            return try XCTUnwrap(descendants(of: content)
+                .compactMap { $0 as? NSPopUpButton }
+                .first { $0.identifier?.rawValue == "neovim" })
+        }
+        func choose(_ tag: Int, in popup: NSPopUpButton) {
+            popup.selectItem(withTag: tag)
+            _ = popup.sendAction(popup.action, to: popup.target)
+        }
+
+        let bundledOnly = try popup()
+        XCTAssertEqual(bundledOnly.itemArray.map(\.tag), [0, 0, 2])
+        XCTAssertTrue(bundledOnly.itemArray[1].isSeparatorItem)
+        XCTAssertTrue(bundledOnly.itemArray[0].title.hasPrefix("Bundled"))
+        XCTAssertEqual(bundledOnly.itemArray[2].title, "Other…")
+        XCTAssertEqual(bundledOnly.selectedTag(), 0)
+
+        defaults.set("/opt/homebrew/bin/nvim",
+                     forKey: Settings.customNeovimPathKey)
+        let withPath = try popup()
+        XCTAssertEqual(withPath.itemTitles.filter { !$0.isEmpty }.count, 3)
+        let custom = try XCTUnwrap(withPath.item(at:
+            withPath.indexOfItem(withTag: 1)))
+        XCTAssertEqual(custom.title, "/opt/homebrew/bin/nvim")
+        XCTAssertEqual(withPath.selectedTag(), 0)
+
+        // The popup matches the appearance popup, and a longer path is
+        // shortened rather than widening both.
+        func widths(_ popup: NSPopUpButton) throws -> (CGFloat, CGFloat) {
+            popup.window?.layoutIfNeeded()
+            let appearance = try XCTUnwrap(
+                popup.superview?.subviews.compactMap { $0 as? NSPopUpButton }
+                    .first { $0.identifier?.rawValue == "appearanceMode" })
+            return (popup.frame.width, appearance.frame.width)
+        }
+        let (shortWidth, shortAppearance) = try widths(withPath)
+        XCTAssertEqual(shortWidth, shortAppearance)
+        defaults.set("/opt/" + String(repeating: "long/", count: 40) + "nvim",
+                     forKey: Settings.customNeovimPathKey)
+        let (longWidth, longAppearance) = try widths(try popup())
+        XCTAssertEqual(longWidth, longAppearance)
+        XCTAssertEqual(longAppearance, shortAppearance)
+        defaults.set("/opt/homebrew/bin/nvim",
+                     forKey: Settings.customNeovimPathKey)
+
+        choose(1, in: withPath)
+        XCTAssertTrue(Settings.useCustomNeovim)
+        XCTAssertEqual(try popup().selectedTag(), 1)
+        choose(0, in: withPath)
+        XCTAssertFalse(Settings.useCustomNeovim)
     }
 
     @MainActor

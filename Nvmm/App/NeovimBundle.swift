@@ -12,9 +12,41 @@
 //    Contents/lib/*.dylib         relocated libraries
 //    Contents/share/nvim/runtime  the Neovim runtime files
 //
+//  The bundled copy is the default. Settings can name another Neovim instead;
+//  `executablePath` picks the one a launch uses.
+//
 
 import Darwin
 import Foundation
+
+/// Why no Neovim executable could be chosen for a launch.
+nonisolated enum NeovimLaunchError: Error, Equatable {
+    case invalidCustomPath(String)
+    case bundledExecutableMissing
+
+    var title: String {
+        switch self {
+        case .invalidCustomPath:
+            String(localized: "Could Not Start Neovim")
+        case .bundledExecutableMissing:
+            String(localized: "Nvmm Is Incomplete or Damaged")
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .invalidCustomPath(let path) where path.isEmpty:
+            String(localized:
+                "Choose a Neovim executable in Settings, or select Bundled.")
+        case .invalidCustomPath(let path):
+            String(localized:
+                "The Neovim chosen in Settings is not an executable file: “\(path)”.")
+        case .bundledExecutableMissing:
+            String(localized:
+                "The bundled Neovim executable is missing. Reinstall Nvmm.")
+        }
+    }
+}
 
 enum NeovimBundle {
     /// The bundled nvim executable, or nil if it is not present.
@@ -31,8 +63,39 @@ enum NeovimBundle {
             .appendingPathComponent("Contents/share/nvim/runtime/doc/tags")
     }
 
-    /// The executable and argv to launch the embedded nvim with `arguments`
-    /// (for example `["--embed"]`).
+    /// Whether `path` is an absolute path to an executable regular file.
+    /// Nothing is expanded: no `~`, variable, or command name. Symlinks are
+    /// followed.
+    nonisolated static func isExecutablePath(_ path: String) -> Bool {
+        guard path.hasPrefix("/") else { return false }
+        var isDirectory: ObjCBool = false
+        let manager = FileManager.default
+        return manager.fileExists(atPath: path, isDirectory: &isDirectory)
+            && !isDirectory.boolValue
+            && manager.isExecutableFile(atPath: path)
+    }
+
+    /// The nvim a launch runs: the custom one when Settings chooses it,
+    /// otherwise the bundled one.
+    ///
+    /// A custom path that is not an executable file is an error, never a
+    /// fallback, so a typo cannot quietly start a different Neovim.
+    nonisolated static func executablePath(
+        useCustom: Bool, customPath: String, bundledPath: String?,
+        isExecutableFile: (String) -> Bool = isExecutablePath
+    ) throws(NeovimLaunchError) -> String {
+        if useCustom {
+            guard isExecutableFile(customPath) else {
+                throw .invalidCustomPath(customPath)
+            }
+            return customPath
+        }
+        guard let bundledPath else { throw .bundledExecutableMissing }
+        return bundledPath
+    }
+
+    /// The executable and argv to launch nvim with `arguments` (for example
+    /// `["--embed"]`).
     ///
     /// `environment` is a control request's environment, or nil for a window
     /// the app opens on its own. Any request environment — even an empty one

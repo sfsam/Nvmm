@@ -35,7 +35,6 @@ private struct ConnectFallback {
     let address: String
     let owned: Bool
     let documentPathsAreLocal: Bool
-    let usesBundledNeovim: Bool
 }
 
 /// Describes only child exits that should be surfaced to the user.
@@ -344,14 +343,9 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     /// `:restart` the server is reached over a socket yet is still owned.
     var ownsServer = true
 
-    /// Whether the current server was launched from Nvmm's bundled Neovim.
-    /// Bundled help search results may only be sent to such a server because
-    /// an externally connected server can have different built-in help tags.
-    private(set) var usesBundledNeovim = true
-
-    /// Whether this window can accept a bundled help result now.
-    var canOpenBundledHelp: Bool {
-        usesBundledNeovim && !hasExited && isReady && process != nil
+    /// Whether this window can accept a help result now.
+    var canOpenHelp: Bool {
+        !hasExited && isReady && process != nil
     }
 
     /// The kind of the handoff that produced the current connection, if any, so
@@ -469,7 +463,6 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         source = .remote(address: address)
         ownsServer = false
         documentPathsAreLocal = false
-        usesBundledNeovim = false
         launch()
     }
 
@@ -841,18 +834,29 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         appearancePublishingReady = false
 
         let plan: LaunchPlan
+        // The custom nvim this launch runs, if any. A failure to start or
+        // attach it is then fixed in Settings, and the alert goes there.
+        var customNeovim: String?
         switch source {
         case .spawn:
-            guard let nvimPath = NeovimBundle.executableURL?.path else {
-                Log.app.error("Bundled Neovim executable not found")
-                let reason = String(localized:
-                    "The bundled Neovim executable is missing. Reinstall Nvmm.")
-                resolveStartup(.failed(reason))
-                presentError(String(localized:
-                    "Nvmm Is Incomplete or Damaged"), detail: reason)
+            let nvimPath: String
+            do {
+                nvimPath = try NeovimBundle.executablePath(
+                    useCustom: Settings.useCustomNeovim,
+                    customPath: Settings.customNeovimPath,
+                    bundledPath: NeovimBundle.executableURL?.path)
+            } catch {
+                Log.app.error("\(error.message, privacy: .public)")
+                resolveStartup(.failed(error.message))
+                // The fix is in Settings, so go there. It opens before this
+                // window closes, which keeps the app from quitting after its
+                // last window.
+                presentError(error.title, detail: error.message,
+                             opensSettings: error != .bundledExecutableMissing)
                 handleDisconnect()
                 return
             }
+            if Settings.useCustomNeovim { customNeovim = nvimPath }
             let launch = NeovimBundle.launchCommand(
                 nvimPath: nvimPath, arguments: neovimArguments(),
                 environment: startupEnvironment)
@@ -922,7 +926,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
             }
         }
 
-        renderTask = Task { [weak self] in
+        renderTask = Task { [weak self, customNeovim] in
             do {
                 switch plan {
                 case .spawn(let path, let argv, let directory,
@@ -955,7 +959,10 @@ final class WindowController: NSWindowController, NSWindowDelegate,
                     self.recoverToFallback(fallback, reason: reason)
                     return
                 }
-                if let address = self?.remoteAddress {
+                if let customNeovim {
+                    self?.presentCustomNeovimFailure(
+                        path: customNeovim, reason: reason)
+                } else if let address = self?.remoteAddress {
                     self?.presentError(
                         String(localized:
                             "Could not connect to a Neovim server at “\(address)”."),
@@ -986,7 +993,10 @@ final class WindowController: NSWindowController, NSWindowDelegate,
 
             guard result.status == .success else {
                 Log.rpc.error("Neovim UI attach failed: \(result.message)")
-                if let address = self?.remoteAddress {
+                if let customNeovim {
+                    self?.presentCustomNeovimFailure(
+                        path: customNeovim, reason: result.message)
+                } else if let address = self?.remoteAddress {
                     self?.presentError(
                         String(localized:
                             "Connected to “\(address)”, but attaching a UI failed."),
@@ -1089,8 +1099,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
             connectFallback = ConnectFallback(
                 address: address,
                 owned: ownsServer,
-                documentPathsAreLocal: documentPathsAreLocal,
-                usesBundledNeovim: usesBundledNeovim)
+                documentPathsAreLocal: documentPathsAreLocal)
         }
         source = .remote(address: handoff.address)
         // A `:restart` continues our own session, so we still own the new
@@ -1099,8 +1108,6 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         ownsServer = handoff.kind == .restart
         documentPathsAreLocal = preservedAcrossHandoff(
             documentPathsAreLocal, kind: handoff.kind)
-        usesBundledNeovim = preservedAcrossHandoff(
-            usesBundledNeovim, kind: handoff.kind)
         lastHandoffKind = handoff.kind
         startNeovim()
     }
@@ -1126,7 +1133,6 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         source = .remote(address: fallback.address)
         ownsServer = fallback.owned
         documentPathsAreLocal = fallback.documentPathsAreLocal
-        usesBundledNeovim = fallback.usesBundledNeovim
         lastHandoffKind = nil
         startNeovim()
     }
@@ -1197,13 +1203,43 @@ final class WindowController: NSWindowController, NSWindowDelegate,
 
     /// Reports a failure app-modally because the affected window may not be
     /// visible or may be about to close.
-    private func presentError(_ message: String, detail: String) {
+    ///
+    /// The startup timers are cancelled first: main-actor tasks keep running
+    /// while the alert is up, so either could otherwise reveal a hidden,
+    /// empty window behind it. Every caller either closes the window next or
+    /// starts over through `startNeovim`, which arms fresh timers.
+    ///
+    /// `opensSettings` is for a failure only Settings can fix: its one button
+    /// opens Settings, since no other window can start until then.
+    private func presentError(_ message: String, detail: String,
+                              opensSettings: Bool = false) {
+        hiddenWindowBackstopTask?.cancel()
+        startupTimeoutTask?.cancel()
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = message
         alert.informativeText = detail
-        alert.addButton(withTitle: String(localized: "OK"))
+        alert.addButton(withTitle: opensSettings
+            ? String(localized: "Open Settings")
+            : String(localized: "OK"))
         alert.runModal()
+        if opensSettings {
+            NSApp.sendAction(#selector(AppDelegate.showSettings(_:)),
+                             to: nil, from: self)
+        }
+    }
+
+    /// Reports that the custom nvim chosen in Settings could not be used —
+    /// it failed to start or to attach — and opens Settings, where it can be
+    /// changed. Only running it shows whether a path is really Neovim 0.12 or
+    /// newer, so this is the guarantee that a bad choice never leaves the app
+    /// without a way back.
+    private func presentCustomNeovimFailure(path: String, reason: String) {
+        presentError(
+            String(localized: "Could Not Use Neovim"),
+            detail: String(localized:
+                "The Neovim chosen in Settings could not be used:\n\(path)\n\n\(reason)"),
+            opensSettings: true)
     }
 
     // MARK: - Showing the window

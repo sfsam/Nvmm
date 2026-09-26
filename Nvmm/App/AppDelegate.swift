@@ -381,9 +381,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Whether closing the last window quits the app. Read on each close, so
     /// changing the setting takes effect from the next one.
+    ///
+    /// AppKit asks even while the settings panel is open, since a panel does
+    /// not count as a window here. Quitting then would take away the panel
+    /// the user is working in — for instance to fix a Neovim path that just
+    /// failed the only editor window — so the app stays while it is visible.
     func applicationShouldTerminateAfterLastWindowClosed(
         _ sender: NSApplication) -> Bool {
         Settings.terminateAfterLastWindow
+            && settingsWindow?.window?.isVisible != true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -486,11 +492,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Help menu
 
-    /// Opens a bundled Help-menu result in the frontmost compatible Neovim, or
-    /// starts a bundled Neovim when the frontmost session cannot accept it.
+    /// Opens a Help-menu result in the frontmost Neovim, or in a new window
+    /// when the frontmost one cannot accept it.
+    ///
+    /// Topics come from the bundled Neovim's help tags, but any Neovim may
+    /// receive them. One that lacks a topic reports it itself, which costs
+    /// less than a separate window whose Neovim differs from the user's.
     private func openHelp(_ topic: String) {
         guard let controller = frontmostWindow,
-              controller.canOpenBundledHelp else {
+              controller.canOpenHelp else {
             openWindow(arguments: ["-c", "help \(topic)"])
             return
         }

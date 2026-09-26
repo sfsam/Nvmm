@@ -15,7 +15,8 @@ final class AboutPanelTests: XCTestCase {
         let credits = NvmmApplication.aboutCredits(
             nvimVersion: "NVIM v0.12.4")
 
-        XCTAssertEqual(credits.string, "NVIM v0.12.4\n\nmowglii.com/nvmm\n")
+        XCTAssertEqual(credits.string,
+                       "Bundled:\nNVIM v0.12.4\n\nmowglii.com/nvmm\n")
         let linkRange = (credits.string as NSString).range(of: "mowglii.com/nvmm")
         let link = credits.attribute(.link, at: linkRange.location,
                                      effectiveRange: nil) as? URL

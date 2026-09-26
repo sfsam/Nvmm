@@ -2,8 +2,8 @@
 //  NvmmTests
 //  NeovimBundleTests.swift
 //
-//  Covers startup arguments, directories, and login-shell policy for the
-//  embedded nvim process.
+//  Covers startup arguments, directories, login-shell policy, and choosing
+//  which nvim to run.
 //
 
 import XCTest
@@ -120,5 +120,56 @@ final class NeovimBundleTests: XCTestCase {
             shell: "/bin/sh", nvimPath: "/Apps/My Editor/nvim",
             arguments: ["--embed", "a b", "it's"]).argv.last,
             "exec '/Apps/My Editor/nvim' '--embed' 'a b' 'it'\\''s'")
+    }
+
+    // A custom path is used only as given and only when it is executable; a
+    // bad one is an error rather than a quiet fallback to the bundled nvim.
+    func testExecutablePath() {
+        let bundled = "/Apps/Nvmm.app/Contents/MacOS/nvim"
+        let custom = "/opt/homebrew/bin/nvim"
+        let cases: [(String, Bool, String, String?,
+                     Result<String, NeovimLaunchError>)] = [
+            ("bundled", false, custom, bundled, .success(bundled)),
+            ("custom", true, custom, nil, .success(custom)),
+            ("relative custom", true, "bin/nvim", bundled,
+             .failure(.invalidCustomPath("bin/nvim"))),
+            ("home-relative custom", true, "~/nvim", bundled,
+             .failure(.invalidCustomPath("~/nvim"))),
+            ("missing custom", true, "/missing/nvim", bundled,
+             .failure(.invalidCustomPath("/missing/nvim"))),
+            ("empty custom", true, "", bundled,
+             .failure(.invalidCustomPath(""))),
+            ("missing bundle", false, "", nil,
+             .failure(.bundledExecutableMissing)),
+        ]
+        for (label, useCustom, path, bundledPath, expected) in cases {
+            let result = Result { () throws(NeovimLaunchError) -> String in
+                try NeovimBundle.executablePath(
+                    useCustom: useCustom, customPath: path,
+                    bundledPath: bundledPath,
+                    isExecutableFile: { $0 == custom })
+            }
+            XCTAssertEqual(result, expected, label)
+        }
+    }
+
+    func testIsExecutablePath() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nvmm-exec-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("plain")
+        try Data().write(to: file)
+        let link = directory.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(
+            atPath: link.path, withDestinationPath: "/bin/sh")
+
+        XCTAssertTrue(NeovimBundle.isExecutablePath("/bin/sh"))
+        XCTAssertTrue(NeovimBundle.isExecutablePath(link.path))
+        XCTAssertFalse(NeovimBundle.isExecutablePath(file.path))
+        XCTAssertFalse(NeovimBundle.isExecutablePath(directory.path))
+        XCTAssertFalse(NeovimBundle.isExecutablePath("bin/sh"))
+        XCTAssertFalse(NeovimBundle.isExecutablePath(""))
     }
 }
