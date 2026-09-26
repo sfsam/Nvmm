@@ -1,6 +1,6 @@
 # Nvmm
 
-Nvmm is a Neovim GUI for Mac written in Swift with AppKit and Metal.
+Nvmm is a [Neovim](https://github.com/neovim/neovim) GUI for Mac written in Swift with AppKit and Metal.
 
 It comes bundled with `nvim` 0.12+ and a CLI helper called `nvmm`.
 
@@ -41,10 +41,6 @@ it opens one. `--reuse` cannot be combined with `--wait` or Neovim options.
 
 Supported options are shown by `nvmm --help`.
 
-## Neovim Configuration
-
-Nvmm loads Neovim's normal configuration, then sources `ginit.vim` after the UI enters and input forwarding is ready. Nvmm respects `--clean`, `-u NONE`, and `-u NORC`.
-
 ## Choosing a Neovim
 
 Nvmm runs its bundled `nvim` by default. To run a different one, open
@@ -72,10 +68,11 @@ effective appearance after applying the Appearance setting and macOS
 accessibility contrast.
 
 For example, with Appearance set to System in the Settings panel, add this
-to `ginit.vim` to keep Neovim's `'background'` option synchronized with the
-editor view:
+to `~/.config/nvim/ginit.vim`, which Nvmm loads after your normal Neovim
+config, to keep Neovim's `'background'` option synchronized with the editor
+view:
 
-```vim
+```text
 lua << EOF
 local function update_background()
   local appearance = vim.g.nvmm_os_appearance
