@@ -1191,6 +1191,14 @@ extension NeovimProcess {
     /// buffer, `BufFilePost` covers a rename in place, and `BufWritePost`
     /// rechecks whether a newly named item now exists. The trailing call seeds
     /// the initial state.
+    ///
+    /// The event list is filtered to what the attached Neovim actually has, in
+    /// the same spirit as the `##Progress` guard below. `nvim_create_autocmd`
+    /// rejects the whole call on the first unknown event, and one missing name
+    /// would otherwise fail this setup and take the UI attachment down with it
+    /// — which is what an external Neovim newer than the bundled one does:
+    /// `BufModifiedSet` was removed after 0.12. Filtering degrades the reported
+    /// state instead of refusing to attach.
     private static let documentStateAutocmdLua = """
         local group = vim.api.nvim_create_augroup(
           'NvmmDocumentState', {clear=true})
@@ -1206,10 +1214,17 @@ extension NeovimProcess {
         local function notify_changed()
           notify(false)
         end
-        vim.api.nvim_create_autocmd(
-          {'BufModifiedSet', 'BufEnter', 'BufFilePost', 'BufNewFile',
-           'BufReadPost', 'WinEnter'},
-          {group=group, callback=notify_changed})
+        local events = {}
+        for _, event in ipairs({'BufModifiedSet', 'BufEnter', 'BufFilePost',
+                                'BufNewFile', 'BufReadPost', 'WinEnter'}) do
+          if vim.fn.exists('##' .. event) == 1 then
+            events[#events + 1] = event
+          end
+        end
+        if #events > 0 then
+          vim.api.nvim_create_autocmd(
+            events, {group=group, callback=notify_changed})
+        end
         vim.api.nvim_create_autocmd('BufWritePost',
           {group=group, callback=function() notify(true) end})
         vim.api.nvim_create_autocmd('OptionSet',
