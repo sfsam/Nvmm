@@ -323,8 +323,7 @@ final class SettingsWindowController: NSWindowController {
                             backing: .buffered,
                             defer: false)
         panel.title = String(localized: "Settings")
-        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        panel.hidesOnDeactivate = false
         panel.contentView = contentView
         self.init(window: panel)
 
