@@ -13,12 +13,15 @@
 #
 # Tag the release commit and push both the branch and the tag before running
 # this. The script verifies the exported app against that tag, builds the
-# release ZIP, uploads it to S3, and creates a draft GitHub release. Every step
-# that changes something is confirmed first.
+# release ZIP, and creates a draft GitHub release. Every step that changes
+# something is confirmed first.
+#
+# The ZIP has the same name in every release, so once the draft is published,
+# DOWNLOAD_URL below serves it as the stable download.
 #
 # Products are left in build/nvmm-release:
-#   Nvmm-VERSION.zip
-#   Nvmm-VERSION.zip.sha256
+#   Nvmm.zip
+#   Nvmm.zip.sha256
 
 set -euo pipefail
 
@@ -29,14 +32,12 @@ exec 3<&0
 APP_NAME="Nvmm"
 BUNDLE_ID="com.mowglii.Nvmm"
 RELEASE_BRANCH="main"
-S3_PREFIX="s3://mowglii/nvmm"
-PUBLIC_URL="https://mowglii.s3.amazonaws.com/nvmm"
+DOWNLOAD_URL="https://github.com/sfsam/Nvmm/releases/latest/download/Nvmm.zip"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 APP_SRC="${APP_SRC:-${HOME}/Desktop/${APP_NAME}.app}"
 RELEASE_DIR="${RELEASE_DIR:-${REPO_DIR}/build/nvmm-release}"
-AWS="${AWS:-aws}"
 GH="${GH:-gh}"
 DITTO="${DITTO:-ditto}"
 
@@ -130,7 +131,6 @@ if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
     exit 1
 fi
 
-require_command "$AWS"
 require_command "$GH"
 require_command "$DITTO"
 require_command git
@@ -139,8 +139,7 @@ require_command spctl
 require_command stapler
 require_command shasum
 
-RELEASE_BASENAME="${APP_NAME}-${VERSION}"
-ZIP="${RELEASE_DIR}/${RELEASE_BASENAME}.zip"
+ZIP="${RELEASE_DIR}/${APP_NAME}.zip"
 CHECKSUM="${ZIP}.sha256"
 
 # Checking the exported app ------------------------------------------------
@@ -265,8 +264,8 @@ step "Creating ${ZIP}"
 "$DITTO" -c -k --sequesterRsrc --keepParent "$APP_SRC" "$ZIP"
 
 step "Generating the SHA-256 checksum"
-(cd "$RELEASE_DIR" && shasum -a 256 "${RELEASE_BASENAME}.zip" \
-    > "${RELEASE_BASENAME}.zip.sha256")
+(cd "$RELEASE_DIR" && shasum -a 256 "${APP_NAME}.zip" \
+    > "${APP_NAME}.zip.sha256")
 cat "$CHECKSUM"
 
 # Verify the archive that will actually be published, not just its source.
@@ -282,27 +281,6 @@ trap - EXIT
 # Publishing ---------------------------------------------------------------
 
 run_confirmed \
-    "Log in to AWS" \
-    "$AWS" login \
-    --no-cli-pager
-
-run_confirmed \
-    "Upload the versioned ZIP" \
-    "$AWS" s3 cp "$ZIP" "${S3_PREFIX}/${RELEASE_BASENAME}.zip" \
-    --acl public-read \
-    --content-type application/zip \
-    --cache-control "public, max-age=31536000, immutable" \
-    --no-cli-pager
-
-run_confirmed \
-    "Upload the stable website ZIP" \
-    "$AWS" s3 cp "$ZIP" "${S3_PREFIX}/${APP_NAME}.zip" \
-    --acl public-read \
-    --content-type application/zip \
-    --cache-control "no-cache" \
-    --no-cli-pager
-
-run_confirmed \
     "Create the draft GitHub release" \
     "$GH" release create "$VERSION" "$ZIP" "$CHECKSUM" \
     --title "${APP_NAME} ${VERSION}" \
@@ -312,8 +290,8 @@ run_confirmed \
 
 printf "\n${GREEN}Released %s %s (build %s).${NC}\n" \
     "$APP_NAME" "$VERSION" "$APP_BUILD_VERSION"
-printf "    ZIP:      %s/%s.zip\n" "$PUBLIC_URL" "$RELEASE_BASENAME"
-printf "    Download: %s/%s.zip\n" "$PUBLIC_URL" "$APP_NAME"
 printf "    Local:    %s\n" "$RELEASE_DIR"
 printf "\nReview the draft release, then publish it:\n"
 printf "    gh release edit %s --draft=false\n" "$VERSION"
+printf "\nOnce published, the stable download serves it:\n"
+printf "    %s\n" "$DOWNLOAD_URL"
