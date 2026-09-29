@@ -1,10 +1,22 @@
 # Nvmm
 
-Nvmm is a [Neovim](https://github.com/neovim/neovim) GUI for Mac written in Swift with AppKit and Metal.
+Nvmm is a sweet [Neovim](https://github.com/neovim/neovim) GUI for Mac with GPU text rendering and native Mac look and feel.
 
-It comes bundled with `nvim` 0.12+ and a CLI helper called `nvmm`.
+It comes bundled with `nvim` and a CLI helper called `nvmm`.
 
-Nvmm requires macOS 15.7+ and Apple Silicon.
+Nvmm runs on macOS 15.7+ and Apple Silicon.
+
+<img src="https://mowglii.com/nvmm/nvmmbanner2@2x.png" width="550" alt="Nvmm with vim-buftabline">
+ 
+<em>
+Nvmm shown with <a href="https://github.com/ap/vim-buftabline">vim-buftabline</a>, a plugin that makes Neovim's tabs make sense.
+<br>
+It works well with Nvmm's option to prefer buffers over tabs.
+</em>
+
+## Installation
+
+Pre-built releases are published on the [GitHub Releases page](https://github.com/sfsam/nvmm/releases).
 
 ## Documentation
 
