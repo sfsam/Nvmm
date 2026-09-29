@@ -6,133 +6,28 @@ It comes bundled with `nvim` 0.12+ and a CLI helper called `nvmm`.
 
 Nvmm requires macOS 15.7+ and Apple Silicon.
 
-## Command Line Helper
+## Documentation
 
-The app bundle contains `nvim` and `nvmm`, a helper that opens files in a running Nvmm or launches it if needed.
-
-To use them easily, put their folder in your `PATH`. For example, if you are using zsh, put this in your `.zprofile`:
-
-```sh
-export PATH="/Applications/Nvmm.app/Contents/bin:$PATH"
-```
-
-Alternatively, you can symlink one or both:
-
-```sh
-ln -s /Applications/Nvmm.app/Contents/bin/nvmm ~/.local/bin/nvmm
-ln -s /Applications/Nvmm.app/Contents/bin/nvim ~/.local/bin/nvim
-```
-
-### Example `nvmm` usage
-
-```text
-nvmm                 # open a new window in the current directory
-nvmm a.txt           # open file
-nvmm --reuse a.txt   # open file in the best existing window
-nvmm -p a.txt b.txt  # one tab per file
-nvmm +42 a.txt       # put cursor at line 42
-nvmm --wait a.txt    # open file and wait until its window is closed
-```
-
-Each invocation opens a new window with Neovim running in the current
-directory. `--reuse` instead opens files in the best existing window, or
-activates an existing window when no files are given. If no window exists,
-it opens one. `--reuse` cannot be combined with `--wait` or Neovim options.
-
-Supported options are shown by `nvmm --help`.
-
-## Choosing a Neovim
-
-Nvmm runs its bundled `nvim` by default. To run a different one, open
-Settings and choose Other… from the Neovim menu, then select an `nvim`
-executable, such as `/opt/homebrew/bin/nvim`. 
-
-The setting applies to every new window, including those opened by `nvmm`.
-Running windows keep the Neovim they started with. The Neovim must be 0.12 or
-newer.
-
-**Note:** Help menu search lists topics from the bundled Neovim's help files 
-and opens them in the frontmost window, or in a new window if there is none.
-A custom Neovim that lacks a topic reports it with its own error.
-
-## Appearance
-
-Nvmm's Settings panel has options for following the System Appearance,
-always using Light or Dark, or following Neovim's `'background'` option.
-
-Nvmm exposes the editor view's effective appearance as
-`g:nvmm_os_appearance`: 0 is light, 1 is dark, 2 is high-contrast light, and
-3 is high-contrast dark. Changes trigger the
-`User NvmmOSAppearanceChanged` autocmd. The value reports the editor view's
-effective appearance after applying the Appearance setting and macOS
-accessibility contrast.
-
-For example, with Appearance set to System in the Settings panel, add this
-to `~/.config/nvim/ginit.vim`, which Nvmm loads after your normal Neovim
-config, to keep Neovim's `'background'` option synchronized with the editor
-view:
-
-```text
-lua << EOF
-local function update_background()
-  local appearance = vim.g.nvmm_os_appearance
-  if appearance == nil then
-    return
-  end
-
-  local light = appearance == 0 or appearance == 2
-  vim.o.background = light and "light" or "dark"
-end
-
-local group = vim.api.nvim_create_augroup(
-  "NvmmAppearance",
-  { clear = true }
-)
-
-vim.api.nvim_create_autocmd("User", {
-  group = group,
-  pattern = "NvmmOSAppearanceChanged",
-  callback = update_background,
-})
-
--- Apply an appearance that Nvmm published before this configuration loaded.
-update_background()
-EOF
-```
+See [Nvmm Documentation](https://mowglii.com/nvmm/nvmm.html).
 
 ## Build
 
-No Apple Developer account is required. The checked-in signing configuration uses an ad-hoc signature by default.
+By default, the app gets an ad-hoc signature. No Apple Developer account is required.
 
-To sign Debug with Apple Development or Release with Developer ID, copy the
-local example, replace its placeholder team ID, and enable only the intended
-configuration:
-
-```sh
-cp Config/Signing.local.xcconfig.example \
-  Config/Signing.local.xcconfig
-```
-
-`Config/Signing.local.xcconfig` is ignored by Git. Edit that file instead of
-choosing a team in Xcode's Signing & Capabilities editor; the latter writes
-account-specific values into the shared project file. Keep Developer ID values
-conditional on `Release` so Debug continues to use fast ad-hoc signing unless
-Apple Development is explicitly enabled for it.
-
-Download Neovim 0.12 or newer, then build the app:
+First, download Neovim 0.12 or newer. The build copies it into the app. Then build the app:
 
 ```sh
 Scripts/download_nvim.sh v0.12.5
 xcodebuild -configuration Release
 ```
 
-The built app is located at:
+The app is built at:
 
 ```text
 build/Release/Nvmm.app
 ```
 
-The app bundles Neovim's executable, libraries, and runtime, and uses that bundled copy unless Settings chooses another. See [Choosing a Neovim](#choosing-a-neovim).
+The app uses its bundled Neovim unless you choose another one in Settings. See [Choosing a Neovim](https://mowglii.com/nvmm/nvmm.html#neovim).
 
 Run the tests with:
 
@@ -140,6 +35,19 @@ Run the tests with:
 xcodebuild -project Nvmm.xcodeproj -scheme Nvmm \
   -destination platform=macOS test
 ```
+
+### Signing with Your Team
+
+To sign with your own Apple Developer team, copy the example signing file:
+
+```sh
+cp Config/Signing.local.xcconfig.example \
+  Config/Signing.local.xcconfig
+```
+
+Then edit `Config/Signing.local.xcconfig` and replace `XXXXXXXXXX` with your team ID. As provided, it signs Debug with Apple Development. To sign Release with Developer ID, uncomment its Release lines. Keep each setting's `[config=...]` part so it only affects that configuration. Any configuration you leave out keeps the ad-hoc signature.
+
+Git ignores this file. Set up signing there, not in Xcode's Signing & Capabilities editor, because Xcode saves those choices in the shared project file.
 
 ## Acknowledgements
 
@@ -150,7 +58,7 @@ Nvmm is an experiment in coding with LLM agents. It was made with lots of help a
 [MacVim](https://macvim.org),
 [Neovide](https://neovide.dev),
 [Neovim for macOS](https://github.com/JaySandhu/neovim-mac),
-[VimR](https://github.com/qvacua/vimr) and, of course, 
+[VimR](https://github.com/qvacua/vimr) and, of course,
 [The Beatles](https://www.thebeatles.com).
 
 ## License
