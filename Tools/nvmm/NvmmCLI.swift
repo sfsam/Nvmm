@@ -32,7 +32,7 @@ Options:
   -h, --help        Print this help message
   -o                Open one horizontal window per file
   -O                Open one vertical window per file
-  -p                Open one tab page per file
+  -p                Open one tabpage per file
   -R                Read-only mode
   --clean           Factory defaults - no user config or plugins
   --reuse           Reuse the best existing Nvmm window

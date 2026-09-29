@@ -21,8 +21,8 @@ enum Settings {
         case neovimBackground
     }
 
-    /// Whether a document opens as a buffer in the current tab page rather
-    /// than in a new tab page. Applies to Finder and drag-and-drop opens, the
+    /// Whether a document opens as a buffer in the current tabpage rather
+    /// than in a new tabpage. Applies to Finder and drag-and-drop opens, the
     /// Open panel, and New.
     static let openFilesInBuffersKey = "NVOpenFilesInBuffersInsteadOfTabs"
 

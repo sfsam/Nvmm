@@ -23,7 +23,7 @@ extension WindowController {
 
     // MARK: - New
 
-    /// Opens an empty document in a buffer or tab page according to the app
+    /// Opens an empty document in a buffer or tabpage according to the app
     /// preference. Buffer mode uses `:hide enew`, preserving a modified buffer
     /// even when `'hidden'` is off without changing the option permanently.
     @IBAction func newDocument(_ sender: Any?) {
