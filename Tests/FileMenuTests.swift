@@ -114,6 +114,21 @@ final class NvimModeTests: XCTestCase {
         XCTAssertFalse(
             parseBlockedAwaitingInput(.transport(.connectionClosed)))
     }
+
+    /// Only a plain "m" from `state('m')` is a mapping pause. Anything else,
+    /// including an error from a Neovim without the call, leaves a block
+    /// reported as a block.
+    func testParsesMappingPause() {
+        func reply(_ result: MPValue, error: MPValue = .null) -> RPCRequestResult {
+            .response(RPCResponse(error: error, result: result))
+        }
+        XCTAssertTrue(parseMappingPause(reply(.string("m"))))
+        XCTAssertFalse(parseMappingPause(reply(.string(""))))
+        XCTAssertFalse(parseMappingPause(reply(
+            .null, error: .array([.int(0), .string("Invalid method")]))))
+        XCTAssertFalse(parseMappingPause(.timedOut))
+        XCTAssertFalse(parseMappingPause(.transport(.connectionClosed)))
+    }
 }
 
 final class WriteOutcomeTests: XCTestCase {

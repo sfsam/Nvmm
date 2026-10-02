@@ -596,8 +596,9 @@ actor NeovimProcess {
         // this runs in the serialized command consumer: an unanswered paste
         // would park every later keystroke behind it, including the Esc that
         // cancels the block. Refuse instead — nothing can be pasted into a
-        // blocked editor anyway.
-        guard await !isBlockedAwaitingInput() else { return false }
+        // blocked editor anyway. A mapping pause is ended first, so the
+        // paste follows the keys typed before it.
+        guard await !staysBlockedAwaitingInput() else { return false }
         let chunks = pasteChunks(data, maximumBytes: nvimPasteChunkBytes)
         for (index, chunk) in chunks.enumerated() {
             let phase: Int
@@ -650,7 +651,13 @@ actor NeovimProcess {
 
     /// Runs one mode-aware Undo or Redo and observes whether Neovim moved in
     /// its undo tree.
+    ///
+    /// A mapping pause is ended before the mode is read, since the keys it
+    /// releases can leave an operator pending, which the keys chosen here
+    /// must cancel. A wait on the user would hold every request below until
+    /// their deadlines, parking the input queue, so it is reported at once.
     func performUndoRedo(_ action: UndoRedoAction) async -> UndoRedoOutcome {
+        guard await !staysBlockedAwaitingInput() else { return .unavailable }
         let mode = await mode()
         guard let keys = action.keys(for: mode),
               let before = await undoSequence()

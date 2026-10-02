@@ -258,7 +258,8 @@ extension WindowController {
         // Neovim blocked awaiting input answers no requests, so the
         // modified-buffer query would time out and the close would do nothing.
         // Terminal Neovim refuses to quit in this state too: report the block,
-        // and let the user cancel the pending input first.
+        // and let the user cancel the pending input first. A mapping pause is
+        // ended instead, before the modified set is read.
         guard await !refuseIfBlocked(process) else { return }
         guard var pending = await process.modifiedBuffers() else { return NSSound.beep() }
         var discarded: [ModifiedBuffer] = []
@@ -273,6 +274,10 @@ extension WindowController {
                 }
             }
 
+            // The sheets let the user keep typing. End a mapping pause begun
+            // meanwhile now, so that a buffer the released keys modify is in
+            // the set read next, and asked about.
+            guard await !refuseIfBlocked(process) else { return }
             guard let modified = await process.modifiedBuffers() else {
                 return NSSound.beep()
             }
@@ -284,16 +289,25 @@ extension WindowController {
         // The sheets let the user keep typing, so Neovim can have entered a
         // blocked input state since the entry check — a quit issued now would
         // queue until the user cancels it, leaving the window open for no
-        // visible reason. Re-check and report instead.
-        guard await !refuseIfBlocked(process) else { return }
+        // visible reason. Re-check and report instead. A mapping pause is
+        // reported too, not ended: its keys could modify a buffer after the
+        // modified set was read, and the forced quit would discard that.
+        guard await !refuseIfBlocked(process, endingMappingPause: false)
+        else { return }
         beginQuit(force: true)
     }
 
     /// Reports the awaiting-input alert and returns true when Neovim is
     /// blocked awaiting input, so close and delete paths refuse to act rather
-    /// than send commands that would queue behind the block.
-    private func refuseIfBlocked(_ process: NeovimProcess) async -> Bool {
-        guard await process.isBlockedAwaitingInput() else { return false }
+    /// than send commands that would queue behind the block. A mapping pause
+    /// is ended rather than reported, unless `endingMappingPause` is false.
+    private func refuseIfBlocked(
+        _ process: NeovimProcess, endingMappingPause: Bool = true
+    ) async -> Bool {
+        let blocked = endingMappingPause
+            ? await process.staysBlockedAwaitingInput()
+            : await process.isBlockedAwaitingInput()
+        guard blocked else { return false }
         await presentAwaitingInputAlert()
         return true
     }

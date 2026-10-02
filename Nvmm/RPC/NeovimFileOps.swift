@@ -120,6 +120,40 @@ extension NeovimProcess {
                                timeout: .milliseconds(250)))
     }
 
+    /// Whether typed keys are pending, still to be matched against a
+    /// mapping. `state()` may run in a fast context, and
+    /// `nvim__exec_lua_fast` is answered even while Neovim is blocked, so
+    /// this can be asked when ordinary requests would queue. See
+    /// `parseMappingPause`.
+    func isPausedOnMapping() async -> Bool {
+        parseMappingPause(await queryBounded(
+            "nvim__exec_lua_fast",
+            [.string("return vim.fn.state('m')"), .array([])],
+            timeout: .milliseconds(250)))
+    }
+
+    /// Whether Neovim is blocked awaiting input once a mapping pause, if
+    /// that is what blocks it, has been ended.
+    ///
+    /// `<Ignore>` matches no mapping, so it ends the pause at once and the
+    /// keys typed so far run as they would on timeout. It is sent only to a
+    /// pause; were the pause to end first, the key would still be harmless,
+    /// as waits for a single key skip it and every mode ignores it. The keys
+    /// released can lead into a wait only the user can answer, so the block
+    /// is read again until it lifts or turns into one.
+    func staysBlockedAwaitingInput() async -> Bool {
+        guard await isBlockedAwaitingInput() else { return false }
+        guard await isPausedOnMapping() else { return true }
+        notify("nvim_input", [.string("<Ignore>")])
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(250))
+        while ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+            guard await isBlockedAwaitingInput() else { return false }
+            guard await isPausedOnMapping() else { return true }
+        }
+        return true
+    }
+
     /// Issues a request that changes Neovim, bounded by a deadline.
     ///
     /// Use this rather than `queryBounded` whenever a late reply would leave
@@ -169,7 +203,11 @@ extension NeovimProcess {
     ///
     /// Callers that put up a panel before acting gate on this first, so the
     /// panel does not appear only to be followed by a beep.
+    ///
+    /// A mapping pause is ended before the mode is read, since the keys it
+    /// releases can change the mode.
     func prepareForCommand() async -> Bool {
+        _ = await staysBlockedAwaitingInput()
         let mode = await self.mode()
         if mode.isBusy || mode.isExMode || mode.isPrompt { return false }
         if !mode.isNormal { feedkeys(Self.escapeToNormal) }
@@ -209,11 +247,19 @@ extension NeovimProcess {
     /// Whether the current mode permits a save, aborting a command line or a
     /// pending operator first. False when Neovim is busy, at a prompt, in an Ex
     /// mode, or in a terminal buffer — nothing there is a document to write.
+    ///
+    /// A mapping pause is ended before the mode is read, since the keys it
+    /// releases can leave an operator pending or a command line open. A block
+    /// that stays, in a mode that permits a save, is passed through: the
+    /// write that follows reports it, and an abort fed now would queue behind
+    /// it and cancel whatever the user goes on to type.
     func canSave() async -> Bool {
+        let blocked = await staysBlockedAwaitingInput()
         let mode = await self.mode()
         if mode.isBusy || mode.isPrompt || mode.isExMode || mode.isTerminal {
             return false
         }
+        if blocked { return true }
         if mode.isCommandLine || mode.isOperatorPending { feedkeys(Self.abort) }
         return true
     }
@@ -314,8 +360,9 @@ extension NeovimProcess {
     /// buffer as it stands — Insert mode has already applied every keystroke
     /// to the buffer lines — and returns Neovim to whatever it was doing, so
     /// saving mid-insert writes the text just typed and leaves the user
-    /// typing. The caller gates on `canSave()`, which refuses the modes that
-    /// would swallow the command, exactly as it does for `writeAs`.
+    /// typing. The caller gates on `canSave()`, which ends a mapping pause
+    /// and refuses the modes that would swallow the command, exactly as it
+    /// does for `writeAs`.
     func writeCurrentBuffer() async -> WriteOutcome {
         // A successful write message can displace the mode indicator while
         // Neovim's own UI layer is active, leaving its command window expanded
@@ -332,7 +379,7 @@ extension NeovimProcess {
     /// Switches to a buffer and writes it. Used by the save prompts, which name
     /// the buffer they asked about rather than trusting the current one.
     func writeBuffer(_ bufnr: Int) async -> WriteOutcome {
-        guard await !isBlockedAwaitingInput() else { return .awaitingInput }
+        guard await !staysBlockedAwaitingInput() else { return .awaitingInput }
         return classifyWrite(
             await normalCommandResponse("buffer \(bufnr) | write"))
     }

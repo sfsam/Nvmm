@@ -413,27 +413,45 @@ final class NeovimProcessTests: XCTestCase {
     /// would be answered after its deadline, and an error it raised — E32
     /// for an unnamed buffer, which the save panel exists to answer — would
     /// arrive in a reply no longer being read, failing invisibly.
+    ///
+    /// A block with no keys pending is not a mapping pause, so nothing is
+    /// typed into it either — nor when the pause query itself fails, as on
+    /// a Neovim without it.
     func testWriteIsNotSentWhileBlockedAwaitingInput() async throws {
-        let pair = try makeSocketPair()
-        defer { close(pair.peer) }
-        let process = NeovimProcess()
-        await process.attach(readFD: pair.client, writeFD: pair.client)
+        let replies: [(result: MPValue, error: MPValue)] = [
+            (.string(""), .null),
+            (.null, .array([.int(0), .string("Invalid method")])),
+        ]
+        for reply in replies {
+            let pair = try makeSocketPair()
+            defer { close(pair.peer) }
+            let process = NeovimProcess()
+            await process.attach(readFD: pair.client, writeFD: pair.client)
 
-        let write = Task { await process.writeBuffer(3) }
+            let write = Task { await process.writeBuffer(3) }
 
-        var unpacker = MessagePackUnpacker()
-        let probeID = try readRequest(pair.peer, method: "nvim_get_mode",
-                                      unpacker: &unpacker)
-        try writeResponse(
-            pair.peer, id: probeID,
-            result: .map([(.string("mode"), .string("n")),
-                          (.string("blocking"), .bool(true))]))
+            var unpacker = MessagePackUnpacker()
+            let probeID = try readRequest(pair.peer, method: "nvim_get_mode",
+                                          unpacker: &unpacker)
+            try writeResponse(
+                pair.peer, id: probeID,
+                result: .map([(.string("mode"), .string("n")),
+                              (.string("blocking"), .bool(true))]))
+            let pauseID = try readRequest(
+                pair.peer, method: "nvim__exec_lua_fast",
+                arguments: [.string("return vim.fn.state('m')"), .array([])],
+                unpacker: &unpacker)
+            try writeResponse(pair.peer, id: pauseID, error: reply.error,
+                              result: reply.result)
 
-        let outcome = await write.value
-        XCTAssertEqual(outcome, .awaitingInput)
-        // Nothing followed the probe: no `:write` is left to fail unseen.
-        XCTAssertThrowsError(try readMessage(pair.peer, unpacker: &unpacker))
-        await process.disconnect()
+            let outcome = await write.value
+            XCTAssertEqual(outcome, .awaitingInput)
+            // Nothing followed the probes: no `<Ignore>`, and no `:write`
+            // left to fail unseen.
+            XCTAssertThrowsError(
+                try readMessage(pair.peer, unpacker: &unpacker))
+            await process.disconnect()
+        }
     }
 
     func testNewDocumentTypesItsCommand() async throws {
@@ -634,10 +652,14 @@ final class NeovimProcessTests: XCTestCase {
             peer, id: probeID,
             result: .map([(.string("mode"), .string("n")),
                           (.string("blocking"), .bool(true))]))
+        // No keys are pending, so this is a wait on the user, not a pause.
+        let pauseID = try readRequest(peer, method: "nvim__exec_lua_fast",
+                                      unpacker: &unpacker)
+        try writeResponse(peer, id: pauseID, result: .string(""))
 
         await fulfillment(of: [refused], timeout: 2)
         await paste.value
-        // Nothing followed the probe: no chunk reached the blocked editor.
+        // Nothing followed the probes: no chunk reached the blocked editor.
         XCTAssertThrowsError(try readMessage(peer, unpacker: &unpacker))
     }
 
@@ -1423,6 +1445,10 @@ final class NeovimProcessTests: XCTestCase {
             let blocked = await blockOnRegisterWait(process)
             XCTAssertTrue(blocked)
 
+            // Cmd-S's own sequence: no keys are pending, so this is not a
+            // mapping pause, and the write reports the block.
+            let allowed = await process.canSave()
+            XCTAssertTrue(allowed)
             let refused = await process.writeCurrentBuffer()
             XCTAssertEqual(refused, .awaitingInput)
 
@@ -1434,6 +1460,153 @@ final class NeovimProcessTests: XCTestCase {
             // E32 now reaches the caller, which is what puts up a save panel.
             let outcome = await process.writeCurrentBuffer()
             XCTAssertEqual(outcome, .needsFilename)
+        }
+    }
+
+    /// A key that starts a longer mapping blocks Neovim until `'timeoutlen'`
+    /// runs out. That pause is told apart from a wait on the user and ended,
+    /// so the write runs and its E32 reaches the caller long before the
+    /// timeout would have.
+    func testSaveEndsAMappingPause() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            let setup = try await process.request("nvim_exec2", [
+                .string("set timeoutlen=10000 | nnoremap ,x <Nop>"),
+                .map([])])
+            XCTAssertFalse(setup.isError)
+            let changed = try await process.request(
+                "nvim_buf_set_lines",
+                [.int(0), .int(0), .int(-1), .bool(true),
+                 .array([.string("hello")])])
+            XCTAssertFalse(changed.isError)
+
+            await process.perform(.input(","))
+            let blocked = await waitFor(process) {
+                await $0.isBlockedAwaitingInput()
+            }
+            XCTAssertTrue(blocked)
+            let paused = await process.isPausedOnMapping()
+            XCTAssertTrue(paused)
+
+            let start = ContinuousClock.now
+            let allowed = await process.canSave()
+            XCTAssertTrue(allowed)
+            let outcome = await process.writeCurrentBuffer()
+            XCTAssertEqual(outcome, .needsFilename)
+            XCTAssertLessThan(ContinuousClock.now - start, .seconds(3))
+        }
+    }
+
+    /// A mapping prefix that is also an operator: ending the pause leaves `d`
+    /// pending. The save aborts it, as for an operator typed on its own, so
+    /// Neovim is back in Normal mode once the file is written.
+    func testSaveAbortsAnOperatorLeftByAMappingPause() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            let path = FileManager.default.temporaryDirectory
+                .appendingPathComponent("nvmm-save-\(UUID().uuidString)").path
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let named = try await process.request(
+                "nvim_buf_set_name", [.int(0), .string(path)])
+            XCTAssertFalse(named.isError)
+            let setup = try await process.request("nvim_exec2", [
+                .string("set timeoutlen=10000 | nnoremap ds <Nop>"),
+                .map([])])
+            XCTAssertFalse(setup.isError)
+
+            await process.perform(.input("d"))
+            let blocked = await waitFor(process) {
+                await $0.isBlockedAwaitingInput()
+            }
+            XCTAssertTrue(blocked)
+
+            let allowed = await process.canSave()
+            XCTAssertTrue(allowed)
+            let outcome = await process.writeCurrentBuffer()
+            XCTAssertEqual(outcome, .written)
+            let mode = await process.mode()
+            XCTAssertEqual(mode, .normal)
+        }
+    }
+
+    /// A paste during a mapping pause ends the pause and lands, rather than
+    /// being refused as if Neovim were waiting on the user.
+    func testPasteEndsAMappingPause() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            let setup = try await process.request("nvim_exec2", [
+                .string("set timeoutlen=10000 | nnoremap ,x <Nop>"),
+                .map([])])
+            XCTAssertFalse(setup.isError)
+
+            await process.perform(.input(","))
+            let blocked = await waitFor(process) {
+                await $0.isBlockedAwaitingInput()
+            }
+            XCTAssertTrue(blocked)
+
+            await process.perform(.paste("hello", refused: {
+                XCTFail("the paste was refused")
+            }))
+            let pasted = await waitUntilTrue(
+                process, "getline(1) ==# 'hello'")
+            XCTAssertTrue(pasted)
+        }
+    }
+
+    /// Commands gated on `prepareForCommand` — Open, deleting a buffer — end
+    /// a mapping pause before reading the mode, so an operator the pause
+    /// leaves behind is cleared rather than left to swallow the command.
+    func testPrepareForCommandEndsAMappingPause() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            let setup = try await process.request("nvim_exec2", [
+                .string("set timeoutlen=10000 | nnoremap ds <Nop>"),
+                .map([])])
+            XCTAssertFalse(setup.isError)
+
+            await process.perform(.input("d"))
+            let blocked = await waitFor(process) {
+                await $0.isBlockedAwaitingInput()
+            }
+            XCTAssertTrue(blocked)
+
+            let start = ContinuousClock.now
+            let prepared = await process.prepareForCommand()
+            XCTAssertTrue(prepared)
+            // Normal mode is reported during the pause too, so the pause
+            // must also have ended.
+            let normal = await waitFor(process) { process in
+                guard await !process.isBlockedAwaitingInput() else {
+                    return false
+                }
+                return await process.mode() == .normal
+            }
+            XCTAssertTrue(normal)
+            XCTAssertLessThan(ContinuousClock.now - start, .seconds(3))
+        }
+    }
+
+    /// The hit-enter prompt blocks with no keys pending, so it is not a
+    /// mapping pause, and saving there is refused outright, before Save As
+    /// puts up a panel it could not finish.
+    func testSaveIsRefusedAtTheHitEnterPrompt() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            await process.perform(.input(":echo \"a\\nb\"\r"))
+            let prompted = await waitFor(process) {
+                await $0.mode() == .promptEnter
+            }
+            XCTAssertTrue(prompted)
+            let blocked = await process.isBlockedAwaitingInput()
+            XCTAssertTrue(blocked)
+            let paused = await process.isPausedOnMapping()
+            XCTAssertFalse(paused)
+
+            let allowed = await process.canSave()
+            XCTAssertFalse(allowed)
+            let stillPrompted = await process.mode()
+            XCTAssertEqual(stillPrompted, .promptEnter)
         }
     }
 
@@ -1695,6 +1868,92 @@ final class NeovimProcessTests: XCTestCase {
                 "nvim_command", [.string("set visualbell")])
             await process.perform(.input("<Esc>"))
             await fulfillment(of: [visual], timeout: 2)
+        }
+    }
+
+    /// Types `abc` in Insert mode and returns to Normal mode, leaving one
+    /// change to undo, then sets up a mapping with a long `'timeoutlen'`.
+    private func prepareUndoDuringPause(
+        _ process: NeovimProcess, mapping: String, timeoutlen: Int = 10000
+    ) async throws {
+        try await attachLinegridUI(process)
+        await process.perform(.input("iabc\u{1b}"))
+        let typed = await waitForEditorState(
+            process, mode: .normal, line: "abc")
+        XCTAssertTrue(typed)
+        let setup = try await process.request("nvim_exec2", [
+            .string("set timeoutlen=\(timeoutlen) | nnoremap \(mapping) <Nop>"),
+            .map([])])
+        XCTAssertFalse(setup.isError)
+    }
+
+    /// Undo during a mapping pause ends the pause and undoes, long before
+    /// `'timeoutlen'` would have ended it.
+    func testUndoEndsAMappingPause() async throws {
+        try await withNvim { process in
+            try await prepareUndoDuringPause(process, mapping: ",x")
+            await process.perform(.input(","))
+            let blocked = await waitFor(process) {
+                await $0.isBlockedAwaitingInput()
+            }
+            XCTAssertTrue(blocked)
+
+            let start = ContinuousClock.now
+            let outcome = await process.performUndoRedo(.undo)
+            XCTAssertEqual(outcome, .changed)
+            XCTAssertLessThan(ContinuousClock.now - start, .seconds(1))
+            let undone = await waitForEditorState(
+                process, mode: .normal, line: "")
+            XCTAssertTrue(undone)
+        }
+    }
+
+    /// A mapping prefix that is also an operator: the keys for Undo are
+    /// chosen after the pause ends, from the operator-pending mode it
+    /// leaves, so the operator is cancelled rather than handed `u` as its
+    /// motion. The short `'timeoutlen'` is not needed to pass; it keeps the
+    /// test telling. Were the mode read before the pause ended, the pause
+    /// would still end, on its own, within the undo's deadline, and `u`
+    /// would reach the pending `d` as its motion.
+    func testUndoAfterAnOperatorLeftByAMappingPause() async throws {
+        try await withNvim { process in
+            try await prepareUndoDuringPause(
+                process, mapping: "ds", timeoutlen: 500)
+            await process.perform(.input("d"))
+            let blocked = await waitFor(process) {
+                await $0.isBlockedAwaitingInput()
+            }
+            XCTAssertTrue(blocked)
+
+            let outcome = await process.performUndoRedo(.undo)
+            XCTAssertEqual(outcome, .changed)
+            let undone = await waitForEditorState(
+                process, mode: .normal, line: "")
+            XCTAssertTrue(undone)
+        }
+    }
+
+    /// Undo while Neovim waits on the user is unavailable at once, without
+    /// parking the input queue behind requests the block would hold.
+    func testUndoIsUnavailableWhileAwaitingInput() async throws {
+        try await withNvim { process in
+            try await prepareUndoDuringPause(process, mapping: ",x")
+            let blocked = await blockOnRegisterWait(process)
+            XCTAssertTrue(blocked)
+
+            let start = ContinuousClock.now
+            let outcome = await process.performUndoRedo(.undo)
+            XCTAssertEqual(outcome, .unavailable)
+            XCTAssertLessThan(ContinuousClock.now - start, .seconds(1))
+
+            // Nothing was queued: answering the wait leaves the text as it
+            // was.
+            await process.perform(.input("q"))
+            let cleared = await waitUntilUnblocked(process)
+            XCTAssertTrue(cleared)
+            let kept = await waitForEditorState(
+                process, mode: .normal, line: "abc")
+            XCTAssertTrue(kept)
         }
     }
 

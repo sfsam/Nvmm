@@ -153,8 +153,21 @@ nonisolated func parseNvimMode(_ result: RPCRequestResult) -> NvimMode {
 /// The flag also covers Neovim's own bounded waits, such as the
 /// `'timeoutlen'` wait after a mapping prefix, so a single reading can name
 /// a block that ends on its own. Callers use it only where refusing costs a
-/// dismissible report and a retry.
+/// dismissible report and a retry. `parseMappingPause` tells that wait apart.
 nonisolated func parseBlockedAwaitingInput(_ result: RPCRequestResult) -> Bool {
     guard case .response(let response) = result else { return false }
     return response.result.mapValue(for: .string("blocking"))?.boolValue == true
+}
+
+/// Whether a `state('m')` reply says typed keys are pending, still to be
+/// matched against a mapping. While Neovim is blocked, that is the
+/// `'timeoutlen'` pause after a mapping prefix; a wait only the user can
+/// answer — the register after `q`, a prompt — has no keys pending.
+///
+/// Anything but a plain "m" reads as no pause: an error, such as a Neovim
+/// without the call, or no answer leaves the block reported as a block.
+nonisolated func parseMappingPause(_ result: RPCRequestResult) -> Bool {
+    guard case .response(let response) = result, !response.isError
+    else { return false }
+    return response.result.stringValue == "m"
 }
