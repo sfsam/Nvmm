@@ -2,8 +2,8 @@
 <svg width="512px" height="512px" viewBox="0 0 512 512" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
     <title>N</title>
     <g id="N" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
-        <polygon id="P" fill="#418852" points="133 192 308 431 379 320 204 80"></polygon>
-        <polygon id="Q" fill-opacity="0.4" fill="#000000" points="308 223 332 223 332 417 221 192 88 248 176 114"></polygon>
-        <polygon id="R" fill="#75C88B" points="88 411 88 130 204 80 379 320 308 350 308 150 424 100 424 381 308 431 133 192 204 161 204 361"></polygon>
+        <polygon id="P" fill="#367E3C" points="133 192 308 431 379 320 204 80"></polygon>
+        <polygon id="Q" fill-opacity="0.7" fill="#000000" points="129 177 232 137 307 222 314 223 392 329 366 343 245 177 129 227"></polygon>
+        <polygon id="R" fill="#51BC59" points="88 411 88 130 204 80 379 320 308 350 308 150 424 100 424 381 308 431 133 192 204 161 204 361"></polygon>
     </g>
 </svg>
