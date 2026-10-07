@@ -23,7 +23,7 @@ import os
 }
 
 /// Extracts committed text from the object forms Cocoa passes to text input.
-func committedString(_ value: Any) -> String? {
+nonisolated func committedString(_ value: Any) -> String? {
     if let string = value as? String { return string }
     if let attributed = value as? NSAttributedString { return attributed.string }
     return nil
