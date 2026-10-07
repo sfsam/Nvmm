@@ -945,6 +945,34 @@ final class NeovimProcessTests: XCTestCase {
         }
     }
 
+    /// Neovim's own busy message for `:w` is not forwarded to the progress
+    /// bar; a plugin's progress, sent after it, is the first update seen.
+    func testWriteProgressIsNotForwarded() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            let path = FileManager.default.temporaryDirectory
+                .appendingPathComponent("nvmm-progress-\(UUID().uuidString)")
+                .path
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let first = Task {
+                var updates = process.progressUpdates.makeAsyncIterator()
+                return await updates.next()
+            }
+            let lua = """
+                vim.api.nvim_buf_set_name(0, ...)
+                vim.cmd.write()
+                vim.api.nvim_echo({{'task'}}, false, {kind='progress',
+                  source='nvmm-test', status='running', percent=42})
+                """
+            let response = try await process.request(
+                "nvim_exec_lua", [.string(lua), .array([.string(path)])])
+            XCTAssertFalse(response.isError)
+            let received = await first.value
+            XCTAssertEqual(received,
+                           ProgressUpdate(percent: 42, isCompletion: false))
+        }
+    }
+
     func testBackgroundOptionIsPublishedWithoutBeingSet() async throws {
         try await withNvim { process in
             let initial = Task {

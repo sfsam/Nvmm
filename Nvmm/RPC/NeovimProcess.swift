@@ -1244,11 +1244,19 @@ extension NeovimProcess {
     /// event carries the task's id, status, and percentage in `ev.data`, which
     /// is passed through unchanged. Guarded on the event existing, so an older
     /// Neovim without it simply reports no progress.
+    ///
+    /// Neovim's own busy messages (source "nvim": writes, plus completion
+    /// and indent from 0.13) are dropped. They never carry a real
+    /// percentage, and 0.12 reports them as 0%, which would flash an empty
+    /// bar on every `:w`.
     private static let progressAutocmdLua = """
         if vim.fn.exists('##Progress') ~= 1 then return end
         local group = vim.api.nvim_create_augroup('NvmmProgress', {clear=true})
         vim.api.nvim_create_autocmd('Progress', {group=group,
-          callback=function(ev) vim.rpcnotify(0, 'progress', ev.data) end})
+          callback=function(ev)
+            if ev.data.source == 'nvim' then return end
+            vim.rpcnotify(0, 'progress', ev.data)
+          end})
         """
 
     /// Reports successful reads and writes of ordinary local files. This is
