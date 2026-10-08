@@ -22,7 +22,8 @@ import Foundation
 
     /// Whether this window's Neovim is blocked awaiting input. In that state
     /// Neovim answers no requests, so an unsaved check would time out and a
-    /// quit command would queue until the user cancels the input.
+    /// quit command would queue until the user cancels the input. A mapping
+    /// pause, which ends on its own, is ended instead and not reported.
     func isAwaitingInput() async -> Bool
 
     /// Reports that quitting is deferred because this window's Neovim is

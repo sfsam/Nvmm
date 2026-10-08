@@ -1615,6 +1615,104 @@ final class NeovimProcessTests: XCTestCase {
         }
     }
 
+    /// Quit's own sequence during a mapping pause: the block check ends the
+    /// pause, the unsaved check answers, and the quit runs, all long before
+    /// `'timeoutlen'` would have ended the pause.
+    func testQuitEndsAMappingPause() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            let setup = try await process.request("nvim_exec2", [
+                .string("set timeoutlen=10000 | nnoremap ,x <Nop>"),
+                .map([])])
+            XCTAssertFalse(setup.isError)
+
+            await process.perform(.input(","))
+            let blocked = await waitFor(process) {
+                await $0.isBlockedAwaitingInput()
+            }
+            XCTAssertTrue(blocked)
+
+            let start = ContinuousClock.now
+            let stays = await process.staysBlockedAwaitingInput()
+            XCTAssertFalse(stays)
+            let unsaved = await process.hasUnsavedBuffers()
+            XCTAssertFalse(unsaved)
+            await process.perform(.quit(force: false))
+            let exited = await waitForExit(process)
+            XCTAssertTrue(exited)
+            XCTAssertLessThan(ContinuousClock.now - start, .seconds(3))
+        }
+    }
+
+    /// The keys a pause releases run before the unsaved check reads the
+    /// buffers, so a change they make is seen, and Quit asks before
+    /// discarding it rather than issuing a forced quit unasked.
+    func testQuitSeesAChangeMadeByKeysAMappingPauseReleases() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            let changed = try await process.request(
+                "nvim_buf_set_lines",
+                [.int(0), .int(0), .int(-1), .bool(true),
+                 .array([.string("abc")])])
+            XCTAssertFalse(changed.isError)
+            let setup = try await process.request("nvim_exec2", [
+                .string("set nomodified timeoutlen=10000 | nnoremap xy <Nop>"),
+                .map([])])
+            XCTAssertFalse(setup.isError)
+            let unsavedAtStart = await process.hasUnsavedBuffers()
+            XCTAssertFalse(unsavedAtStart)
+
+            await process.perform(.input("x"))
+            let blocked = await waitFor(process) {
+                await $0.isBlockedAwaitingInput()
+            }
+            XCTAssertTrue(blocked)
+
+            let stays = await process.staysBlockedAwaitingInput()
+            XCTAssertFalse(stays)
+            let unsaved = await process.hasUnsavedBuffers()
+            XCTAssertTrue(unsaved)
+            let line = try await process.request("nvim_get_current_line")
+            XCTAssertEqual(line.result.stringValue, "bc")
+        }
+    }
+
+    /// A wait on the user is reported to Quit at once, and nothing is typed
+    /// into it: once the user cancels the wait, Neovim is still running and
+    /// the buffer is as it was.
+    func testQuitIsDeferredWhileAwaitingInput() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            let changed = try await process.request(
+                "nvim_buf_set_lines",
+                [.int(0), .int(0), .int(-1), .bool(true),
+                 .array([.string("abc")])])
+            XCTAssertFalse(changed.isError)
+            let blocked = await blockOnRegisterWait(process)
+            XCTAssertTrue(blocked)
+
+            let start = ContinuousClock.now
+            let stays = await process.staysBlockedAwaitingInput()
+            XCTAssertTrue(stays)
+            XCTAssertLessThan(ContinuousClock.now - start, .seconds(1))
+
+            await process.perform(.input("\u{1b}"))
+            let kept = await waitForEditorState(
+                process, mode: .normal, line: "abc")
+            XCTAssertTrue(kept)
+            let recording = try await process.request(
+                "nvim_eval", [.string("reg_recording()")])
+            XCTAssertEqual(recording.result.stringValue, "")
+        }
+    }
+
+    /// Waits for Neovim to end the connection, as it does once it quits.
+    private func waitForExit(_ process: NeovimProcess) async -> Bool {
+        await waitFor(process, timeout: .seconds(3)) {
+            (try? await $0.request("nvim_get_mode")) == nil
+        }
+    }
+
     /// The hit-enter prompt blocks with no keys pending, so it is not a
     /// mapping pause, and saving there is refused outright, before Save As
     /// puts up a panel it could not finish.

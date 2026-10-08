@@ -1150,9 +1150,13 @@ final class WindowController: NSWindowController, NSWindowDelegate,
 
     /// Whether this window's Neovim is blocked awaiting input. False for a
     /// borrowed Neovim too: detaching it needs nothing from the session.
+    ///
+    /// A mapping pause is ended rather than reported, so its keys run as they
+    /// would on timeout. The unsaved check that follows is a deferred
+    /// request, so it reads the buffers after those keys have run.
     func isAwaitingInput() async -> Bool {
         guard ownsServer, let process else { return false }
-        return await process.isBlockedAwaitingInput()
+        return await process.staysBlockedAwaitingInput()
     }
 
     /// Asks Neovim to quit all buffers. A forced quit discards unsaved changes.
