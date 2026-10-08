@@ -667,8 +667,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         let compositionClearCount = compositionRender.valid
             ? max(0, compositionRender.clearEnd - compositionRender.clearStart) : 0
         let compositionBackgroundCount = compositionClearCount + compositionCellCount
-        // One extra slot holds the block cursor's x-ray character.
-        let renderCellCapacity = gridSize + compositionCellCount + 1
+        let renderCellCapacity = gridSize + compositionCellCount
 
         let uniformSize = MemoryLayout<uniform_data>.stride
         let backgroundSize = gridSize * MemoryLayout<UInt32>.stride
@@ -725,8 +724,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             cursor_height: cursorHeightPixels,
             cursor_top: cursorTopPixels,
             cursor_cell_width: UInt32(cursor.width),
-            grid_width: UInt32(grid.width),
-            cursor_xray: 0)
+            grid_width: UInt32(grid.width))
 
         var glyphCount = 0
         var cellGraphicCount = 0
@@ -740,24 +738,19 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         var underdashedPosition: UInt16 = 0
 
         var backgroundIndex = 0
-        var cursorXray = false
         let cellWidth = Int(cellSizePixels.x)
         let nativePowerlineSymbols = Settings.nativePowerlineSymbols
         for row in 0..<grid.height {
             if ligaturesEnabled {
+                // The cursor's cell is shaped alone, in every shape and blink
+                // phase, so the character it sits on always shows.
                 let start = row * grid.width
+                let breaks: Set<Int> = row == cursor.row && !grid.hideCursor
+                    ? [cursor.column] : []
                 context.ligatureShaper.shape(
                     row: grid.cells[start..<(start + grid.width)],
-                    family: font, into: &ligatureRuns)
+                    family: font, breakingAt: breaks, into: &ligatureRuns)
             }
-            // A ligature's ink for the cursor cell can belong to a neighboring
-            // cell's glyph, so recoloring cannot reveal the character
-            // underneath. The glyph pass carves the cursor rect out instead.
-            let xray = ligaturesEnabled && blockCursorApplies
-                && row == cursor.row
-                && cursor.column < ligatureRuns.count
-                && ligatureRuns[cursor.column].glyph != 0
-            if xray { cursorXray = true }
             for col in 0..<grid.width {
                 let originalCell = grid.cell(row, col)
                 var cell = originalCell
@@ -765,11 +758,9 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                     col >= cursor.column && col < cursor.column + cursor.width
                 if hasBlockCursor {
                     // Block cursors invert the cell through the normal grid
-                    // passes, so fade their replacement colors in place. An
-                    // x-ray cell keeps its foreground: the ligature draws
-                    // intact and the cursor rect supplies the character.
+                    // passes, so fade their replacement colors in place.
                     cell = cell.recolored(
-                        foreground: xray ? cell.foreground : blendCursorColor(
+                        foreground: blendCursorColor(
                             cell.foreground, cursor.foreground),
                         background: blendCursorColor(
                             cell.background, cursor.background),
@@ -888,33 +879,12 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                             grid_position: anchorCell,
                             cell_width: UInt32(cellSpan),
                             foreground_color: foreground.opaque,
-                            atlas: glyph.format.rawValue, rect: rect,
-                            flags: 0)
+                            atlas: glyph.format.rawValue, rect: rect)
                         glyphCount += 1
                     }
                 }
             }
         }
-
-        // The character the cursor sits on, flagged so the glyph pass draws it
-        // only within the cursor rect and hides the ligature there. It fades
-        // by interpolating its own color, the way a recolored cell does.
-        if cursorXray, !cursor.cell.isEmpty {
-            let foreground = blendCursorColor(cursor.cell.foreground,
-                                              cursor.foreground)
-            let glyph = glyphManager.glyph(family: font, cell: cursor.cell,
-                                           foreground: foreground)
-            glyphs[glyphCount] = glyph_data(
-                grid_position: SIMD2<Int16>(Int16(cursor.column),
-                                            Int16(cursor.row)),
-                cell_width: UInt32(cursor.width),
-                foreground_color: foreground.opaque,
-                atlas: glyph.format.rawValue, rect: glyph.rect,
-                flags: GLYPH_FLAG_XRAY)
-            glyphCount += 1
-        }
-        // Known only once the rows have been scanned for a run under the cursor.
-        uniforms.pointee.cursor_xray = cursorXray ? 1 : 0
 
         let gridGlyphCount = glyphCount
         let gridCellGraphicCount = cellGraphicCount
@@ -1020,8 +990,7 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                                                 foreground_color:
                                                     cell.foreground.opaque,
                                                 atlas: glyph.format.rawValue,
-                                                rect: glyph.rect,
-                                                flags: 0)
+                                                rect: glyph.rect)
                 glyphCount += 1
             }
 

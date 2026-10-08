@@ -51,10 +51,6 @@ typedef struct {
 
     /// The grid width in cells, used to map a background instance to a cell.
     uint32_t grid_width;
-
-    /// 1 when a block cursor sits inside a ligature, so the glyph pass shows
-    /// the cursor cell's own character in place of the ligature's ink there.
-    uint32_t cursor_xray;
 } uniform_data;
 
 /// A rasterized glyph stored in a texture cache page.
@@ -81,14 +77,7 @@ typedef struct {
     /// 0 for a one-channel coverage mask, 1 for premultiplied RGBA.
     uint32_t atlas;
     glyph_rect rect;
-
-    /// Bit 0 (`GLYPH_FLAG_XRAY`) marks the cursor cell's own character, drawn
-    /// only within the cursor rect. Every other glyph is instead hidden there.
-    uint32_t flags;
 } glyph_data;
-
-/// `glyph_data.flags`: this glyph is the block cursor's x-ray character.
-#define GLYPH_FLAG_XRAY 1u
 
 /// Fixed cell-graphic kinds.
 #define CELL_GRAPHIC_FULL_BLOCK 1u

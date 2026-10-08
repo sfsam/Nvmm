@@ -14,11 +14,18 @@
 //  font's business; see `LigaturePlacement`.
 //
 //  Runs are maximal sequences of adjacent ASCII-punctuation cells sharing one
-//  face. Restricting the alphabet to punctuation covers every programming
-//  ligature and keeps the shaping cache small: letters and digits would make it
-//  grow with each distinct word on screen. A font that collapses characters
-//  into fewer glyphs, or that resolves the run through a fallback face, is
-//  rejected outright; those cells fall back to ordinary per-cell rendering.
+//  face and one text color. Restricting the alphabet to punctuation covers
+//  every programming ligature and keeps the shaping cache small: letters and
+//  digits would make it grow with each distinct word on screen. A font that
+//  collapses characters into fewer glyphs, or that resolves the run through a
+//  fallback face, is rejected outright; those cells fall back to ordinary
+//  per-cell rendering.
+//
+//  A ligature's ink can belong to one cell's glyph and cover its neighbors, so
+//  it shows only one cell's color. Runs therefore break where the text color
+//  changes, as in a partly highlighted `->`; backgrounds may differ, since the
+//  ink lands on them either way. Runs also break around given columns, such as
+//  the cursor's, whose cells are shaped alone so their own characters show.
 //
 
 import CoreText
@@ -76,8 +83,10 @@ final class LigatureShaper {
 
     /// Fills `glyphs` with one entry per cell of `row`: the substituted glyph
     /// for a cell inside a ligature, or a zero glyph for a cell to render
-    /// normally.
+    /// normally. Each column in `breaks` is shaped alone, splitting any run
+    /// through it; the text on either side can still ligate.
     func shape(row: ArraySlice<Cell>, family: FontFamily,
+               breakingAt breaks: Set<Int> = [],
                into glyphs: inout [LigaturePlacement]) {
         let count = row.count
         if glyphs.count == count {
@@ -90,29 +99,44 @@ final class LigatureShaper {
         let base = row.startIndex
         var start = 0
         while start < count {
-            guard let face = runFace(row[base + start]) else {
+            guard let key = runKey(row[base + start]) else {
                 start += 1
                 continue
             }
             var end = start + 1
-            while end < count, runFace(row[base + end]) == face { end += 1 }
+            while end < count, !breaks.contains(start), !breaks.contains(end),
+                  runKey(row[base + end]) == key {
+                end += 1
+            }
             if end - start >= 2 {
                 apply(row: row, base: base, range: start..<end,
-                      font: family.font(face), into: &glyphs)
+                      font: family.font(key.face), into: &glyphs)
             }
             start = end
         }
     }
 
-    /// The face a cell would shape with, or nil if it cannot join a run.
-    private func runFace(_ cell: Cell) -> FontAttributes? {
+    /// What adjacent cells must share to shape together: the face, and the
+    /// text color as drawn. A dim cell draws its foreground blended with its
+    /// background, so for dim cells the background counts too.
+    private struct RunKey: Equatable {
+        let face: FontAttributes
+        let foreground: UInt32
+        let isDim: Bool
+        let dimBackground: UInt32
+    }
+
+    /// A cell's run key, or nil if it cannot join a run.
+    private func runKey(_ cell: Cell) -> RunKey? {
         guard cell.width == 1 else { return nil }
         var scalars = cell.text.unicodeScalars.makeIterator()
         guard let scalar = scalars.next(), scalars.next() == nil,
               Self.isRunCharacter(scalar) else {
             return nil
         }
-        return cell.fontAttributes
+        return RunKey(face: cell.fontAttributes,
+                      foreground: cell.foreground.rgb, isDim: cell.isDim,
+                      dimBackground: cell.isDim ? cell.background.rgb : 0)
     }
 
     /// The printable ASCII punctuation and symbols, excluding the space.
@@ -128,7 +152,7 @@ final class LigatureShaper {
                        font: CTFont, into glyphs: inout [LigaturePlacement]) {
         scratch.removeAll(keepingCapacity: true)
         for index in range {
-            // Every run character is one ASCII byte, checked by `runFace`.
+            // Every run character is one ASCII byte, checked by `runKey`.
             scratch.append(row[base + index].text.utf8.first!)
         }
         // Runs of 15 or fewer characters stay in Swift's inline string

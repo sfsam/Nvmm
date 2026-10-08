@@ -137,7 +137,7 @@ final class RenderTests: XCTestCase {
             baseline: .zero, cursor_position: .zero, cursor_color: 0,
             cursor_line_width: 0, cursor_height: UInt32(cellHeight),
             cursor_top: 0, cursor_cell_width: 1,
-            grid_width: UInt32(columnCount), cursor_xray: 0)
+            grid_width: UInt32(columnCount))
 
         var graphics: [cell_graphic_data] = []
         for (row, graphemes) in rows.enumerated() {
@@ -654,8 +654,7 @@ final class RenderTests: XCTestCase {
             baseline: .zero,
             cursor_position: .zero, cursor_color: 0,
             cursor_line_width: 0, cursor_height: 8, cursor_top: 0,
-            cursor_cell_width: 1, grid_width: 4,
-            cursor_xray: 0)
+            cursor_cell_width: 1, grid_width: 4)
 
         func render(_ glyph: glyph_data) throws -> Pixels {
             try self.render(
@@ -670,8 +669,7 @@ final class RenderTests: XCTestCase {
             foreground_color: UInt32.max, atlas: 0,
             rect: glyph_rect(
                 size: SIMD2<Int16>(24, 32),
-                position: SIMD2<Int16>(0, -12), texture_origin: .zero),
-            flags: 0))
+                position: SIMD2<Int16>(0, -12), texture_origin: .zero)))
         XCTAssertGreaterThan(rightAndVertical.alpha(14, 10), 0)
         XCTAssertEqual(rightAndVertical.alpha(18, 10), 0)
         XCTAssertGreaterThan(rightAndVertical.alpha(4, 10), 0)
@@ -683,8 +681,7 @@ final class RenderTests: XCTestCase {
             foreground_color: UInt32.max, atlas: 0,
             rect: glyph_rect(
                 size: SIMD2<Int16>(24, 8),
-                position: SIMD2<Int16>(-12, 0), texture_origin: .zero),
-            flags: 0))
+                position: SIMD2<Int16>(-12, 0), texture_origin: .zero)))
         XCTAssertGreaterThan(left.alpha(10, 4), 0)
         XCTAssertEqual(left.alpha(6, 4), 0)
     }
@@ -845,29 +842,79 @@ final class RenderTests: XCTestCase {
         XCTAssertEqual(shape("- >", family: family), [0, 0, 0])
     }
 
-    func testShaperIgnoresColorsButBreaksRunsOnFace() throws {
+    /// A ligature's ink can belong to one cell and cover its neighbor, so it
+    /// shows one cell's color. Runs break where the drawn text color changes
+    /// (a new foreground, or dim) and where the face changes, but not on
+    /// background, which the ink lands on either way.
+    func testShaperBreaksRunsOnFaceAndTextColor() throws {
         let family = try requireLigatureFamily()
         let shaper = LigatureShaper()
-
-        // Each cell draws its own glyph in its own color, so a highlight
-        // boundary inside a run is harmless.
-        var recolored = makeRow("->")
-        recolored[recolored.startIndex + 1] = recolored[recolored.startIndex + 1]
-            .recolored(foreground: RGBColor(neovim: 0xFF0000),
-                       background: RGBColor(neovim: 0x000000),
-                       special: RGBColor(neovim: 0x000000))
         var glyphs: [LigaturePlacement] = []
-        shaper.shape(row: recolored, family: family, into: &glyphs)
-        XCTAssertEqual(glyphs.map(\.glyph), shape("->", family: family))
+        func shapeArrow(second: (Cell) -> Cell) -> [CGGlyph] {
+            var row = Array(makeRow("->"))
+            row[1] = second(row[1])
+            shaper.shape(row: ArraySlice(row), family: family, into: &glyphs)
+            return glyphs.map(\.glyph)
+        }
 
-        // A face boundary does break it: the two halves are shaped apart, and
-        // neither is long enough to be a run.
-        var mixed = Array(makeRow("->"))
+        let background = shapeArrow {
+            $0.recolored(foreground: $0.foreground,
+                         background: RGBColor(neovim: 0x203040),
+                         special: $0.special)
+        }
+        XCTAssertEqual(background, shape("->", family: family))
+
+        let foreground = shapeArrow {
+            $0.recolored(foreground: RGBColor(neovim: 0xFF0000),
+                         background: $0.background, special: $0.special)
+        }
+        XCTAssertEqual(foreground, [0, 0])
+
+        var dim = CellAttributes()
+        dim.flags = [.dim]
+        XCTAssertEqual(shapeArrow { _ in Cell(text: ">", attrs: dim) }, [0, 0])
+
+        // Dim text is drawn blended with its background, so dim cells on
+        // different backgrounds draw different colors; on the same, they
+        // still ligate.
+        var dimRow = Array(makeRow("->", flags: [.dim]))
+        shaper.shape(row: ArraySlice(dimRow), family: family, into: &glyphs)
+        XCTAssertEqual(glyphs.map(\.glyph), shape("->", family: family))
+        dimRow[1] = dimRow[1].recolored(
+            foreground: dimRow[1].foreground,
+            background: RGBColor(neovim: 0x203040),
+            special: dimRow[1].special)
+        shaper.shape(row: ArraySlice(dimRow), family: family, into: &glyphs)
+        XCTAssertEqual(glyphs.map(\.glyph), [0, 0])
+
         var bold = CellAttributes()
         bold.flags = [.bold]
-        mixed[1] = Cell(text: ">", attrs: bold)
-        shaper.shape(row: ArraySlice(mixed), family: family, into: &glyphs)
+        XCTAssertEqual(shapeArrow { _ in Cell(text: ">", attrs: bold) }, [0, 0])
+    }
+
+    /// A break column, such as the cursor's, is shaped alone and splits the
+    /// run through it; the cells on either side still ligate.
+    func testShaperBreaksRunsAtGivenColumns() throws {
+        let family = try requireLigatureFamily()
+        let shaper = LigatureShaper()
+        var glyphs: [LigaturePlacement] = []
+
+        shaper.shape(row: makeRow("->->"), family: family, breakingAt: [2],
+                     into: &glyphs)
+        XCTAssertEqual(Array(glyphs.map(\.glyph).prefix(2)),
+                       shape("->", family: family))
+        XCTAssertEqual(glyphs[0].start, 0)
+        XCTAssertEqual(glyphs[0].length, 2)
+        XCTAssertEqual(glyphs[2].glyph, 0)
+        XCTAssertEqual(glyphs[3].glyph, 0)
+
+        shaper.shape(row: makeRow("->"), family: family, breakingAt: [0],
+                     into: &glyphs)
         XCTAssertEqual(glyphs.map(\.glyph), [0, 0])
+
+        // No breaks: the same as before.
+        shaper.shape(row: makeRow("->->"), family: family, into: &glyphs)
+        XCTAssertEqual(glyphs.map(\.glyph), shape("->->", family: family))
     }
 
     /// The same glyph must rasterize identically whether it is named by text or
@@ -944,70 +991,6 @@ final class RenderTests: XCTestCase {
             }
         }
         return total
-    }
-
-    /// The cursor rect must hide an ordinary glyph and reveal only the x-ray
-    /// one, so a ligature whose ink comes from a neighboring cell still shows
-    /// the character the cursor sits on.
-    func testGlyphPipelineCarvesCursorXray() throws {
-        try requireDevice()
-        let context = try RenderContextManager().defaultRenderContext()
-        let atlases = try coveredAtlases(context.device, side: 32)
-
-        // A block cursor on column 1, fully opaque, with the x-ray active.
-        var uniforms = uniform_data(
-            pixel_size: SIMD2<Float>(2.0 / 32, -2.0 / 32),
-            cell_pixel_size: SIMD2<Float>(8, 8), box_line_width: 2,
-            baseline: .zero,
-            cursor_position: SIMD2<Int16>(1, 0), cursor_color: 0xFF00_0000,
-            cursor_line_width: 0, cursor_height: 8, cursor_top: 0,
-            cursor_cell_width: 1, grid_width: 4,
-            cursor_xray: 1)
-
-        // One glyph anchored on column 1 whose ink also covers column 0, the
-        // shape a spacer-plus-overhang ligature produces.
-        func render(flags: UInt32) throws -> Pixels {
-            let glyph = glyph_data(
-                grid_position: SIMD2<Int16>(1, 0), cell_width: 1,
-                foreground_color: UInt32.max, atlas: 0,
-                rect: glyph_rect(size: SIMD2<Int16>(16, 8),
-                                 position: SIMD2<Int16>(-8, 0),
-                                 texture_origin: .zero),
-                flags: flags)
-            return try self.render(
-                context, context.glyphPipeline, width: 32, height: 32,
-                uniforms: uniforms,
-                instances: makeBuffer(context.device, [glyph]), count: 1,
-                fragmentTextures: atlases)
-        }
-
-        // The ordinary glyph keeps its ink outside the cursor cell and loses it
-        // inside, so the rest of the ligature survives.
-        let ordinary = try render(flags: 0)
-        XCTAssertGreaterThan(ordinary.alpha(4, 4), 0)
-        XCTAssertEqual(ordinary.alpha(12, 4), 0)
-
-        // The x-ray glyph is the exact complement: confined to the cursor cell.
-        let xray = try render(flags: GLYPH_FLAG_XRAY)
-        XCTAssertEqual(xray.alpha(4, 4), 0)
-        XCTAssertGreaterThan(xray.alpha(12, 4), 0)
-
-        // Mid-fade the split stays a clean cut: the cursor's opacity lives in
-        // the character's own color, so neither draw is partially blended.
-        uniforms.cursor_color = 0x8000_0000
-        let fadingOrdinary = try render(flags: 0)
-        XCTAssertGreaterThan(fadingOrdinary.alpha(4, 4), 0)
-        XCTAssertEqual(fadingOrdinary.alpha(12, 4), 0)
-        let fadingXray = try render(flags: GLYPH_FLAG_XRAY)
-        XCTAssertEqual(fadingXray.alpha(4, 4), 0)
-        XCTAssertEqual(fadingXray.alpha(12, 4), xray.alpha(12, 4))
-
-        // With the x-ray off, an ordinary glyph is untouched everywhere.
-        uniforms.cursor_color = 0xFF00_0000
-        uniforms.cursor_xray = 0
-        let unmasked = try render(flags: 0)
-        XCTAssertGreaterThan(unmasked.alpha(4, 4), 0)
-        XCTAssertGreaterThan(unmasked.alpha(12, 4), 0)
     }
 
     /// A wide character owns two columns — itself and a blank right half — and
@@ -1216,8 +1199,7 @@ final class RenderTests: XCTestCase {
             baseline: SIMD2<Float>(0, 8),
             cursor_position: .zero, cursor_color: 0,
             cursor_line_width: 0, cursor_height: 16, cursor_top: 0,
-            cursor_cell_width: 1, grid_width: 2,
-            cursor_xray: 0)
+            cursor_cell_width: 1, grid_width: 2)
 
         // period 0xFFFF is the undercurl sentinel; the high byte is opacity.
         func render(opacity: UInt32) throws -> Pixels {
@@ -1258,8 +1240,7 @@ final class RenderTests: XCTestCase {
             box_line_width: 2,
             baseline: .zero, cursor_position: .zero, cursor_color: 0,
             cursor_line_width: 0, cursor_height: 8, cursor_top: 0,
-            cursor_cell_width: 1, grid_width: 4,
-            cursor_xray: 0)
+            cursor_cell_width: 1, grid_width: 4)
 
         // Cell 5 is row 1, column 1: pixels x 8..<16, y 16..<32.
         var colors = [UInt32](repeating: 0, count: 8)
