@@ -594,6 +594,25 @@ final class RenderTests: XCTestCase {
         XCTAssertEqual(CTFontGetSize(resized.font(.none, wide: true)), 30)
     }
 
+    func testBoxLineThicknessComesFromTheFontsOwnBoxGlyph() throws {
+        let manager = FontManager()
+        let menlo = manager.family(
+            descriptor: try XCTUnwrap(FontManager.makeDescriptor("Menlo")),
+            size: 14, scaleFactor: 2)
+        // Menlo draws its light box line about 0.084 em thick: 2.35 pixels
+        // at a 28-pixel size, well above its 1.23-pixel underline.
+        let thickness = try XCTUnwrap(menlo.boxLineThickness)
+        XCTAssertGreaterThan(thickness, 2)
+        XCTAssertLessThan(thickness, 3)
+        XCTAssertGreaterThan(thickness, menlo.underlineThickness)
+
+        // Courier has no box-drawing glyphs.
+        let courier = manager.family(
+            descriptor: try XCTUnwrap(FontManager.makeDescriptor("Courier")),
+            size: 14, scaleFactor: 2)
+        XCTAssertNil(courier.boxLineThickness)
+    }
+
     func testLineSpaceChangesAndClampsCellHeight() {
         let manager = FontManager()
         let family = manager.family(

@@ -370,10 +370,16 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
 
         let underlinePosition = font.underlinePosition
         let lineThickness = UInt16(floor(font.underlineThickness + 1.0))
-        // Cap the box stroke at a third of the cell so that heavy and
-        // double strokes still leave a gap at their junctions.
+        // The light box stroke, also used by outlined powerline symbols, is
+        // the heavier of the underline and the font's own box line. Cap it
+        // at a third of the cell so that heavy and double strokes still
+        // leave a gap at their junctions.
+        let fontBoxThickness = font.boxLineThickness.map {
+            Int($0.rounded())
+        } ?? 0
+        let boxThickness = max(Int(lineThickness), fontBoxThickness)
         let boxLimit = max(1, Int(min(cellWidth, cellHeight)) / 3)
-        boxLineWidth = UInt32(min(max(1, Int(lineThickness)), boxLimit))
+        boxLineWidth = UInt32(min(max(1, boxThickness), boxLimit))
         let scaleFactor = font.scaleFactor
         let underlineTranslate: Int16 = underlinePosition >= 0
             ? Int16(floor(underlinePosition + 0.5))

@@ -61,6 +61,20 @@ struct FontFamily {
     var underlinePosition: CGFloat { CTFontGetUnderlinePosition(regular) }
     var underlineThickness: CGFloat { CTFontGetUnderlineThickness(regular) }
 
+    /// The stroke height of the regular face's own light horizontal box line
+    /// (U+2500), or nil if the face lacks that glyph. Some fonts declare an
+    /// underline much thinner than the box lines they draw, so the underline
+    /// alone can understate their box-line weight.
+    var boxLineThickness: CGFloat? {
+        var character = UniChar(0x2500)
+        var glyph = CGGlyph(0)
+        guard CTFontGetGlyphsForCharacters(regular, &character, &glyph, 1)
+        else { return nil }
+        let bounds = CTFontGetBoundingRectsForGlyphs(
+            regular, .horizontal, &glyph, nil, 1)
+        return bounds.height > 0 ? bounds.height : nil
+    }
+
     /// The advance width of a representative glyph. Assumes a monospaced font;
     /// for others this is a reasonable estimate.
     var width: CGFloat {
