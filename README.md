@@ -29,7 +29,7 @@ By default, the app gets an ad-hoc signature. No Apple Developer account is requ
 First, download Neovim 0.12 or newer. The build copies it into the app. Then build the app:
 
 ```sh
-Scripts/download_nvim.sh v0.12.5
+Scripts/download_nvim.sh v0.12.6
 xcodebuild -configuration Release
 ```
 
