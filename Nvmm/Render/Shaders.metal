@@ -14,8 +14,11 @@
 
 using namespace metal;
 
-// The drawable uses gamma-encoded Display P3. Neovim colors arrive as sRGB,
-// so every render pass converts them before writing or blending.
+// The drawable uses gamma-encoded Display P3. Neovim colors are read as sRGB,
+// or as Display P3 when `p3_colors` is set. Every render pass passes them
+// through `output_color` before writing or blending.
+constant bool p3_colors [[function_constant(0)]];
+
 constant float3x3 sRGB_XYZ = transpose(float3x3(
     0.4360747, 0.3850649, 0.1430804,
     0.2225045, 0.7168786, 0.0606169,
@@ -42,13 +45,17 @@ float3 encode_srgb(float3 color) {
     return mix(higher, lower, float3(cutoff));
 }
 
-float3 srgb_to_display_p3(float3 color) {
+// A Neovim color as gamma-encoded Display P3 for the drawable.
+float3 output_color(float3 color) {
+    if (p3_colors) {
+        return color;
+    }
     return encode_srgb(sRGB_DP3 * linearize_srgb(color));
 }
 
 float4 load_color(uint32_t packed) {
     float4 color = unpack_unorm4x8_to_float(packed);
-    color.rgb = srgb_to_display_p3(color.rgb);
+    color.rgb = output_color(color.rgb);
     return color;
 }
 
@@ -207,7 +214,7 @@ cursor_smear_render(uint vertex_id [[vertex_id]],
     float gray = dot(color.rgb, float3(0.299, 0.587, 0.114));
     color.rgb = clamp(mix(float3(gray), color.rgb,
                           cursor_smear_saturation), 0.0, 1.0);
-    color.rgb = srgb_to_display_p3(color.rgb);
+    color.rgb = output_color(color.rgb);
     color.a = smear.opacity;
 
     cursor_smear_rasterizer_data data;

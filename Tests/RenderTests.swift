@@ -36,6 +36,10 @@ final class RenderTests: XCTestCase {
         func red(_ x: Int, _ y: Int) -> UInt8 {
             pixels[(y * width + x) * 4 + 2]
         }
+
+        func green(_ x: Int, _ y: Int) -> UInt8 {
+            pixels[(y * width + x) * 4 + 1]
+        }
     }
 
     private func makeBuffer<T>(_ device: MTLDevice,
@@ -188,12 +192,63 @@ final class RenderTests: XCTestCase {
 
     func testClearColorConvertsSRGBToDisplayP3() {
         let color = GridView.clearColor(
-            for: RGBColor(red: 255, green: 0, blue: 0))
+            for: RGBColor(red: 255, green: 0, blue: 0), p3Colors: false)
 
         XCTAssertEqual(color.red, 0.9175, accuracy: 0.001)
         XCTAssertEqual(color.green, 0.2003, accuracy: 0.001)
         XCTAssertEqual(color.blue, 0.1386, accuracy: 0.001)
         XCTAssertEqual(color.alpha, 1)
+    }
+
+    func testClearColorPassesP3ColorsThrough() {
+        let color = GridView.clearColor(
+            for: RGBColor(red: 255, green: 0, blue: 0), p3Colors: true)
+
+        XCTAssertEqual(color.red, 1, accuracy: 0.001)
+        XCTAssertEqual(color.green, 0, accuracy: 0.001)
+        XCTAssertEqual(color.blue, 0, accuracy: 0.001)
+        XCTAssertEqual(color.alpha, 1)
+    }
+
+    /// The shaders convert Neovim's sRGB colors to Display P3 unless the
+    /// context takes them as Display P3 already.
+    func testShadersHonorP3Colors() throws {
+        try requireDevice()
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+
+        func renderRed(p3Colors: Bool) throws -> (UInt8, UInt8) {
+            var options = RenderContextOptions()
+            options.p3Colors = p3Colors
+            let context = try RenderContextManager(options: options)
+                .renderContext(for: device)
+            XCTAssertEqual(context.p3Colors, p3Colors)
+            let uniforms = uniform_data(
+                pixel_size: SIMD2<Float>(2.0 / 4, -2.0 / 4),
+                cell_pixel_size: SIMD2<Float>(4, 4),
+                box_line_width: 1,
+                baseline: .zero, cursor_position: .zero, cursor_color: 0,
+                cursor_line_width: 0, cursor_height: 4,
+                cursor_top: 0, cursor_cell_width: 1, grid_width: 1)
+            let red = RGBColor(red: 255, green: 0, blue: 0).opaque
+            let graphic = cell_graphic_data(
+                grid_position: .zero, cell_width: 1, color: red,
+                background_color: red, cursor_color: red,
+                cursor_background_color: red,
+                kind: CellGraphicKind.fullBlock.rawValue, flags: 0)
+            let pixels = try render(
+                context, context.cellGraphicPipeline,
+                width: 4, height: 4, uniforms: uniforms,
+                instances: makeBuffer(device, [graphic]), count: 1)
+            return (pixels.red(2, 2), pixels.green(2, 2))
+        }
+
+        let converted = try renderRed(p3Colors: false)
+        XCTAssertEqual(Int(converted.0), 234, accuracy: 1)
+        XCTAssertEqual(Int(converted.1), 51, accuracy: 1)
+
+        let passed = try renderRed(p3Colors: true)
+        XCTAssertEqual(passed.0, 255)
+        XCTAssertEqual(passed.1, 0)
     }
 
     /// Separators run edge to edge, so adjacent cells join without a seam:
@@ -709,7 +764,7 @@ final class RenderTests: XCTestCase {
         let family = FontManager().family(
             descriptor: FontManager.defaultDescriptor(), size: 15,
             scaleFactor: 2)
-        let rasterizer = GlyphRasterizer(width: 64, height: 64)
+        let rasterizer = GlyphRasterizer(width: 64, height: 64, p3Colors: false)
         let foreground = RGBColor(neovim: 0xFFFFFF)
 
         let text = rasterizer.rasterize(
@@ -727,7 +782,7 @@ final class RenderTests: XCTestCase {
         let family = FontManager().family(
             descriptor: FontManager.defaultDescriptor(), size: 15,
             scaleFactor: 2)
-        let rasterizer = GlyphRasterizer(width: 64, height: 64)
+        let rasterizer = GlyphRasterizer(width: 64, height: 64, p3Colors: false)
         let foreground = RGBColor(neovim: 0xFFFFFF)
         func coverage(_ options: GlyphRasterizationOptions) -> Int {
             self.coverage(rasterizer.rasterize(
@@ -945,7 +1000,7 @@ final class RenderTests: XCTestCase {
         let family = FontManager().family(
             descriptor: FontManager.defaultDescriptor(), size: 15,
             scaleFactor: 2)
-        let rasterizer = GlyphRasterizer(width: 64, height: 64)
+        let rasterizer = GlyphRasterizer(width: 64, height: 64, p3Colors: false)
 
         var character = Array("M".utf16)
         var glyph = CGGlyph(0)
@@ -979,7 +1034,7 @@ final class RenderTests: XCTestCase {
         let family = FontManager().family(
             descriptor: FontManager.defaultDescriptor(), size: 15,
             scaleFactor: 2)
-        let rasterizer = GlyphRasterizer(width: 64, height: 64)
+        let rasterizer = GlyphRasterizer(width: 64, height: 64, p3Colors: false)
 
         // A space has an advance but no outline.
         var character = Array(" ".utf16)

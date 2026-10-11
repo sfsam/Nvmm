@@ -2,7 +2,7 @@
 //  Nvmm
 //  Color.swift
 //
-//  An sRGB color as delivered by Neovim's UI protocol.
+//  A color as delivered by Neovim's UI protocol.
 //
 //  Neovim packs colors as a 24-bit `0xRRGGBB` integer. This type stores them in
 //  a 32-bit value whose lowest three bytes are red, green, blue (in that
@@ -10,10 +10,14 @@
 //  The high bit flags a "default" color: a highlight attribute that Neovim did
 //  not set explicitly, to be filled in from the default highlight group.
 //
+//  The components are read as sRGB, or as Display P3 when the app is set to
+//  take Neovim's colors that way. Build AppKit colors from them with
+//  `nsColor(p3Colors:)` so both cases are handled.
+//
 
 import Foundation
 
-/// An sRGB color with a "default" flag, matching Neovim's highlight model.
+/// A color with a "default" flag, matching Neovim's highlight model.
 nonisolated struct RGBColor: Sendable, Equatable {
     /// Byte layout: `0x00BBGGRR`, with bit 31 set when the color is a default.
     private var value: UInt32

@@ -62,10 +62,14 @@ nonisolated final class GlyphRasterizer {
     private let colorBuffer: UnsafeMutablePointer<UInt8>
     private let midx: Int
     private let midy: Int
+    /// The color space in which Neovim's foreground components are read.
+    private let foregroundSpace: CGColorSpace
 
-    init(width: Int, height: Int) {
+    init(width: Int, height: Int, p3Colors: Bool) {
         midx = min(width, 4096)
         midy = min(height, 4096)
+        foregroundSpace = CGColorSpace(
+            name: p3Colors ? CGColorSpace.displayP3 : CGColorSpace.sRGB)!
 
         let canvasWidth = midx * 2
         let canvasHeight = midy * 2
@@ -197,11 +201,14 @@ nonisolated final class GlyphRasterizer {
             let gray = CGFloat(options.strength) / 255
             context.setFillColor(gray: gray, alpha: 1)
         } else {
-            context.setFillColor(CGColor(
-                srgbRed: CGFloat(foreground.red) / 255,
-                green: CGFloat(foreground.green) / 255,
-                blue: CGFloat(foreground.blue) / 255,
-                alpha: 1))
+            let components = [
+                CGFloat(foreground.red) / 255,
+                CGFloat(foreground.green) / 255,
+                CGFloat(foreground.blue) / 255,
+                1,
+            ]
+            context.setFillColor(CGColor(colorSpace: foregroundSpace,
+                                         components: components)!)
         }
         body(context)
         return bitmap

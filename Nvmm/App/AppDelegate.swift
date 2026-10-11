@@ -9,7 +9,11 @@ import os
 @main
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
-    private let renderManager = RenderContextManager()
+    private let renderManager: RenderContextManager = {
+        var options = RenderContextOptions()
+        options.p3Colors = Settings.useP3ColorSpace
+        return RenderContextManager(options: options)
+    }()
     private let terminationCoordinator = TerminationCoordinator()
     private var controlServer: ControlServer?
     private lazy var helpSearchController = HelpSearchController(

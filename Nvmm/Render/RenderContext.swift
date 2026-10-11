@@ -25,6 +25,8 @@ struct RenderContextOptions {
     var cacheGrowthFactor = 1.5
     var cacheMaximumPages = 8
     var cacheEvictionPreserve = 2
+    /// Whether Neovim's colors are taken as Display P3 rather than sRGB.
+    var p3Colors = false
 }
 
 /// The Metal device state and glyph cache used to render a grid.
@@ -36,6 +38,7 @@ final class RenderContext {
     }
 
     let device: MTLDevice
+    let p3Colors: Bool
     let commandQueue: MTLCommandQueue
     let backgroundPipeline: MTLRenderPipelineState
     let glyphPipeline: MTLRenderPipelineState
@@ -52,6 +55,7 @@ final class RenderContext {
          options: RenderContextOptions,
          glyphOptions: GlyphRasterizationOptions) throws {
         self.device = device
+        p3Colors = options.p3Colors
         self.fontManager = fontManager
         self.ligatureShaper = ligatureShaper
         guard let queue = device.makeCommandQueue() else {
@@ -60,29 +64,38 @@ final class RenderContext {
         commandQueue = queue
 
         let library = try device.makeDefaultLibrary(bundle: .main)
+        let constants = MTLFunctionConstantValues()
+        var p3Value = options.p3Colors
+        constants.setConstantValue(&p3Value, type: .bool, index: 0)
 
         backgroundPipeline = try Self.pipeline(
-            device: device, library: library, blend: .none,
+            device: device, library: library, constants: constants,
+            blend: .none,
             vertex: "background_render", fragment: "background_fill",
             label: "Grid background render pipeline")
         glyphPipeline = try Self.pipeline(
-            device: device, library: library, blend: .premultiplied,
+            device: device, library: library, constants: constants,
+            blend: .premultiplied,
             vertex: "glyph_render", fragment: "glyph_fill",
             label: "Glyph render pipeline")
         cellGraphicPipeline = try Self.pipeline(
-            device: device, library: library, blend: .straight,
+            device: device, library: library, constants: constants,
+            blend: .straight,
             vertex: "cell_graphic_render", fragment: "cell_graphic_fill",
             label: "Cell graphic render pipeline")
         cursorPipeline = try Self.pipeline(
-            device: device, library: library, blend: .straight,
+            device: device, library: library, constants: constants,
+            blend: .straight,
             vertex: "cursor_render", fragment: "background_fill",
             label: "Cursor render pipeline")
         cursorSmearPipeline = try Self.pipeline(
-            device: device, library: library, blend: .straight,
+            device: device, library: library, constants: constants,
+            blend: .straight,
             vertex: "cursor_smear_render", fragment: "cursor_smear_fill",
             label: "Cursor smear render pipeline")
         linePipeline = try Self.pipeline(
-            device: device, library: library, blend: .straight,
+            device: device, library: library, constants: constants,
+            blend: .straight,
             vertex: "line_render", fragment: "line_fill",
             label: "Line render pipeline")
 
@@ -121,6 +134,7 @@ final class RenderContext {
     private enum BlendMode: Equatable { case none, straight, premultiplied }
 
     private static func pipeline(device: MTLDevice, library: MTLLibrary,
+                                 constants: MTLFunctionConstantValues,
                                  blend: BlendMode, vertex: String, fragment: String,
                                  label: String) throws -> MTLRenderPipelineState {
         let descriptor = MTLRenderPipelineDescriptor()
@@ -128,8 +142,10 @@ final class RenderContext {
         descriptor.colorAttachments[0].pixelFormat = outputPixelFormat
         descriptor.vertexBuffers[0].mutability = .immutable
         descriptor.fragmentBuffers[0].mutability = .immutable
-        descriptor.vertexFunction = library.makeFunction(name: vertex)
-        descriptor.fragmentFunction = library.makeFunction(name: fragment)
+        descriptor.vertexFunction = try library.makeFunction(
+            name: vertex, constantValues: constants)
+        descriptor.fragmentFunction = try library.makeFunction(
+            name: fragment, constantValues: constants)
 
         if blend != .none {
             let attachment = descriptor.colorAttachments[0]!
@@ -164,13 +180,16 @@ final class RenderContextManager {
     let ligatureShaper = LigatureShaper()
     private let rasterizer: GlyphRasterizer
     private let options: RenderContextOptions
+    /// Whether every context reads Neovim's colors as Display P3.
+    var p3Colors: Bool { options.p3Colors }
     private var contexts: [ObjectIdentifier: RenderContext] = [:]
     private var glyphOptions: GlyphRasterizationOptions?
 
     init(options: RenderContextOptions = RenderContextOptions()) {
         self.options = options
         rasterizer = GlyphRasterizer(width: options.rasterizerWidth,
-                                     height: options.rasterizerHeight)
+                                     height: options.rasterizerHeight,
+                                     p3Colors: options.p3Colors)
     }
 
     // Nonisolated so teardown skips the isolated-deinit executor hop that trips

@@ -901,7 +901,8 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                               cellGraphics: cellGraphics,
                               cellGraphicCount: &cellGraphicCount,
                               lines: lines, lineCount: &lineCount,
-                              glyphManager: glyphManager, font: font)
+                              glyphManager: glyphManager, font: font,
+                              p3Colors: context.p3Colors)
         }
 
         frame.didModify(from: 0, length: cellGraphicRegion.offset
@@ -942,7 +943,8 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             cursorSmearOffset: cursorSmearRegion.offset,
             hasCursorSmear: cursorSmear != nil,
             cursorShape: drawnShape,
-            clearColor: Self.clearColor(for: grid.defaultBackground)
+            clearColor: Self.clearColor(for: grid.defaultBackground,
+                                        p3Colors: context.p3Colors)
         ) else {
             retryFrame(frame)
             return
@@ -960,8 +962,9 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                                    cellGraphicCount: inout Int,
                                    lines: UnsafeMutablePointer<line_data>,
                                    lineCount: inout Int,
-                                   glyphManager: GlyphManager, font: FontFamily) {
-        let accent = compositionAccentColor()
+                                   glyphManager: GlyphManager, font: FontFamily,
+                                   p3Colors: Bool) {
+        let accent = compositionAccentColor(p3Colors: p3Colors)
         let activeClause = textInputCoordinator.selectedRange()
         let hasActiveClause = activeClause.location != NSNotFound &&
                               activeClause.length > 0
@@ -1017,10 +1020,13 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         }
     }
 
-    /// The control-accent color in sRGB, used for the preedit underline.
-    private func compositionAccentColor() -> RGBColor {
-        let color = NSColor.controlAccentColor.usingColorSpace(.sRGB)
-        guard let color else { return RGBColor(red: 0, green: 122, blue: 255) }
+    /// The control-accent color in the color space the shaders read Neovim's
+    /// colors in, used for the preedit underline.
+    private func compositionAccentColor(p3Colors: Bool) -> RGBColor {
+        let space: NSColorSpace = p3Colors ? .displayP3 : .sRGB
+        let color = NSColor.controlAccentColor.usingColorSpace(space)
+            ?? NSColor(srgbRed: 0, green: 122 / 255, blue: 1, alpha: 1)
+                .usingColorSpace(space)!
         return RGBColor(red: UInt8((color.redComponent * 255).rounded()),
                         green: UInt8((color.greenComponent * 255).rounded()),
                         blue: UInt8((color.blueComponent * 255).rounded()))
@@ -1032,16 +1038,13 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     /// size can leave along an edge — takes this color, so it matches the text
     /// area instead of standing out against it.
     ///
-    /// The drawable stores gamma-encoded Display P3, while Neovim supplies an
-    /// sRGB background. Clear values bypass the shaders, so AppKit performs the
-    /// same color-space conversion here.
-    static func clearColor(for background: RGBColor) -> MTLClearColor {
-        let scale = CGFloat(1.0 / 255.0)
-        let srgb = NSColor(srgbRed: CGFloat(background.red) * scale,
-                           green: CGFloat(background.green) * scale,
-                           blue: CGFloat(background.blue) * scale,
-                           alpha: 1)
-        let color = srgb.usingColorSpace(.displayP3)!
+    /// The drawable stores gamma-encoded Display P3. Neovim's background is
+    /// read as sRGB, or as Display P3 with `p3Colors`. Clear values bypass the
+    /// shaders, so AppKit performs the same conversion here.
+    static func clearColor(for background: RGBColor,
+                           p3Colors: Bool) -> MTLClearColor {
+        let color = background.nsColor(p3Colors: p3Colors)
+            .usingColorSpace(.displayP3)!
         return MTLClearColor(red: Double(color.redComponent),
                              green: Double(color.greenComponent),
                              blue: Double(color.blueComponent), alpha: 1)
@@ -2278,5 +2281,19 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                 for: self.lookupController.attributedString(selection.text),
                 at: anchor)
         }
+    }
+}
+
+extension RGBColor {
+    /// The opaque AppKit color for these components, read as Display P3 when
+    /// `p3Colors` is set and as sRGB otherwise.
+    func nsColor(p3Colors: Bool) -> NSColor {
+        let scale = CGFloat(1.0 / 255.0)
+        let red = CGFloat(self.red) * scale
+        let green = CGFloat(self.green) * scale
+        let blue = CGFloat(self.blue) * scale
+        return p3Colors
+            ? NSColor(displayP3Red: red, green: green, blue: blue, alpha: 1)
+            : NSColor(srgbRed: red, green: green, blue: blue, alpha: 1)
     }
 }

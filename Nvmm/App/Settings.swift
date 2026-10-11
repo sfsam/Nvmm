@@ -73,6 +73,12 @@ enum Settings {
     /// `useCustomNeovimKey` is on, stored exactly as entered.
     static let customNeovimPathKey = "NVCustomNeovimPath"
 
+    /// Whether Neovim's colors are taken as Display P3 rather than sRGB, which
+    /// makes them more saturated on a wide-gamut display. Has no
+    /// settings-window checkbox and is read once, so a change takes effect at
+    /// the next launch.
+    static let useP3ColorSpaceKey = "NVUseP3ColorSpace"
+
     nonisolated static let cursorTrailStrengthMinimum = 0
     nonisolated static let cursorTrailStrengthMaximum = 3
     nonisolated static let fontThicknessMinimum = 0
@@ -137,6 +143,9 @@ enum Settings {
     static var customNeovimPath: String {
         UserDefaults.standard.string(forKey: customNeovimPathKey) ?? ""
     }
+
+    static let useP3ColorSpace =
+        UserDefaults.standard.bool(forKey: useP3ColorSpaceKey)
 
     /// The slider detent nearest to an existing thickness default.
     nonisolated static func fontThicknessLevel(for value: Int) -> Int {

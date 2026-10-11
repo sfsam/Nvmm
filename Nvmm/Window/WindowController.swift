@@ -1550,13 +1550,12 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         guard color != lastBackground || force else { return }
         lastBackground = color
 
-        let r = CGFloat(color.red), g = CGFloat(color.green), b = CGFloat(color.blue)
-        // sRGB, which is how the grid's own drawing interprets these same
-        // components. `CGColor(red:green:blue:alpha:)` would build the color in
-        // Generic RGB instead, so the margins and the title bar would render a
-        // visibly different color from the grid they surround.
-        window?.contentView?.layer?.backgroundColor = NSColor(
-            srgbRed: r / 255, green: g / 255, blue: b / 255, alpha: 1).cgColor
+        // In the color space the grid's own drawing interprets these same
+        // components in. `CGColor(red:green:blue:alpha:)` would build the
+        // color in Generic RGB instead, so the margins and the title bar would
+        // render a visibly different color from the grid they surround.
+        window?.contentView?.layer?.backgroundColor = color.nsColor(
+            p3Colors: renderManager.p3Colors).cgColor
     }
 
     /// Applies the selected editor-window appearance. A nil appearance lets
