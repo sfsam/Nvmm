@@ -316,6 +316,55 @@ final class CompositionTests: XCTestCase {
         XCTAssertEqual(delegate.commits.count, 0)
     }
 
+    /// Stands in for Cocoa calling back while it discards marked text.
+    private final class ReentrantInputContext: NSTextInputContext {
+        var onDiscard: (() -> Void)?
+        override func discardMarkedText() { onDiscard?() }
+    }
+
+    /// A minimal client so a real input context can be made.
+    private final class StubTextInputClient: NSObject, NSTextInputClient {
+        func insertText(_ string: Any, replacementRange: NSRange) {}
+        func doCommand(by selector: Selector) {}
+        func setMarkedText(_ string: Any, selectedRange: NSRange,
+                           replacementRange: NSRange) {}
+        func unmarkText() {}
+        func selectedRange() -> NSRange { NSRange(location: 0, length: 0) }
+        func markedRange() -> NSRange {
+            NSRange(location: NSNotFound, length: 0)
+        }
+        func hasMarkedText() -> Bool { false }
+        func attributedSubstring(forProposedRange range: NSRange,
+                                 actualRange: NSRangePointer?)
+            -> NSAttributedString? { nil }
+        func validAttributesForMarkedText()
+            -> [NSAttributedString.Key] { [] }
+        func firstRect(forCharacterRange range: NSRange,
+                       actualRange: NSRangePointer?) -> NSRect { .zero }
+        func characterIndex(for point: NSPoint) -> Int { NSNotFound }
+    }
+
+    /// An external action commits the preedit once, even when Cocoa calls
+    /// back with the same text while the marked text is discarded.
+    @MainActor
+    func testExternalActionCommitsOnceWhenDiscardReenters() {
+        let (coordinator, delegate) = makeCoordinator(kind: .deadKey)
+        coordinator.setMarkedText("´", selectedRange: NSRange(location: 1, length: 0),
+                                  replacementRange: NSRange(location: NSNotFound, length: 0))
+        let client = StubTextInputClient()
+        let context = ReentrantInputContext(client: client)
+        context.onDiscard = {
+            coordinator.insertText("´", replacementRange:
+                NSRange(location: NSNotFound, length: 0))
+            coordinator.unmarkText()
+        }
+
+        coordinator.commitForExternalAction(inputContext: context)
+
+        XCTAssertEqual(delegate.commits, ["´"])
+        XCTAssertFalse(coordinator.isActive)
+    }
+
     @MainActor
     func testCancelsWhenInputSourceChanges() {
         let delegate = RecordingDelegate()

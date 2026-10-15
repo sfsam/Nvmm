@@ -227,12 +227,7 @@ final class TextInputCoordinator {
 
     func cancel(inputContext: NSTextInputContext?) {
         guard isActive else { return }
-        // discardMarkedText can synchronously call back into this object. Set the
-        // phase first so re-entrant insertText/unmarkText callbacks clear state
-        // instead of committing the cancelled preedit.
-        phase = .cancelling
-        inputContext?.discardMarkedText()
-        if phase == .cancelling { clearState() }
+        discardMarkedText(inputContext)
     }
 
     /// Commits any active session for an external action (a menu command, a
@@ -240,7 +235,17 @@ final class TextInputCoordinator {
     func commitForExternalAction(inputContext: NSTextInputContext?) {
         guard isActive else { return }
         commit()
+        discardMarkedText(inputContext)
+    }
+
+    /// Has Cocoa discard its marked text. discardMarkedText can synchronously
+    /// call back into this object, so the phase is set first: re-entrant
+    /// insertText/unmarkText callbacks then clear state instead of committing
+    /// a preedit that is cancelled or already committed.
+    private func discardMarkedText(_ inputContext: NSTextInputContext?) {
+        phase = .cancelling
         inputContext?.discardMarkedText()
+        if phase == .cancelling { clearState() }
     }
 
     func suspendOrCancel(inputContext: NSTextInputContext?) {
