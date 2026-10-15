@@ -98,6 +98,33 @@ final class KeyInputTests: XCTestCase {
                                              shiftIsEmbodied: true), "<C-^>"),
             ("Command, no characters",
              KeyboardEvent(modifierKeys: mods(command: true)), ""),
+            // Keypad Clear has no Neovim name; its function-key character
+            // is not text, with or without modifiers.
+            ("keypad Clear", KeyboardEvent(characters: "\u{f739}"), ""),
+            ("Control-keypad Clear",
+             KeyboardEvent(characters: "\u{f739}", keyCharacters: "\u{f739}",
+                           resolvedKeyCharacters: "\u{f739}",
+                           modifierKeys: mods(control: true)), ""),
+            ("Command-keypad Clear",
+             KeyboardEvent(characters: "\u{f739}", keyCharacters: "\u{f739}",
+                           resolvedKeyCharacters: "\u{f739}",
+                           modifierKeys: mods(command: true)), ""),
+            // Shift is taken as embodied in a symbol with no letters, so this
+            // reads the resolved key instead.
+            ("Shift-Control-keypad Clear",
+             KeyboardEvent(characters: "\u{f739}", keyCharacters: "\u{f739}",
+                           resolvedKeyCharacters: "\u{f739}",
+                           modifierKeys: mods(shift: true, control: true),
+                           shiftIsEmbodied: true), ""),
+            ("Option-keypad Clear",
+             KeyboardEvent(characters: "\u{f739}",
+                           resolvedKeyCharacters: "\u{f739}",
+                           modifierKeys: mods(option: true)), ""),
+            // The Apple logo is private-use too, but it is text.
+            ("Apple logo", KeyboardEvent(characters: "\u{f8ff}",
+                                         modifierKeys: mods(shift: true,
+                                                            option: true)),
+             "\u{f8ff}"),
         ]
         for (label, event, expected) in cases {
             XCTAssertEqual(routeKeyEvent(event), expected, label)

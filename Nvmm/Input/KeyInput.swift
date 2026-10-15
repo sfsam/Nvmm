@@ -117,6 +117,14 @@ nonisolated func escapeText(_ text: String) -> String {
     return result
 }
 
+/// Whether text holds one of AppKit's function-key characters (U+F700 to
+/// U+F747). A key that Nvmm does not name, such as keypad Clear, reports one
+/// whatever the modifiers; it is not text. The rest of the private-use area,
+/// such as the Apple logo at U+F8FF, is ordinary text.
+nonisolated func isFunctionKeyText(_ text: String) -> Bool {
+    text.unicodeScalars.contains { (0xF700...0xF747).contains($0.value) }
+}
+
 /// Encodes text carrying modifiers, e.g. `<D-c>`. A bare `<` becomes `<lt>`.
 nonisolated func encodeModified(_ text: String, _ value: KeyModifiers) -> String {
     if value.isEmpty { return escapeText(text) }
@@ -228,6 +236,8 @@ nonisolated func routeKeyEvent(_ event: KeyboardEvent) -> String {
     if let named = event.named, !optionSpaceProducedText {
         return encodeNamed(named, event.modifierKeys)
     }
+
+    if isFunctionKeyText(event.characters) { return "" }
 
     if event.modifierKeys.command || event.modifierKeys.control {
         var encodedModifiers = event.modifierKeys
