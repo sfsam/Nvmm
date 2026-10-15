@@ -32,6 +32,13 @@ nonisolated struct KeyModifiers: Equatable, Sendable {
 
 nonisolated enum NamedKey: Sendable, Equatable {
     case carriageReturn, tab, space, backspace, deleteForward, escape, help
+    /// Neovim's own keypad Enter key, sent as `<kEnter>` to match MacVim and
+    /// Neovide, so it can be mapped apart from Return. Unmapped, Neovim
+    /// treats it as Enter, except at the `-- More --` prompt. `<CR>` mappings
+    /// do not fire for it, so a plugin that maps only `<CR>` does not see it.
+    /// Sending `<CR>` would avoid that but leave the key impossible to map on
+    /// its own.
+    case keypadEnter
     case home, end, pageUp, pageDown, left, right, up, down
     case volumeUp, volumeDown, mute
     case f1, f2, f3, f4, f5, f6, f7, f8, f9, f10
@@ -49,6 +56,7 @@ nonisolated enum NamedKey: Sendable, Equatable {
         case .deleteForward:  return "Del"
         case .escape:         return "Esc"
         case .help:           return "Help"
+        case .keypadEnter:    return "kEnter"
         case .home:           return "Home"
         case .end:            return "End"
         case .pageUp:         return "PageUp"

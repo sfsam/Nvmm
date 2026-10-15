@@ -25,6 +25,7 @@ final class KeyInputTests: XCTestCase {
 
         XCTAssertEqual(encodeNamed(.escape), "<Esc>")
         XCTAssertEqual(encodeNamed(.carriageReturn), "<CR>")
+        XCTAssertEqual(encodeNamed(.keypadEnter), "<kEnter>")
         XCTAssertEqual(encodeNamed(.f12), "<F12>")
         // Canonical order is Control, Shift, Option (M), Command (D).
         XCTAssertEqual(
@@ -73,6 +74,13 @@ final class KeyInputTests: XCTestCase {
             ("plain <", KeyboardEvent(characters: "<"), "<lt>"),
             ("named key", KeyboardEvent(modifierKeys: mods(control: true),
                                         named: .left), "<C-Left>"),
+            // Keypad Enter's text is ETX, which must not reach Neovim.
+            ("keypad Enter", KeyboardEvent(characters: "\u{3}",
+                                           named: .keypadEnter), "<kEnter>"),
+            ("Shift-keypad Enter",
+             KeyboardEvent(characters: "\u{3}",
+                           modifierKeys: mods(shift: true),
+                           named: .keypadEnter), "<S-kEnter>"),
             ("Option-Space text", optionSpaceText, "\u{a0}"),
             ("Option-Space", KeyboardEvent(characters: " ",
                                            modifierKeys: mods(option: true),
@@ -94,6 +102,13 @@ final class KeyInputTests: XCTestCase {
         for (label, event, expected) in cases {
             XCTAssertEqual(routeKeyEvent(event), expected, label)
         }
+
+        // In text-entry modes keypad Enter goes straight to Neovim, as
+        // Return does, rather than through Cocoa as text.
+        let keypadEnter = KeyboardEvent(characters: "\u{3}", named: .keypadEnter)
+        XCTAssertFalse(shouldOfferToCocoa(mode: .insert,
+                                          compositionActive: false,
+                                          event: keypadEnter))
     }
 
     func testOptionAsMetaSides() {
@@ -139,6 +154,8 @@ final class KeyInputTests: XCTestCase {
             ("Command", event("h", mods(option: true, command: true)), false),
             ("Control", event("h", mods(control: true, option: true)), false),
             ("other named key", event("", option, named: .left), false),
+            ("keypad Enter", event("\u{3}", option, named: .keypadEnter),
+             false),
             ("no key", event("", option), false),
             ("two characters", event("ab", option), false),
             // Neovim would keep only the `e` of a decomposed `é`.

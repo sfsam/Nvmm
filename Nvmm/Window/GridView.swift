@@ -1617,6 +1617,8 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     private static func namedKey(_ code: UInt16) -> NamedKey? {
         switch Int(code) {
         case kVK_Return:        return .carriageReturn
+        // Its text is ETX, which Neovim would read as Ctrl-C.
+        case kVK_ANSI_KeypadEnter: return .keypadEnter
         case kVK_Tab:           return .tab
         case kVK_Space:         return .space
         case kVK_Delete:        return .backspace
