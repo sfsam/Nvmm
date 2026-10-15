@@ -55,6 +55,10 @@ enum Settings {
     /// settings-window checkbox; it is on unless the key is set by hand.
     static let nativePowerlineSymbolsKey = "NVEnableNativePowerlineSymbols"
 
+    /// Which Option keys send `<M-…>` to Neovim instead of typing the
+    /// keyboard layout's characters.
+    static let optionAsMetaKey = "NVOptionAsMeta"
+
     /// Zero disables the cursor trail; larger values select stronger profiles.
     static let cursorTrailStrengthKey = "NVCursorTrailStrength"
 
@@ -120,6 +124,11 @@ enum Settings {
 
     static var nativePowerlineSymbols: Bool {
         UserDefaults.standard.bool(forKey: nativePowerlineSymbolsKey)
+    }
+
+    static var optionAsMeta: OptionAsMeta {
+        OptionAsMeta(rawValue:
+            UserDefaults.standard.integer(forKey: optionAsMetaKey)) ?? .off
     }
 
     static var cursorTrailStrength: Int {
@@ -191,6 +200,7 @@ final class SettingsWindowController: NSWindowController {
 
     private var fontThicknessSlider: NSSlider!
     private var appearancePopup: NSPopUpButton!
+    private var optionAsMetaPopup: NSPopUpButton!
     private var neovimPopup: NSPopUpButton!
     private var appliedFontThicknessLevel = 0
     private var pendingFontThicknessTask: Task<Void, Never>?
@@ -210,6 +220,8 @@ final class SettingsWindowController: NSWindowController {
             String(localized: "Text thickness"))
         let cursorTrailLabel = NSTextField(labelWithString:
             String(localized: "Cursor trail"))
+        let optionAsMetaLabel = NSTextField(labelWithString:
+            String(localized: "Option as Meta"))
 
         let buffers = Self.checkbox(
             String(localized: "Open files in buffers instead of tabs"),
@@ -220,6 +232,21 @@ final class SettingsWindowController: NSWindowController {
         let terminate = Self.checkbox(
             String(localized: "Terminate after last window closed"),
             key: Settings.terminateAfterLastWindowKey)
+
+        let optionAsMeta = NSPopUpButton(frame: .zero, pullsDown: false)
+        optionAsMeta.addItems(withTitles: [
+            String(localized: "Off"),
+            String(localized: "Left Option key"),
+            String(localized: "Right Option key"),
+            String(localized: "Both Option keys"),
+        ])
+        for (setting, item) in zip(OptionAsMeta.allCases,
+                                   optionAsMeta.itemArray) {
+            item.tag = setting.rawValue
+        }
+        optionAsMeta.identifier = .init("optionAsMeta")
+        let optionAsMetaNote = Self.note(String(localized:
+            "Option with another key sends <M-…> instead of typing a special character."))
 
         let titlebar = Self.checkbox(
             String(localized: "Transparent title bar"),
@@ -295,6 +322,8 @@ final class SettingsWindowController: NSWindowController {
                                       [empty, documentProxyIcon],
                                       [empty, scrollbar],
                                       [empty, scrollbarNote],
+                                      [optionAsMetaLabel, optionAsMeta],
+                                      [empty, optionAsMetaNote],
                                       [textLabel, ligatures],
                                       [empty, ligaturesNote],
                                       [thicknessLabel, thickness],
@@ -304,17 +333,19 @@ final class SettingsWindowController: NSWindowController {
         grid.column(at: 0).xPlacement = .trailing
         grid.columnSpacing += 6
 
-        // Make Neovim popup same width as Appearance popup.
-        // Needs both popups in the grid, their common ancestor. The Neovim
+        // Make Neovim and Option as Meta popups same width as Appearance popup.
+        // Needs the popups in the grid, their common ancestor. The Neovim
         // popup yields so a long path is truncated instead of widening both.
         neovim.widthAnchor.constraint(equalTo: appearance.widthAnchor)
             .isActive = true
         neovim.setContentCompressionResistancePriority(
             NSLayoutConstraint.Priority(1), for: .horizontal)
+        optionAsMeta.widthAnchor.constraint(equalTo: appearance.widthAnchor)
+            .isActive = true
 
         // Space below the last control of each group of settings.
         for item in [neovimNote, buffersNote, appearance, scrollbarNote,
-                     ligaturesNote, thickness] {
+                     optionAsMetaNote, ligaturesNote, thickness] {
             grid.cell(for: item)?.row?.bottomPadding = 12
         }
 
@@ -345,6 +376,10 @@ final class SettingsWindowController: NSWindowController {
         appearance.target = self
         appearance.action = #selector(appearanceChanged)
         loadAppearance()
+        optionAsMetaPopup = optionAsMeta
+        optionAsMeta.target = self
+        optionAsMeta.action = #selector(optionAsMetaChanged)
+        loadOptionAsMeta()
         thickness.target = self
         thickness.action = #selector(fontThicknessChanged)
         loadFontThickness()
@@ -353,6 +388,7 @@ final class SettingsWindowController: NSWindowController {
     override func showWindow(_ sender: Any?) {
         if pendingFontThicknessTask == nil { loadFontThickness() }
         loadAppearance()
+        loadOptionAsMeta()
         loadNeovim()
         super.showWindow(sender)
         window?.center()
@@ -382,6 +418,14 @@ final class SettingsWindowController: NSWindowController {
         }
         UserDefaults.standard.set(sender.selectedTag(),
                                   forKey: Settings.appearanceModeKey)
+    }
+
+    @objc private func optionAsMetaChanged(_ sender: NSPopUpButton) {
+        guard OptionAsMeta(rawValue: sender.selectedTag()) != nil else {
+            return
+        }
+        UserDefaults.standard.set(sender.selectedTag(),
+                                  forKey: Settings.optionAsMetaKey)
     }
 
     /// Picks a custom Neovim executable and selects it.
@@ -471,6 +515,10 @@ final class SettingsWindowController: NSWindowController {
 
     private func loadAppearance() {
         appearancePopup.selectItem(withTag: Settings.appearanceMode.rawValue)
+    }
+
+    private func loadOptionAsMeta() {
+        optionAsMetaPopup.selectItem(withTag: Settings.optionAsMeta.rawValue)
     }
 
     private func applyFontThickness(level: Int) {

@@ -1519,6 +1519,14 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             return
         }
 
+        // A Meta key is a command, not text. Like a menu shortcut, it commits
+        // a pending accent or IME phrase instead of combining with it.
+        if wasComposing, keyEvent.optionIsMeta {
+            textInputCoordinator.commitForExternalAction(
+                inputContext: inputContext)
+            compositionStateDidChange()
+        }
+
         let mode = grid?.textEntryMode ?? .directNeovim
         if shouldOfferToCocoa(mode: mode, compositionActive: wasComposing,
                               event: keyEvent) {
@@ -1586,6 +1594,10 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             shiftIsEmbodied: shiftIsEmbodied,
             isRepeat: event.isARepeat)
         setOptionSides(&result, rawFlags: UInt(flags.rawValue))
+        // Reads the setting only when it can matter.
+        if flags.contains(.option) {
+            result.optionIsMeta = optionActsAsMeta(result, Settings.optionAsMeta)
+        }
         return result
     }
 

@@ -128,7 +128,7 @@ nonisolated struct KeyboardEvent: Sendable {
     var characters = ""
     /// Unshifted Cocoa key identity, with modifier transformations removed.
     var keyCharacters = ""
-    /// Cocoa's resolved key identity after applying Shift / Caps Lock, but not
+    /// Cocoa's resolved key identity after applying Shift, but not Caps Lock,
     /// Command, Control, or Option.
     var resolvedKeyCharacters = ""
     var modifierKeys = KeyModifiers()
@@ -139,12 +139,59 @@ nonisolated struct KeyboardEvent: Sendable {
     var isRepeat = false
     var leftOption = false
     var rightOption = false
+    /// Whether Option acts as Meta, sending `<M-…>` instead of layout text.
+    /// Set from `optionActsAsMeta`.
+    var optionIsMeta = false
+}
+
+/// Which Option keys act as Meta rather than typing layout characters.
+nonisolated enum OptionAsMeta: Int, CaseIterable, Sendable {
+    case off, left, right, both
 }
 
 /// Records which physical Option key produced this event from the raw flags.
 nonisolated func setOptionSides(_ event: inout KeyboardEvent, rawFlags: UInt) {
     event.leftOption = (rawFlags & leftOptionFlag) == leftOptionFlag
     event.rightOption = (rawFlags & rightOptionFlag) == rightOptionFlag
+}
+
+/// Whether a held Option key acts as Meta under the setting. With one side
+/// chosen, the other Option key still types the layout's characters. An
+/// Option press that names no side counts as the left key.
+///
+/// Only Option chords that would otherwise type text qualify: Space, and keys
+/// whose Shift-applied character can be written as `<M-…>`. Command, Control,
+/// and the other named keys already reach Neovim with M- and are unchanged.
+nonisolated func optionActsAsMeta(_ event: KeyboardEvent,
+                                  _ setting: OptionAsMeta) -> Bool {
+    let mods = event.modifierKeys
+    guard mods.option, !mods.command, !mods.control else { return false }
+    if let named = event.named {
+        if named != .space { return false }
+    } else if !isMetaKeyCharacter(event.resolvedKeyCharacters) {
+        return false
+    }
+    switch setting {
+    case .off:   return false
+    case .left:  return event.leftOption || !event.rightOption
+    case .right: return event.rightOption
+    case .both:  return true
+    }
+}
+
+/// Whether text is one printable code point for `<M-…>`. Neovim keeps only
+/// the first code point of a character with combining marks and drops a
+/// longer string, so those, control characters, whitespace, and AppKit's
+/// private-use function-key characters stay on the ordinary path.
+nonisolated func isMetaKeyCharacter(_ text: String) -> Bool {
+    let scalars = text.unicodeScalars
+    guard scalars.count == 1, let scalar = scalars.first else { return false }
+    switch scalar.properties.generalCategory {
+    case .control, .format, .privateUse, .surrogate, .unassigned:
+        return false
+    default:
+        return !scalar.properties.isWhitespace
+    }
 }
 
 nonisolated func hasOnlyControl(_ value: KeyModifiers) -> Bool {
@@ -166,7 +213,7 @@ nonisolated func routeKeyEvent(_ event: KeyboardEvent) -> String {
         }
     }
 
-    let optionSpaceProducedText =
+    let optionSpaceProducedText = !event.optionIsMeta &&
         event.named == .space && event.modifierKeys.option &&
         !event.modifierKeys.command && !event.modifierKeys.control &&
         !event.characters.isEmpty && event.characters != " "
@@ -185,6 +232,13 @@ nonisolated func routeKeyEvent(_ event: KeyboardEvent) -> String {
         }
         if key.isEmpty { return "" }
         return encodeModified(key, encodedModifiers)
+    }
+
+    if event.optionIsMeta {
+        // The key as typed with Shift but not Option, e.g. `H` or `!`. Shift
+        // is already in the character; Neovim reads <M-S-h> as <M-H> anyway.
+        return encodeModified(event.resolvedKeyCharacters,
+                              KeyModifiers(option: true))
     }
 
     return escapeText(event.characters)
@@ -252,6 +306,9 @@ nonisolated func focusLossSuspends(_ kind: CompositionKind) -> Bool {
 nonisolated func shouldOfferToCocoa(mode: TextEntryMode,
                                     compositionActive: Bool,
                                     event: KeyboardEvent) -> Bool {
+    // A Meta key is a command, not text, even during a composition, which
+    // the caller commits first.
+    if event.optionIsMeta { return false }
     if compositionActive { return true }
     if mode == .directNeovim { return false }
     if event.modifierKeys.command || event.modifierKeys.control { return false }

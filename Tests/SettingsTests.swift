@@ -10,6 +10,12 @@
 import XCTest
 @testable import Nvmm
 
+/// Every view under `view`, depth first.
+@MainActor
+private func descendants(of view: NSView) -> [NSView] {
+    view.subviews + view.subviews.flatMap(descendants)
+}
+
 final class SettingsTests: XCTestCase {
 
     /// Defaults registered as enabled are on unless explicitly turned off;
@@ -18,6 +24,7 @@ final class SettingsTests: XCTestCase {
     func testRegisteredDefaults() {
         let defaults = UserDefaults.standard
         let keys = [Settings.appearanceModeKey,
+                    Settings.optionAsMetaKey,
                     Settings.contextSensitiveCursorKey,
                     Settings.nativePowerlineSymbolsKey,
                     Settings.openFilesInBuffersKey,
@@ -43,6 +50,7 @@ final class SettingsTests: XCTestCase {
         Settings.registerDefaults()
 
         XCTAssertEqual(Settings.appearanceMode, .system)
+        XCTAssertEqual(Settings.optionAsMeta, .off)
         XCTAssertTrue(Settings.contextSensitiveCursor)
         XCTAssertTrue(Settings.nativePowerlineSymbols)
         XCTAssertTrue(Settings.progressBar)
@@ -146,9 +154,6 @@ final class SettingsTests: XCTestCase {
         let controller = SettingsWindowController()
         let contentView = try XCTUnwrap(controller.window?.contentView)
 
-        func descendants(of view: NSView) -> [NSView] {
-            view.subviews + view.subviews.flatMap(descendants)
-        }
 
         let views = descendants(of: contentView)
         let popup = try XCTUnwrap(views.compactMap { $0 as? NSPopUpButton }
@@ -157,6 +162,12 @@ final class SettingsTests: XCTestCase {
                        ["System", "Light", "Dark",
                         "Use Neovim ‘background’ option"])
         XCTAssertNotNil(popup.action)
+
+        let optionAsMeta = try XCTUnwrap(views
+            .compactMap { $0 as? NSPopUpButton }
+            .first { $0.identifier?.rawValue == "optionAsMeta" })
+        XCTAssertEqual(optionAsMeta.itemArray.map(\.tag), [0, 1, 2, 3])
+        XCTAssertNotNil(optionAsMeta.action)
 
         let sliders = views.compactMap { $0 as? NSSlider }
         XCTAssertEqual(sliders.count, 2)
@@ -177,6 +188,48 @@ final class SettingsTests: XCTestCase {
         XCTAssertNotNil(proxyIcon.infoForBinding(.value))
     }
 
+    /// The Option as Meta popup shows the stored choice, falling back to Off,
+    /// and records a new one.
+    @MainActor
+    func testOptionAsMetaPopupFollowsDefaults() throws {
+        let defaults = UserDefaults.standard
+        let key = Settings.optionAsMetaKey
+        let saved = defaults.object(forKey: key)
+        defer { defaults.set(saved, forKey: key) }
+
+        // A control holds its target weakly, so each controller is kept for
+        // the test's length or its popup's action would go nowhere.
+        var controllers: [SettingsWindowController] = []
+        func popups() throws -> (NSPopUpButton, NSPopUpButton) {
+            let controller = SettingsWindowController()
+            controllers.append(controller)
+            let content = try XCTUnwrap(controller.window?.contentView)
+            let all = descendants(of: content)
+                .compactMap { $0 as? NSPopUpButton }
+            func named(_ name: String) throws -> NSPopUpButton {
+                try XCTUnwrap(all.first { $0.identifier?.rawValue == name })
+            }
+            return (try named("optionAsMeta"), try named("appearanceMode"))
+        }
+
+        defaults.set(OptionAsMeta.right.rawValue, forKey: key)
+        let (right, appearance) = try popups()
+        XCTAssertEqual(right.selectedTag(), OptionAsMeta.right.rawValue)
+
+        // The popup lines up with the Appearance popup above it.
+        right.window?.layoutIfNeeded()
+        XCTAssertEqual(right.frame.width, appearance.frame.width)
+
+        defaults.set(99, forKey: key)
+        XCTAssertEqual(Settings.optionAsMeta, .off)
+        let (invalid, _) = try popups()
+        XCTAssertEqual(invalid.selectedTag(), OptionAsMeta.off.rawValue)
+
+        invalid.selectItem(withTag: OptionAsMeta.left.rawValue)
+        _ = invalid.sendAction(invalid.action, to: invalid.target)
+        XCTAssertEqual(Settings.optionAsMeta, .left)
+    }
+
     /// The Neovim popup lists Bundled, the chosen custom nvim when there is
     /// one, and Other…, selects the current choice, and records a new one.
     @MainActor
@@ -195,9 +248,6 @@ final class SettingsTests: XCTestCase {
         func popup() throws -> NSPopUpButton {
             let controller = SettingsWindowController()
             controllers.append(controller)
-            func descendants(of view: NSView) -> [NSView] {
-                view.subviews + view.subviews.flatMap(descendants)
-            }
             let content = try XCTUnwrap(controller.window?.contentView)
             return try XCTUnwrap(descendants(of: content)
                 .compactMap { $0 as? NSPopUpButton }
@@ -262,9 +312,6 @@ final class SettingsTests: XCTestCase {
 
         let controller = SettingsWindowController()
         let content = try XCTUnwrap(controller.window?.contentView)
-        func descendants(of view: NSView) -> [NSView] {
-            view.subviews + view.subviews.flatMap(descendants)
-        }
         let views = descendants(of: content)
         let slider = try XCTUnwrap(views.compactMap { $0 as? NSSlider }
             .first { $0.identifier?.rawValue == "fontThickness" })
