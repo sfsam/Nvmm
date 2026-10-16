@@ -62,12 +62,12 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(Settings.appearanceMode, .system)
         XCTAssertEqual(Settings.optionAsMeta, .off)
         XCTAssertTrue(Settings.contextSensitiveCursor)
+        XCTAssertTrue(Settings.documentProxyIcon)
         XCTAssertTrue(Settings.nativePowerlineSymbols)
         XCTAssertTrue(Settings.progressBar)
         XCTAssertFalse(Settings.openFilesInBuffers)
         XCTAssertFalse(Settings.terminateAfterLastWindow)
         XCTAssertFalse(Settings.titlebarAppearsTransparent)
-        XCTAssertFalse(Settings.documentProxyIcon)
         XCTAssertFalse(Settings.verticalScrollbar)
         XCTAssertEqual(Settings.cursorTrailStrength, 0)
         XCTAssertEqual(Settings.fontThickness, 50)
@@ -192,11 +192,6 @@ final class SettingsTests: XCTestCase {
         XCTAssertNotNil(cursorSlider.infoForBinding(.value))
 
         let buttons = views.compactMap { $0 as? NSButton }
-        let proxyIcon = try XCTUnwrap(buttons.first {
-            $0.title == "Document proxy icon in title bar"
-        })
-        XCTAssertNotNil(proxyIcon.infoForBinding(.value))
-
         let updates = try XCTUnwrap(buttons.first {
             $0.title == "Automatically check for updates"
         })

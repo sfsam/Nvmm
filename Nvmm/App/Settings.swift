@@ -38,6 +38,7 @@ enum Settings {
     static let appearanceModeKey = "NVAppearanceMode"
 
     /// Whether the window represents its current local file in the title bar.
+    /// Has no settings-window checkbox; it is on unless the key is set by hand.
     static let documentProxyIconKey = "NVEnableDocumentProxyIcon"
 
     /// Whether the window shows a vertical scrollbar down its trailing edge.
@@ -185,6 +186,7 @@ enum Settings {
         UserDefaults.standard.register(defaults: [
             appearanceModeKey: AppearanceMode.system.rawValue,
             contextSensitiveCursorKey: true,
+            documentProxyIconKey: true,
             nativePowerlineSymbolsKey: true,
             progressBarKey: true,
             fontThicknessKey: 50,
@@ -279,10 +281,6 @@ final class SettingsWindowController: NSWindowController {
         }
         appearance.identifier = .init("appearanceMode")
 
-        let documentProxyIcon = Self.checkbox(
-            String(localized: "Document proxy icon in title bar"),
-            key: Settings.documentProxyIconKey)
-
         let scrollbar = Self.checkbox(
             String(localized: "Vertical scrollbar"),
             key: Settings.verticalScrollbarKey)
@@ -329,7 +327,6 @@ final class SettingsWindowController: NSWindowController {
                                       [empty, buffers],
                                       [empty, buffersNote],
                                       [windowLabel, titlebar],
-                                      [empty, documentProxyIcon],
                                       [empty, scrollbar],
                                       [empty, scrollbarNote],
                                       [optionAsMetaLabel, optionAsMeta],
