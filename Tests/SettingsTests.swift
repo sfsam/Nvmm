@@ -7,6 +7,7 @@
 //  so it is checked rather than assumed.
 //
 
+import Sparkle
 import XCTest
 @testable import Nvmm
 
@@ -17,6 +18,15 @@ private func descendants(of view: NSView) -> [NSView] {
 }
 
 final class SettingsTests: XCTestCase {
+
+    /// A settings window whose updater is never started.
+    @MainActor
+    private func makeSettingsWindowController() -> SettingsWindowController {
+        let updater = SPUStandardUpdaterController(
+            startingUpdater: false, updaterDelegate: nil,
+            userDriverDelegate: nil).updater
+        return SettingsWindowController(updater: updater)
+    }
 
     /// Defaults registered as enabled are on unless explicitly turned off;
     /// every other Boolean setting is off until set.
@@ -151,7 +161,7 @@ final class SettingsTests: XCTestCase {
 
     @MainActor
     func testSettingsWindowContainsBoundControls() throws {
-        let controller = SettingsWindowController()
+        let controller = makeSettingsWindowController()
         let contentView = try XCTUnwrap(controller.window?.contentView)
 
 
@@ -186,6 +196,13 @@ final class SettingsTests: XCTestCase {
             $0.title == "Document proxy icon in title bar"
         })
         XCTAssertNotNil(proxyIcon.infoForBinding(.value))
+
+        let updates = try XCTUnwrap(buttons.first {
+            $0.title == "Automatically check for updates"
+        })
+        let binding = try XCTUnwrap(updates.infoForBinding(.value))
+        XCTAssertEqual(binding[.observedKeyPath] as? String,
+                       "automaticallyChecksForUpdates")
     }
 
     /// The Option as Meta popup shows the stored choice, falling back to Off,
@@ -201,7 +218,7 @@ final class SettingsTests: XCTestCase {
         // the test's length or its popup's action would go nowhere.
         var controllers: [SettingsWindowController] = []
         func popups() throws -> (NSPopUpButton, NSPopUpButton) {
-            let controller = SettingsWindowController()
+            let controller = makeSettingsWindowController()
             controllers.append(controller)
             let content = try XCTUnwrap(controller.window?.contentView)
             let all = descendants(of: content)
@@ -246,7 +263,7 @@ final class SettingsTests: XCTestCase {
         // the test's length or its popup's actions would go nowhere.
         var controllers: [SettingsWindowController] = []
         func popup() throws -> NSPopUpButton {
-            let controller = SettingsWindowController()
+            let controller = makeSettingsWindowController()
             controllers.append(controller)
             let content = try XCTUnwrap(controller.window?.contentView)
             return try XCTUnwrap(descendants(of: content)
@@ -310,7 +327,7 @@ final class SettingsTests: XCTestCase {
         }
         defaults.set(50, forKey: Settings.fontThicknessKey)
 
-        let controller = SettingsWindowController()
+        let controller = makeSettingsWindowController()
         let content = try XCTUnwrap(controller.window?.contentView)
         let views = descendants(of: content)
         let slider = try XCTUnwrap(views.compactMap { $0 as? NSSlider }

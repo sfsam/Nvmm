@@ -13,15 +13,22 @@
 #
 # Tag the release commit and push both the branch and the tag before running
 # this. The script verifies the exported app against that tag, builds the
-# release ZIP, and creates a draft GitHub release. Every step that changes
-# something is confirmed first.
+# release ZIP, signs it for Sparkle, writes the appcast, and creates a draft
+# GitHub release. Every step that changes something is confirmed first.
 #
 # The ZIP has the same name in every release, so once the draft is published,
-# DOWNLOAD_URL below serves it as the stable download.
+# DOWNLOAD_URL below serves it as the stable download. The appcast links to
+# the release's own copy instead, so its item stays valid after later
+# releases. Its release notes are the page at RELEASE_NOTES_URL, which is
+# kept by hand.
+#
+# Signing needs the Sparkle tools from Scripts/build_sparkle.sh and the
+# Sparkle key, stored in the login keychain under SPARKLE_ACCOUNT.
 #
 # Products are left in build/nvmm-release:
 #   Nvmm.zip
 #   Nvmm.zip.sha256
+#   appcast.xml
 
 set -euo pipefail
 
@@ -32,13 +39,18 @@ exec 3<&0
 APP_NAME="Nvmm"
 BUNDLE_ID="com.mowglii.Nvmm"
 RELEASE_BRANCH="main"
-DOWNLOAD_URL="https://github.com/sfsam/Nvmm/releases/latest/download/Nvmm.zip"
+RELEASES_URL="https://github.com/sfsam/Nvmm/releases"
+DOWNLOAD_URL="${RELEASES_URL}/latest/download/Nvmm.zip"
+RELEASE_NOTES_URL="https://mowglii.com/nvmm/releasenotes.html"
+SPARKLE_ACCOUNT="nvmm"
+SPARKLE_NAMESPACE="http://www.andymatuschak.org/xml-namespaces/sparkle"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 APP_SRC="${APP_SRC:-${HOME}/Desktop/${APP_NAME}.app}"
 RELEASE_DIR="${RELEASE_DIR:-${REPO_DIR}/build/nvmm-release}"
 GH="${GH:-gh}"
+SPARKLE_BIN="${SPARKLE_BIN:-${REPO_DIR}/build/sparkle/bin}"
 DITTO="${DITTO:-ditto}"
 
 RED='\033[0;31m'
@@ -138,9 +150,14 @@ require_command codesign
 require_command spctl
 require_command stapler
 require_command shasum
+require_command curl
+require_command xmllint
+require_command "${SPARKLE_BIN}/sign_update"
+require_command "${SPARKLE_BIN}/generate_keys"
 
 ZIP="${RELEASE_DIR}/${APP_NAME}.zip"
 CHECKSUM="${ZIP}.sha256"
+APPCAST="${RELEASE_DIR}/appcast.xml"
 
 # Checking the exported app ------------------------------------------------
 
@@ -175,6 +192,80 @@ fi
 
 printf "    Version: %s (build %s)\n" \
     "$APP_MARKETING_VERSION" "$APP_BUILD_VERSION"
+
+APP_FEED_URL="$(plist_value "$APP_INFO_PLIST" SUFeedURL)"
+APP_PUBLIC_KEY="$(plist_value "$APP_INFO_PLIST" SUPublicEDKey)"
+APP_MINIMUM_SYSTEM="$(plist_value "$APP_INFO_PLIST" LSMinimumSystemVersion)"
+
+# Every copy of this release rejects an update signed with any key other than
+# the one it was built with, so the two must match before going further.
+step "Checking the Sparkle key"
+KEYCHAIN_PUBLIC_KEY="$("${SPARKLE_BIN}/generate_keys" \
+    --account "$SPARKLE_ACCOUNT" -p)"
+if [ -z "$APP_PUBLIC_KEY" ] || \
+   [ "$APP_PUBLIC_KEY" != "$KEYCHAIN_PUBLIC_KEY" ]; then
+    error "SUPublicEDKey does not match the ${SPARKLE_ACCOUNT} key."
+    exit 1
+fi
+printf "    Public key: %s\n" "$APP_PUBLIC_KEY"
+
+# Sparkle offers an update only when its build number is higher, so a
+# release that forgot to raise it would never be offered. Only a 404 means
+# there is no live appcast yet; any other failure stops the release rather
+# than skip the check.
+step "Checking the build number against ${APP_FEED_URL}"
+if ! [[ "$APP_BUILD_VERSION" =~ ^[0-9]+$ ]]; then
+    error "CFBundleVersion must be a whole number, not ${APP_BUILD_VERSION}."
+    exit 1
+fi
+
+if ! LIVE_RESPONSE="$(curl -sSL -w '\n%{http_code}' "$APP_FEED_URL")"
+then
+    error "Could not fetch ${APP_FEED_URL}."
+    exit 1
+fi
+LIVE_STATUS="${LIVE_RESPONSE##*$'\n'}"
+LIVE_FEED="${LIVE_RESPONSE%$'\n'*}"
+
+case "$LIVE_STATUS" in
+    200)
+        if ! ITEM_COUNT="$(xmllint --xpath 'count(//item)' - \
+            <<<"$LIVE_FEED")"; then
+            error "The live appcast is not valid XML."
+            exit 1
+        fi
+        LIVE_BUILD=""
+        for ((i = 1; i <= ITEM_COUNT; i++)); do
+            BUILD="$(xmllint --xpath "normalize-space((//item)[$i]/*[
+                local-name()='version' and
+                namespace-uri()='${SPARKLE_NAMESPACE}'])" - <<<"$LIVE_FEED")"
+            if ! [[ "$BUILD" =~ ^[0-9]+$ ]]; then
+                error "Live appcast item ${i} has build '${BUILD}'."
+                exit 1
+            fi
+            if [ -z "$LIVE_BUILD" ] || [ "$BUILD" -gt "$LIVE_BUILD" ]; then
+                LIVE_BUILD="$BUILD"
+            fi
+        done
+        if [ -z "$LIVE_BUILD" ]; then
+            error "The live appcast has no items."
+            exit 1
+        fi
+        if [ "$APP_BUILD_VERSION" -le "$LIVE_BUILD" ]; then
+            error "Build ${APP_BUILD_VERSION} is not above ${LIVE_BUILD}."
+            exit 1
+        fi
+        printf "    Live build: %s\n" "$LIVE_BUILD"
+        ;;
+    404)
+        printf "    No live appcast found, so there is nothing to compare.\n"
+        confirm "Is this the first release with an appcast?"
+        ;;
+    *)
+        error "Fetching ${APP_FEED_URL} returned HTTP ${LIVE_STATUS}."
+        exit 1
+        ;;
+esac
 
 # The bundled Neovim executables and libraries are nested code, so verify the
 # whole bundle rather than the app binary alone.
@@ -278,6 +369,37 @@ spctl --assess --type execute --verbose=4 "${VERIFY_DIR}/${APP_NAME}.app"
 rm -rf "$VERIFY_DIR"
 trap - EXIT
 
+step "Signing ${ZIP} for Sparkle"
+SIGNATURE="$("${SPARKLE_BIN}/sign_update" --account "$SPARKLE_ACCOUNT" \
+    -p "$ZIP")"
+"${SPARKLE_BIN}/sign_update" --account "$SPARKLE_ACCOUNT" \
+    --verify "$ZIP" "$SIGNATURE"
+LENGTH="$(stat -f %z "$ZIP")"
+
+# The appcast holds only this release. Sparkle needs nothing older, since
+# every earlier version updates straight to the newest.
+step "Writing ${APPCAST}"
+PUB_DATE="$(LC_ALL=C date -u "+%a, %d %b %Y %H:%M:%S +0000")"
+cat > "$APPCAST" <<APPCAST_XML
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="${SPARKLE_NAMESPACE}">
+  <channel>
+    <title>${APP_NAME}</title>
+    <item>
+      <title>${APP_NAME} ${APP_MARKETING_VERSION}</title>
+      <pubDate>${PUB_DATE}</pubDate>
+      <sparkle:version>${APP_BUILD_VERSION}</sparkle:version>
+      <sparkle:shortVersionString>${APP_MARKETING_VERSION}</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>${APP_MINIMUM_SYSTEM}</sparkle:minimumSystemVersion>
+      <sparkle:releaseNotesLink>${RELEASE_NOTES_URL}</sparkle:releaseNotesLink>
+      <enclosure url="${RELEASES_URL}/download/${VERSION}/${APP_NAME}.zip" length="${LENGTH}" type="application/octet-stream" sparkle:edSignature="${SIGNATURE}"/>
+    </item>
+  </channel>
+</rss>
+APPCAST_XML
+xmllint --noout "$APPCAST"
+cat "$APPCAST"
+
 # Publishing ---------------------------------------------------------------
 
 run_confirmed \
@@ -295,3 +417,8 @@ printf "\nReview the draft release, then publish it:\n"
 printf "    gh release edit %s --draft=false\n" "$VERSION"
 printf "\nOnce published, the stable download serves it:\n"
 printf "    %s\n" "$DOWNLOAD_URL"
+printf "\nUpdate the release notes, which Sparkle shows with the update:\n"
+printf "    %s\n" "$RELEASE_NOTES_URL"
+printf "\nThen upload the appcast, which offers the update through Sparkle:\n"
+printf "    %s\n" "$APPCAST"
+printf "    to %s\n" "$APP_FEED_URL"

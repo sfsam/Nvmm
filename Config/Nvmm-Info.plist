@@ -29,5 +29,11 @@
 			</array>
 		</dict>
 	</array>
+	<key>SUFeedURL</key>
+	<string>https://mowglii.com/nvmm/appcast.xml</string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>345600</integer>
+	<key>SUPublicEDKey</key>
+	<string>nw3+AVqacXPwJyjB+BR1bO2YcKT4XY8i/89D99WRbHw=</string>
 </dict>
 </plist>

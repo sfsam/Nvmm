@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A10000000000000000000001 /* Frameworks/Sparkle.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000000000000000000004 /* Frameworks/Sparkle.framework */; };
+		A10000000000000000000002 /* Frameworks/Sparkle.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = A10000000000000000000004 /* Frameworks/Sparkle.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		A10000000000000000000003 /* Frameworks/Sparkle-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000005 /* Frameworks/Sparkle-LICENSE.txt */; };
+		A10000000000000000000008 /* Frameworks/Sparkle.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000000000000000000004 /* Frameworks/Sparkle.framework */; };
 		C10000000000000000000001 /* Nvmm/App/CLIProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000003 /* Nvmm/App/CLIProtocol.swift */; };
 		C10000000000000000000002 /* nvmm in Embed CLI Helper */ = {isa = PBXBuildFile; fileRef = C10000000000000000000004 /* nvmm */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		E10000000000000000000002 /* build/nvim/Neovim-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000001 /* build/nvim/Neovim-LICENSE.txt */; };
@@ -34,6 +38,17 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
+		A10000000000000000000006 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				A10000000000000000000002 /* Frameworks/Sparkle.framework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		C10000000000000000000008 /* Embed CLI Helper */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
@@ -73,6 +88,8 @@
 /* Begin PBXFileReference section */
 		9261A75E300CA65600B23EF8 /* Nvmm.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Nvmm.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		9261A7B1300CA65600B23EF8 /* NvmmTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NvmmTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000004 /* Frameworks/Sparkle.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = Frameworks/Sparkle.framework; sourceTree = SOURCE_ROOT; };
+		A10000000000000000000005 /* Frameworks/Sparkle-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Frameworks/Sparkle-LICENSE.txt"; sourceTree = SOURCE_ROOT; };
 		C10000000000000000000003 /* Nvmm/App/CLIProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Nvmm/App/CLIProtocol.swift; sourceTree = SOURCE_ROOT; };
 		C10000000000000000000004 /* nvmm */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = nvmm; sourceTree = BUILT_PRODUCTS_DIR; };
 		D30000000000000000000001 /* Config/Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/Signing.xcconfig; sourceTree = SOURCE_ROOT; };
@@ -120,6 +137,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A10000000000000000000001 /* Frameworks/Sparkle.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -127,6 +145,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A10000000000000000000008 /* Frameworks/Sparkle.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -150,6 +169,8 @@
 				D30000000000000000000001 /* Config/Signing.xcconfig */,
 				F10000000000000000000009 /* Config/Neovim.entitlements */,
 				E10000000000000000000003 /* LICENSE.md */,
+				A10000000000000000000004 /* Frameworks/Sparkle.framework */,
+				A10000000000000000000005 /* Frameworks/Sparkle-LICENSE.txt */,
 				F10000000000000000000006 /* build/nvim/bin/nvim */,
 				F10000000000000000000007 /* build/nvim/lib */,
 				F10000000000000000000008 /* build/nvim/share */,
@@ -181,6 +202,8 @@
 				F10000000000000000000004 /* Copy Neovim Support */,
 				F10000000000000000000005 /* Copy Neovim Executable */,
 				F10000000000000000000010 /* Sign Bundled Neovim */,
+				A10000000000000000000006 /* Embed Frameworks */,
+				A10000000000000000000007 /* Sign Sparkle */,
 				C10000000000000000000008 /* Embed CLI Helper */,
 				920872AD3017F3E5003D1479 /* Create nvim Symlink */,
 				D20000000000000000000001 /* Stamp Neovim Version */,
@@ -294,6 +317,7 @@
 			files = (
 				E10000000000000000000002 /* build/nvim/Neovim-LICENSE.txt in Resources */,
 				E10000000000000000000004 /* LICENSE.md in Resources */,
+				A10000000000000000000003 /* Frameworks/Sparkle-LICENSE.txt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -325,6 +349,23 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "set -e\nBIN_DIR=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/bin\"\nmkdir -p \"$BIN_DIR\"\nln -sfn ../MacOS/nvim \"$BIN_DIR/nvim\"\n";
+		};
+		A10000000000000000000007 /* Sign Sparkle */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/$(FRAMEWORKS_FOLDER_PATH)/Sparkle.framework",
+				"$(SRCROOT)/Scripts/sign_sparkle.sh",
+			);
+			name = "Sign Sparkle";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"$SRCROOT/Scripts/sign_sparkle.sh\"\n";
 		};
 		D20000000000000000000001 /* Stamp Neovim Version */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -445,6 +486,7 @@
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				FRAMEWORK_SEARCH_PATHS = "$(SRCROOT)/Frameworks";
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -510,6 +552,7 @@
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				FRAMEWORK_SEARCH_PATHS = "$(SRCROOT)/Frameworks";
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;

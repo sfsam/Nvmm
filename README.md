@@ -39,6 +39,12 @@ The app is built at:
 build/Release/Nvmm.app
 ```
 
+Updates use [Sparkle](https://sparkle-project.org). A stripped-down build of it is committed at `Frameworks/Sparkle.framework`. To rebuild it from a Sparkle release:
+
+```sh
+Scripts/build_sparkle.sh 2.10.0
+```
+
 The app uses its bundled Neovim unless you choose another one in Settings. See [Choosing a Neovim](https://mowglii.com/nvmm/nvmm.html#neovim).
 
 Run the tests with:

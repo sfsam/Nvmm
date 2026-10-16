@@ -5,6 +5,7 @@
 
 import Cocoa
 import os
+import Sparkle
 
 @main
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -47,6 +48,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // it reopens where it was.
     private var settingsWindow: SettingsWindowController?
 
+    // Checks for updates and installs them. It is started after launch, but
+    // never in a test host.
+    private let updaterController = SPUStandardUpdaterController(
+        startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil)
+
     // Defaults are registered before launching, so the first window to read a
     // setting sees the registered value rather than a bare `false`.
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -72,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the app depends on — the utf8proc bridge and the bundled nvim binary.
         logUTF8ProcVersion()
         logBundledNeovim()
+        if !Self.isTestHost { updaterController.startUpdater() }
         if awaitingInitialCLIRequest {
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(10))
@@ -420,7 +427,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Shows the settings window, which edits the defaults in place.
     @IBAction func showSettings(_ sender: Any?) {
-        if settingsWindow == nil { settingsWindow = SettingsWindowController() }
+        if settingsWindow == nil {
+            settingsWindow = SettingsWindowController(
+                updater: updaterController.updater)
+        }
         settingsWindow?.showWindow(sender)
     }
 
@@ -494,6 +504,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: - Updates
+
+    @IBAction func checkForUpdates(_ sender: Any?) {
+        updaterController.checkForUpdates(sender)
+    }
+
     // MARK: - Help menu
 
     /// Opens a Help-menu result in the frontmost Neovim, or in a new window
@@ -514,5 +530,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @IBAction func showHomepage(_ sender: Any?) {
         let url = URL(string: "https://www.mowglii.com/nvmm")!
         NSWorkspace.shared.open(url)
+    }
+}
+
+extension AppDelegate: NSMenuItemValidation {
+    /// Disables Check for Updates… while the updater cannot start a check,
+    /// such as when one is already in progress.
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(checkForUpdates(_:)) {
+            return updaterController.updater.canCheckForUpdates
+        }
+        return true
     }
 }

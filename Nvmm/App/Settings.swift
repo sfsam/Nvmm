@@ -11,6 +11,7 @@
 //
 
 import Cocoa
+import Sparkle
 
 /// The app's user defaults.
 enum Settings {
@@ -205,7 +206,7 @@ final class SettingsWindowController: NSWindowController {
     private var appliedFontThicknessLevel = 0
     private var pendingFontThicknessTask: Task<Void, Never>?
 
-    convenience init() {
+    convenience init(updater: SPUUpdater) {
         let neovimLabel = NSTextField(labelWithString:
             String(localized: "Neovim"))
         let behaviorLabel = NSTextField(labelWithString:
@@ -248,6 +249,14 @@ final class SettingsWindowController: NSWindowController {
         let optionAsMetaNote = Self.note(String(localized:
             "Option with another key sends <M-…> instead of typing a special character."))
 
+        // Bound to the updater rather than its default, so that turning
+        // checks on also schedules the next one.
+        let updates = NSButton(checkboxWithTitle: String(localized:
+            "Automatically check for updates"),
+            target: nil, action: nil)
+        updates.bind(.value, to: updater,
+                     withKeyPath: "automaticallyChecksForUpdates")
+
         let titlebar = Self.checkbox(
             String(localized: "Transparent title bar"),
             key: Settings.titlebarAppearsTransparentKey)
@@ -278,7 +287,7 @@ final class SettingsWindowController: NSWindowController {
             String(localized: "Vertical scrollbar"),
             key: Settings.verticalScrollbarKey)
         let scrollbarNote = Self.note(String(localized:
-            "Scrolls by buffer lines, not visual lines. It may not behave as expected if your text has wrapped lines or folds."))
+            "Scrolls by buffer lines, not visual lines."))
 
         let ligatures = Self.checkbox(
             String(localized: "Programming ligatures"),
@@ -315,7 +324,8 @@ final class SettingsWindowController: NSWindowController {
         let grid = NSGridView(views: [[neovimLabel, neovim],
                                       [empty, neovimNote],
                                       [appearanceLabel, appearance],
-                                      [behaviorLabel, terminate],
+                                      [behaviorLabel, updates],
+                                      [empty, terminate],
                                       [empty, buffers],
                                       [empty, buffersNote],
                                       [windowLabel, titlebar],
