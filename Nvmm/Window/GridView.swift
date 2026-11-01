@@ -58,6 +58,26 @@ nonisolated struct MouseMoveTracker {
     }
 }
 
+/// Turns precise trackpad scrolling into whole-cell steps. Movement short of
+/// a cell is kept for the next event and rounds toward zero, so both
+/// directions need a full cell and a small jitter sends nothing. Turning
+/// around drops what was kept, so the first step back also needs one cell.
+nonisolated struct ScrollAccumulator {
+    private var remainder = SIMD2<Double>(0, 0)
+
+    mutating func reset() { remainder = SIMD2<Double>(0, 0) }
+
+    /// Adds a delta and returns the whole cells to scroll on each axis.
+    mutating func cells(adding delta: SIMD2<Double>,
+                        cellSize: SIMD2<Double>) -> SIMD2<Double> {
+        remainder.replace(with: 0, where: remainder * delta .< 0)
+        remainder += delta
+        let whole = (remainder / cellSize).rounded(.towardZero)
+        remainder -= whole * cellSize
+        return whole
+    }
+}
+
 /// Breaks the display link's strong target ownership while preserving its
 /// Objective-C selector callback.
 @MainActor
@@ -205,9 +225,8 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
     private var draggingButtons = 0
     private static let dragResendHz = 120
 
-    /// Accumulated fractional trackpad scroll, in backing pixels, spent one
-    /// whole cell at a time.
-    private var scrollingDelta = SIMD2<Double>(0, 0)
+    /// Fractional trackpad scroll, spent one whole cell at a time.
+    private var scrollAccumulator = ScrollAccumulator()
 
     private var trackingArea: NSTrackingArea?
 
@@ -1787,15 +1806,13 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
 
         if event.hasPreciseScrollingDeltas {
             let cell = backingCellSize
-            if event.phase == .began { scrollingDelta = SIMD2<Double>(0, 0) }
+            if event.phase == .began { scrollAccumulator.reset() }
 
-            scrollingDelta.y += deltaY
-            deltaY = floor(scrollingDelta.y / cell.height)
-            scrollingDelta.y -= deltaY * cell.height
-
-            scrollingDelta.x += deltaX
-            deltaX = floor(scrollingDelta.x / cell.width)
-            scrollingDelta.x -= deltaX * cell.width
+            let cells = scrollAccumulator.cells(
+                adding: SIMD2(deltaX, deltaY),
+                cellSize: SIMD2(cell.width, cell.height))
+            deltaX = cells.x
+            deltaY = cells.y
         } else {
             // A real scroll wheel: Shift flips the axis, so ignore it, and clamp
             // each notch to a single line.
