@@ -68,7 +68,7 @@ final class MetalFrameBuffer: @unchecked Sendable {
         }
 
         let options: MTLResourceOptions =
-            [.storageModeManaged, .cpuCacheModeWriteCombined]
+            [.storageModeShared, .cpuCacheModeWriteCombined]
         guard let buffer = makeBuffer(device, size, options) else {
             return false
         }
@@ -89,11 +89,6 @@ final class MetalFrameBuffer: @unchecked Sendable {
 
     /// The underlying Metal buffer.
     var metalBuffer: MTLBuffer? { buffer }
-
-    /// Marks a written range so the GPU sees the managed buffer's new contents.
-    func didModify(from start: Int, length: Int) {
-        buffer?.didModifyRange(start..<(start + length))
-    }
 
     private func isSameDevice(_ device: MTLDevice) -> Bool {
         guard let current = self.device else { return false }

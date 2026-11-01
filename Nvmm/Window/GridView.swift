@@ -905,17 +905,6 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
                               p3Colors: context.p3Colors)
         }
 
-        frame.didModify(from: 0, length: cellGraphicRegion.offset
-                        + cellGraphicCount * cellGraphicStride)
-        if lineCount > 0 {
-            frame.didModify(from: lineRegion.offset,
-                            length: lineCount * lineStride)
-        }
-        if cursorSmear != nil {
-            frame.didModify(from: cursorSmearRegion.offset,
-                            length: cursorSmearSize)
-        }
-
         guard let metalBuffer = frame.metalBuffer else {
             // Successful frame creation guarantees a buffer. Retrying this
             // invariant failure like a transient drawable loss would spin.
