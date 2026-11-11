@@ -23,6 +23,9 @@ nonisolated struct UIHandoff: Sendable, Equatable {
     enum Kind: Sendable { case restart, connect }
     var kind: Kind
     var address: String
+    /// Channel properties a `:restart` asks the UI to restore on the new
+    /// server with `nvim_chan_set`. Neovim 0.12 sends none.
+    var channelConfig: MPValue? = nil
 }
 
 /// A transient alert Neovim asked the UI to present.
@@ -641,14 +644,21 @@ nonisolated final class UIController {
 
     private func applyHandoff(_ args: ArraySlice<MPValue>, _ kind: UIHandoff.Kind) {
         // Neovim sends ["restart", address] with a bare string argument before the
-        // old channel closes; also accept the normal tuple form.
+        // old channel closes; also accept the normal tuple form. From 0.13 a
+        // restart tuple carries the channel properties as a second element.
         if args.count == 1, let address = args.first?.stringValue {
             handoff = UIHandoff(kind: kind, address: address)
             return
         }
         forEachTuple(args) { tuple in
             if let address = tuple.first?.stringValue {
-                self.handoff = UIHandoff(kind: kind, address: address)
+                var config: MPValue?
+                if kind == .restart, tuple.count > 1,
+                   case .map = tuple[1] {
+                    config = tuple[1]
+                }
+                self.handoff = UIHandoff(
+                    kind: kind, address: address, channelConfig: config)
             }
         }
     }

@@ -827,7 +827,9 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         case connect(address: String)
     }
 
-    private func startNeovim() {
+    /// `channelConfig` holds channel properties a `:restart` handed over, for
+    /// the attach to restore on the new server.
+    private func startNeovim(channelConfig: MPValue? = nil) {
         startHiddenWindowBackstop()
         startupInputVisible = false
         startupResizePending = false
@@ -989,7 +991,8 @@ final class WindowController: NSWindowController, NSWindowDelegate,
             var options = UIOptions()
             options.extLinegrid = true
             let result = await process.uiAttach(
-                width: columns, height: rows, options: options)
+                width: columns, height: rows, options: options,
+                channelConfig: channelConfig)
 
             guard result.status == .success else {
                 Log.rpc.error("Neovim UI attach failed: \(result.message)")
@@ -1109,7 +1112,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
         documentPathsAreLocal = preservedAcrossHandoff(
             documentPathsAreLocal, kind: handoff.kind)
         lastHandoffKind = handoff.kind
-        startNeovim()
+        startNeovim(channelConfig: handoff.channelConfig)
     }
 
     /// Returns to the server this window detached from when a `:connect` to a

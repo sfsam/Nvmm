@@ -607,7 +607,31 @@ final class UIControllerTests: XCTestCase {
             _ = controller.redraw([.array([.string(event), .string(address)])])
             XCTAssertEqual(controller.handoff?.kind, kind, event)
             XCTAssertEqual(controller.handoff?.address, address, event)
+            XCTAssertNil(controller.handoff?.channelConfig, event)
         }
+    }
+
+    /// Neovim 0.13 sends a restart's channel properties after its address;
+    /// 0.12 sends the address alone. A connect never carries them.
+    func testRestartTupleCarriesChannelConfig() {
+        let config = MPValue.map([(.string("detach"), .bool(false))])
+        let restart = UIController()
+        _ = restart.redraw([.array([.string("restart"),
+                                    .array([.string("/tmp/a.sock"), config])])])
+        XCTAssertEqual(restart.handoff,
+                       UIHandoff(kind: .restart, address: "/tmp/a.sock",
+                                 channelConfig: config))
+
+        let legacy = UIController()
+        _ = legacy.redraw([.array([.string("restart"),
+                                   .array([.string("/tmp/a.sock")])])])
+        XCTAssertEqual(legacy.handoff,
+                       UIHandoff(kind: .restart, address: "/tmp/a.sock"))
+
+        let connect = UIController()
+        _ = connect.redraw([.array([.string("connect"),
+                                    .array([.string("/tmp/b.sock"), config])])])
+        XCTAssertNil(connect.handoff?.channelConfig)
     }
 
     func testRealRestartEmitsHandoffFromNeovim() async throws {
@@ -644,6 +668,32 @@ final class UIControllerTests: XCTestCase {
             try? await successor.connect(address)
             let reply = try? await successor.request(
                 "nvim_eval", [.string("getpid()")])
+            // A 0.13 server hands over the old channel's properties: its
+            // stdio channel quit Neovim on close, which attaching restores on
+            // the new socket channel. A 0.12 server hands over none.
+            let api = try? await successor.request("nvim_get_api_info")
+            let hasChanSet = api.flatMap {
+                parseAPICapabilities($0.result)?.functions
+                    .contains("nvim_chan_set")
+            } ?? false
+            if hasChanSet {
+                let config = handoff?.channelConfig
+                XCTAssertEqual(config?.mapValue(for: .string("detach")),
+                               .bool(false))
+                var options = UIOptions()
+                options.extLinegrid = true
+                let attached = await successor.uiAttach(
+                    width: 80, height: 24, options: options,
+                    channelConfig: config)
+                XCTAssertEqual(attached.status, .success)
+                let info = try? await successor.request(
+                    "nvim_get_chan_info", [.int(0)])
+                XCTAssertEqual(
+                    info?.result.mapValue(for: .string("detach")),
+                    .bool(false))
+            } else {
+                XCTAssertNil(handoff?.channelConfig)
+            }
             _ = try? await successor.request("nvim_command", [.string("qall!")])
             if let pid = reply?.result.integer?.signed {
                 // The successor's exit closes this connection, so waiting for

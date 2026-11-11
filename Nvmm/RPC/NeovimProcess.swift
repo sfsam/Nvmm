@@ -1028,7 +1028,14 @@ extension NeovimProcess {
     /// Neovim supports. Post-attach setup has fresh deadlines that pause for an
     /// answerable startup prompt. Redraw notifications continue to feed `grids`
     /// while those requests wait.
+    ///
+    /// `channelConfig` holds the channel properties a `:restart` handed over.
+    /// They are restored with `nvim_chan_set` before attaching, as Neovim asks,
+    /// so a session that quit when its UI disconnected still does. Only Neovim
+    /// 0.13 or newer sends them, and only one that has `nvim_chan_set` gets
+    /// the call.
     func uiAttach(width: Int, height: Int, options: UIOptions,
+                  channelConfig: MPValue? = nil,
                   timeout: Duration = .seconds(5)) async -> UIAttachResult {
         let controller = ui ?? UIController(
             limits: limits,
@@ -1048,6 +1055,11 @@ extension NeovimProcess {
         let (validation, capabilities) = validateAPIMetadata(api.result, requested: options)
         guard validation.status == .success else { return validation }
         channelID = capabilities.channelID
+
+        if let channelConfig,
+           capabilities.functions.contains("nvim_chan_set") {
+            await restoreChannelConfig(channelConfig, until: deadline)
+        }
 
         let clientOutcome = await requestWaiting(
             "nvim_set_client_info", clientInfoArguments(), until: deadline)
@@ -1121,6 +1133,43 @@ extension NeovimProcess {
         var result = validation
         result.status = .success
         return result
+    }
+
+    /// Restores channel properties a `:restart` handed over, on this
+    /// connection's channel.
+    ///
+    /// Not fatal: a property left unrestored changes what happens when the
+    /// UI disconnects, not whether the session works. `nvim_chan_set` is a
+    /// fast call, answered at once, so it gets its own short wait, cut from
+    /// the attach deadline: a slow reply must not use up the time the
+    /// requests after it need. Nothing is sent once that deadline has
+    /// passed. A wait that runs out leaves the outcome unknown: the request
+    /// was sent, unless the deadline passed in that same instant, and Neovim
+    /// may still apply it.
+    private func restoreChannelConfig(
+        _ config: MPValue, until deadline: ContinuousClock.Instant
+    ) async {
+        let now = ContinuousClock.now
+        guard now < deadline else {
+            Log.rpc.error(
+                "Channel properties not restored: attach deadline passed")
+            return
+        }
+        let wait = min(deadline, now.advanced(by: .milliseconds(250)))
+        switch await requestWaiting(
+            "nvim_chan_set", [.int(0), config], until: wait
+        ) {
+        case .response(let response):
+            if response.isError {
+                let detail = String(describing: response.error)
+                Log.rpc.error("Could not restore channel properties: \(detail)")
+            }
+        case .timedOut:
+            Log.rpc.error(
+                "No timely reply restoring channel properties; outcome unknown")
+        case .transport(let error):
+            Log.rpc.error("Could not restore channel properties: \(error)")
+        }
     }
 
     /// Lets the matching UIEnter hook schedule GUI configuration. Call this
