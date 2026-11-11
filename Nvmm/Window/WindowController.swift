@@ -359,10 +359,12 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     private var currentServerAddress: String?
 
     /// The server to return to if a `:connect` to a new address fails: the one
-    /// we detached from, which stays alive for a plain `:connect`. `:connect`
+    /// we detached from. Neovim 0.12 keeps it alive for a plain `:connect` and
     /// detaches the current UI before the new address is known good, so a bad
     /// address would otherwise orphan the old Neovim; instead we reconnect to
-    /// it. Set on a connect handoff, cleared once consumed.
+    /// it. Neovim 0.13 checks the address first and stops the old server when
+    /// this was its last UI, so there the fallback is rarely reachable. Set on
+    /// a connect handoff, cleared once consumed.
     private var connectFallback: ConnectFallback?
 
     /// The server address this window connects to, or nil when it spawns
@@ -955,8 +957,8 @@ final class WindowController: NSWindowController, NSWindowDelegate,
                     ?? error.localizedDescription
                 self?.resolveStartup(.failed(reason))
                 // A failed `:connect`: return to the server we detached from
-                // (still alive for a plain `:connect`) rather than orphaning
-                // it, noting that the new address was unreachable.
+                // (alive after a plain `:connect` in 0.12) rather than
+                // orphaning it, noting that the new address was unreachable.
                 if let self, let fallback = self.connectFallback {
                     self.recoverToFallback(fallback, reason: reason)
                     return
@@ -1119,7 +1121,7 @@ final class WindowController: NSWindowController, NSWindowDelegate,
     /// new address failed, so a bad address neither orphans the old Neovim nor
     /// loses the session. Notes that the new address was unreachable, then
     /// reconnects. The fallback is cleared first, so if it too fails to
-    /// connect (e.g. `:connect!` stopped the old server) the normal
+    /// connect (e.g. the old server was stopped) the normal
     /// error-and-close path runs rather than looping.
     private func recoverToFallback(
         _ fallback: ConnectFallback,
