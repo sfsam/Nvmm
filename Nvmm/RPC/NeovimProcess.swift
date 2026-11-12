@@ -1296,21 +1296,42 @@ extension NeovimProcess {
 
     /// Installs the autocmd that forwards Neovim's `Progress` events over RPC
     /// (consumed on `progressUpdates`), for the window's progress bar. The
-    /// event carries the task's id, status, and percentage in `ev.data`, which
-    /// is passed through unchanged. Guarded on the event existing, so an older
-    /// Neovim without it simply reports no progress.
+    /// event carries the task's id, status, and percentage in `ev.data`.
+    /// Guarded on the event existing, so an older Neovim without it simply
+    /// reports no progress.
     ///
-    /// Neovim's own busy messages (source "nvim": writes, plus completion
-    /// and indent from 0.13) are dropped. They never carry a real
-    /// percentage, and 0.12 reports them as 0%, which would flash an empty
-    /// bar on every `:w`.
+    /// A plugin's events are passed through unchanged. Neovim's own (source
+    /// "nvim") are forwarded only for a task that reports a real
+    /// percentage, as a slow `:write` or `:edit` does from 0.13. The rest
+    /// carry none: 0.12 reports every `:w` and indent as 0%, which would
+    /// flash an empty bar, and 0.13 sends indent and completion without
+    /// one. A forwarded task's final event is forwarded too, so the bar does
+    /// not stall; a success without a percentage is sent as 100%, so the bar
+    /// fills rather than vanishing short of it. A task that reaches 100%
+    /// while running is finished already, so its final event is dropped.
     private static let progressAutocmdLua = """
         if vim.fn.exists('##Progress') ~= 1 then return end
         local group = vim.api.nvim_create_augroup('NvmmProgress', {clear=true})
+        local shown = {}
         vim.api.nvim_create_autocmd('Progress', {group=group,
           callback=function(ev)
-            if ev.data.source == 'nvim' then return end
-            vim.rpcnotify(0, 'progress', ev.data)
+            local data = ev.data
+            if data.source == 'nvim' then
+              local id = data.id
+              -- An event fired by hand may have none.
+              if id == nil then return end
+              if data.status == 'running' then
+                if not shown[id] and (data.percent or 0) <= 0 then return end
+                shown[id] = (data.percent or 0) < 100 or nil
+              else
+                if not shown[id] then return end
+                shown[id] = nil
+                if data.status == 'success' and data.percent == nil then
+                  data.percent = 100
+                end
+              end
+            end
+            vim.rpcnotify(0, 'progress', data)
           end})
         """
 

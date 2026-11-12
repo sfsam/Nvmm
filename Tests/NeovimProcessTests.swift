@@ -1228,6 +1228,55 @@ final class NeovimProcessTests: XCTestCase {
         }
     }
 
+    /// Neovim's own progress is forwarded only for a task with a real
+    /// percentage, as a slow write or read on 0.13 reports. Its success,
+    /// which carries none, is sent as 100%, unless the task already reached
+    /// 100% while running. Events without a percentage, and 0.12's 0%, are
+    /// dropped, and a plugin's pass through unchanged. The hook's output is
+    /// recorded inside Neovim, so a dropped event cannot hide behind a later
+    /// update.
+    func testOnlyNeovimProgressWithAPercentageIsForwarded() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            let lua = """
+                local sent = {}
+                local notify = vim.rpcnotify
+                vim.rpcnotify = function(channel, name, data)
+                  if name == 'progress' then
+                    sent[#sent + 1] = data.id .. ' ' .. data.status .. ' '
+                      .. tostring(data.percent)
+                  end
+                  return notify(channel, name, data)
+                end
+                local function fire(id, status, percent, source)
+                  vim.api.nvim_exec_autocmds('Progress', {data={id=id,
+                    status=status, percent=percent, source=source or 'nvim'}})
+                end
+                fire('bufwrite', 'running', 0)
+                fire('bufwrite', 'success', 0)
+                fire('indent', 'running', 0)
+                fire('indent', 'success', 0)
+                fire('nvim.indent', 'running')
+                fire('nvim.indent', 'success')
+                fire('w', 'running', 48)
+                fire('w', 'success')
+                fire('r', 'running', 100)
+                fire('r', 'success')
+                fire('p', 'running', nil, 'plugin')
+                vim.rpcnotify = notify
+                return sent
+                """
+            let response = try await process.request(
+                "nvim_exec_lua", [.string(lua), .array([])])
+            XCTAssertFalse(response.isError, "\(response.error)")
+            let sent = response.result.arrayValue?.compactMap(\.stringValue)
+            XCTAssertEqual(sent, [
+                "w running 48", "w success 100", "r running 100",
+                "p running nil",
+            ])
+        }
+    }
+
     func testBackgroundOptionIsPublishedWithoutBeingSet() async throws {
         try await withNvim { process in
             let initial = Task {
