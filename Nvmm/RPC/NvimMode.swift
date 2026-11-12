@@ -159,6 +159,21 @@ nonisolated func parseBlockedAwaitingInput(_ result: RPCRequestResult) -> Bool {
     return response.result.mapValue(for: .string("blocking"))?.boolValue == true
 }
 
+/// Whether an `nvim_get_mode` reply names a hit-enter prompt that still
+/// answers requests, so a request sent now runs at once. Neovim 0.13
+/// processes requests at that prompt and reports it as not blocking; 0.12
+/// reports it as blocking, holding every request until the user answers.
+///
+/// Anything else, an error, or no answer, is not such a prompt.
+nonisolated func parseAnsweringHitEnterPrompt(
+    _ result: RPCRequestResult
+) -> Bool {
+    guard parseNvimMode(result) == .promptEnter,
+          case .response(let response) = result else { return false }
+    return response.result.mapValue(for: .string("blocking"))?.boolValue
+        == false
+}
+
 /// Whether a `state('m')` reply says typed keys are pending, still to be
 /// matched against a mapping. While Neovim is blocked, that is the
 /// `'timeoutlen'` pause after a mapping prefix; a wait only the user can

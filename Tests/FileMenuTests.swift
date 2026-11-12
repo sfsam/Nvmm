@@ -115,6 +115,35 @@ final class NvimModeTests: XCTestCase {
             parseBlockedAwaitingInput(.transport(.connectionClosed)))
     }
 
+    /// Only a hit-enter prompt reported as not blocking answers requests, as
+    /// Neovim 0.13's does; 0.12 reports its prompt as blocking. Other prompts
+    /// and modes, an error, or no answer are not such a prompt.
+    func testParsesAnsweringHitEnterPrompt() {
+        func reply(_ mode: String, blocking: Bool) -> RPCRequestResult {
+            .response(RPCResponse(error: .null, result: .map([
+                (.string("mode"), .string(mode)),
+                (.string("blocking"), .bool(blocking)),
+            ])))
+        }
+        XCTAssertTrue(parseAnsweringHitEnterPrompt(reply("r", blocking: false)))
+        XCTAssertFalse(parseAnsweringHitEnterPrompt(reply("r", blocking: true)))
+        for mode in ["rm", "r?", "n", "c"] {
+            XCTAssertFalse(
+                parseAnsweringHitEnterPrompt(reply(mode, blocking: false)),
+                mode)
+        }
+        XCTAssertFalse(parseAnsweringHitEnterPrompt(.response(RPCResponse(
+            error: .null,
+            result: .map([(.string("mode"), .string("r"))])))))
+        XCTAssertFalse(parseAnsweringHitEnterPrompt(.response(RPCResponse(
+            error: .array([.int(0), .string("boom")]),
+            result: .map([(.string("mode"), .string("r")),
+                          (.string("blocking"), .bool(false))])))))
+        XCTAssertFalse(parseAnsweringHitEnterPrompt(.timedOut))
+        XCTAssertFalse(
+            parseAnsweringHitEnterPrompt(.transport(.connectionClosed)))
+    }
+
     /// Only a plain "m" from `state('m')` is a mapping pause. Anything else,
     /// including an error from a Neovim without the call, leaves a block
     /// reported as a block.

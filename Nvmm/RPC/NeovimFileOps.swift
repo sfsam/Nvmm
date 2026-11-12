@@ -141,6 +141,10 @@ extension NeovimProcess {
     /// as waits for a single key skip it and every mode ignores it. The keys
     /// released can lead into a wait only the user can answer, so the block
     /// is read again until it lifts or turns into one.
+    ///
+    /// A hit-enter prompt that answers requests, as Neovim 0.13's does, is
+    /// not a block, and is left up: a check that precedes a dialog must not
+    /// clear the message the user may still be reading.
     func staysBlockedAwaitingInput() async -> Bool {
         guard await isBlockedAwaitingInput() else { return false }
         guard await isPausedOnMapping() else { return true }
@@ -153,6 +157,76 @@ extension NeovimProcess {
         }
         return true
     }
+
+    /// Whether Neovim sits at a hit-enter prompt that runs requests, so a
+    /// command sent now runs at once and leaves the prompt up. Neovim 0.13
+    /// does this; Neovim does not redraw until the prompt is dismissed.
+    ///
+    /// The fast mode probe is confirmed by a deferred request, which only a
+    /// Neovim that runs requests at the prompt can answer while it is up.
+    /// 0.12 reports its prompt as blocking, and when asked just as one
+    /// opens, leaves the deferred request unanswered until it is gone. That
+    /// late answer only reads the mode.
+    func isAtAnsweringHitEnterPrompt() async -> Bool {
+        guard parseAnsweringHitEnterPrompt(await queryBounded(
+                  "nvim_get_mode", [], timeout: .milliseconds(250))),
+              case .response(let response) = await queryBounded(
+                  "nvim_exec_lua",
+                  [.string("return vim.api.nvim_get_mode().mode"),
+                   .array([])],
+                  timeout: .milliseconds(250)),
+              !response.isError
+        else { return false }
+        return response.result.stringValue == "r"
+    }
+
+    /// Dismisses a hit-enter prompt that runs requests, before an action
+    /// whose result the user must see, since Neovim does not redraw while
+    /// the prompt is up. True unless such a prompt is still up. A prompt
+    /// that holds requests, as 0.12's does, is left to the checks that
+    /// report it.
+    func dismissAnsweringHitEnterPrompt() async -> Bool {
+        guard parseAnsweringHitEnterPrompt(await queryBounded(
+                  "nvim_get_mode", [], timeout: .milliseconds(250)))
+        else { return true }
+        return await dismissHitEnterPrompt()
+    }
+
+    /// Dismisses a hit-enter prompt that answers requests by typing Enter,
+    /// as the user would. True once Neovim has left the prompt for a mode
+    /// that takes a command; false when the prompt stays, or gives way to
+    /// another prompt.
+    ///
+    /// The key is sent from a fast call, which Neovim answers at once and
+    /// never holds for later, so a prompt is dismissed now or not at all.
+    /// The call checks for the prompt and types the key in one step, and
+    /// types nothing at a prompt that blocks, as 0.12's does.
+    private func dismissHitEnterPrompt() async -> Bool {
+        _ = await queryBounded(
+            "nvim__exec_lua_fast",
+            [.string(Self.dismissHitEnterLua), .array([])],
+            timeout: .milliseconds(250))
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(250))
+        while ContinuousClock.now < deadline {
+            let mode = await mode()
+            switch mode {
+            case .promptEnter, .timedOut: break
+            default: return !mode.isBusy && !mode.isPrompt
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return false
+    }
+
+    /// Types Enter only at a hit-enter prompt that does not block. Input,
+    /// the key is typed, so the prompt consumes it rather than running it
+    /// afterwards as a command.
+    private static let dismissHitEnterLua = """
+        local mode = vim.api.nvim_get_mode()
+        if mode.mode ~= 'r' or mode.blocking then return false end
+        vim.api.nvim_input('<CR>')
+        return true
+        """
 
     /// Issues a request that changes Neovim, bounded by a deadline.
     ///
@@ -206,8 +280,18 @@ extension NeovimProcess {
     ///
     /// A mapping pause is ended before the mode is read, since the keys it
     /// releases can change the mode.
-    func prepareForCommand() async -> Bool {
+    ///
+    /// A hit-enter prompt that runs requests does not refuse the command.
+    /// With `dismissingHitEnter` it is dismissed first, for a command whose
+    /// result the user must see; otherwise it stays up, so a gate before a
+    /// panel, or a command nobody needs to watch, leaves the message there.
+    func prepareForCommand(dismissingHitEnter: Bool) async -> Bool {
         _ = await staysBlockedAwaitingInput()
+        if dismissingHitEnter {
+            guard await dismissAnsweringHitEnterPrompt() else { return false }
+        } else if await isAtAnsweringHitEnterPrompt() {
+            return true
+        }
         let mode = await self.mode()
         if mode.isBusy || mode.isExMode || mode.isPrompt { return false }
         if !mode.isNormal { feedkeys(Self.escapeToNormal) }
@@ -216,9 +300,12 @@ extension NeovimProcess {
 
     /// Runs an Ex command from Normal mode, fire and forget.
     /// Returns false when the mode did not allow it; the caller beeps.
+    /// See `prepareForCommand` for `dismissingHitEnter`.
     @discardableResult
-    func normalCommand(_ command: String) async -> Bool {
-        guard await prepareForCommand() else { return false }
+    func normalCommand(_ command: String,
+                       dismissingHitEnter: Bool) async -> Bool {
+        guard await prepareForCommand(dismissingHitEnter: dismissingHitEnter)
+        else { return false }
         notify("nvim_command", [.string(command)])
         return true
     }
@@ -226,9 +313,13 @@ extension NeovimProcess {
     /// Runs an Ex command from Normal mode and waits for its response, so the
     /// caller can inspect the error. The deadline keeps a wedged Neovim from
     /// parking the caller forever, so the outcome may be unknown: the command
-    /// was still sent, and runs whenever Neovim reaches it.
-    private func normalCommandResponse(_ command: String) async -> CommandResult {
-        guard await prepareForCommand() else { return .refused }
+    /// was still sent, and runs whenever Neovim reaches it. See
+    /// `prepareForCommand` for `dismissingHitEnter`.
+    private func normalCommandResponse(
+        _ command: String, dismissingHitEnter: Bool
+    ) async -> CommandResult {
+        guard await prepareForCommand(dismissingHitEnter: dismissingHitEnter)
+        else { return .refused }
         return await commandBounded("nvim_command", [.string(command)],
                                     timeout: .seconds(2))
     }
@@ -253,8 +344,14 @@ extension NeovimProcess {
     /// that stays, in a mode that permits a save, is passed through: the
     /// write that follows reports it, and an abort fed now would queue behind
     /// it and cancel whatever the user goes on to type.
+    ///
+    /// A hit-enter prompt that runs requests permits a save and stays up:
+    /// the write runs at once and needs nothing redrawn to be seen to work,
+    /// and an E32 for an unnamed buffer leads to a save panel that can still
+    /// be cancelled with the message in view.
     func canSave() async -> Bool {
         let blocked = await staysBlockedAwaitingInput()
+        if !blocked, await isAtAnsweringHitEnterPrompt() { return true }
         let mode = await self.mode()
         if mode.isBusy || mode.isPrompt || mode.isExMode || mode.isTerminal {
             return false
@@ -378,10 +475,11 @@ extension NeovimProcess {
 
     /// Switches to a buffer and writes it. Used by the save prompts, which name
     /// the buffer they asked about rather than trusting the current one.
+    /// A hit-enter prompt that runs requests stays up, as for `canSave`.
     func writeBuffer(_ bufnr: Int) async -> WriteOutcome {
         guard await !staysBlockedAwaitingInput() else { return .awaitingInput }
-        return classifyWrite(
-            await normalCommandResponse("buffer \(bufnr) | write"))
+        return classifyWrite(await normalCommandResponse(
+            "buffer \(bufnr) | write", dismissingHitEnter: false))
     }
 
     /// Turns a command result into a write outcome. An unanswered write was
@@ -399,9 +497,11 @@ extension NeovimProcess {
     }
 
     /// Switches to a buffer without writing it, so a save panel names the
-    /// buffer the user was asked about.
+    /// buffer the user was asked about. A hit-enter prompt that runs
+    /// requests stays up, so cancelling that panel leaves the message.
     func switchToBuffer(_ bufnr: Int) async -> Bool {
-        switch await normalCommandResponse("buffer \(bufnr)") {
+        switch await normalCommandResponse(
+            "buffer \(bufnr)", dismissingHitEnter: false) {
         case .done(let response): !response.isError
         case .refused: false
         // An unanswered switch may still land, but the caller needs a
@@ -425,10 +525,13 @@ extension NeovimProcess {
             response, recognizesUnnamedBuffer: false)
     }
 
-    /// Deletes a buffer, discarding its changes when `force` is set.
+    /// Deletes a buffer, discarding its changes when `force` is set. A
+    /// hit-enter prompt that runs requests is dismissed first, so the window
+    /// shows the buffer that takes its place.
     @discardableResult
     func deleteBuffer(_ bufnr: Int, force: Bool) async -> Bool {
-        await normalCommand("bdelete\(force ? "!" : "") \(bufnr)")
+        await normalCommand("bdelete\(force ? "!" : "") \(bufnr)",
+                            dismissingHitEnter: true)
     }
 }
 

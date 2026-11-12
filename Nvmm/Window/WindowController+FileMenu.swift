@@ -36,12 +36,20 @@ extension WindowController {
     // MARK: - Open
 
     /// Opens files chosen in an open panel into this window.
+    ///
+    /// A hit-enter prompt that runs requests stays up while the panel does,
+    /// so cancelling leaves the message, and is dismissed only once files
+    /// are chosen, so they open in view. Neovim can return from it to any
+    /// mode, so the mode is prepared again then.
     @IBAction func openDocument(_ sender: Any?) {
         guard let process else { return }
         Task {
-            guard await process.prepareForCommand() else { return NSSound.beep() }
+            guard await process.prepareForCommand(dismissingHitEnter: false)
+            else { return NSSound.beep() }
             let paths = Self.runOpenPanel()
             guard !paths.isEmpty else { return }
+            guard await process.prepareForCommand(dismissingHitEnter: true)
+            else { return NSSound.beep() }
             await process.open(paths, inBuffers: Settings.openFilesInBuffers)
         }
     }

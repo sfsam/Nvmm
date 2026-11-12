@@ -454,6 +454,255 @@ final class NeovimProcessTests: XCTestCase {
         }
     }
 
+    /// One message a fake Neovim received: a request or a notification.
+    private struct PeerCall {
+        var method: String
+        var arguments: [MPValue]
+
+        /// Whether this is the Lua that types Enter to dismiss the prompt.
+        var dismissesPrompt: Bool {
+            method == "nvim__exec_lua_fast"
+                && arguments.first?.stringValue?.contains("nvim_input")
+                    == true
+        }
+    }
+
+    /// Plays a Neovim at a hit-enter prompt, reported as not blocking, and
+    /// returns what it received, once `last` arrives or the client goes
+    /// quiet.
+    ///
+    /// `runsRequests` plays 0.13, which answers deferred requests at the
+    /// prompt; the dismissal Lua then ends the prompt. Otherwise it plays
+    /// 0.12 asked just as its prompt opens: only fast calls are answered,
+    /// and the dismissal Lua, finding the prompt blocking by then, types
+    /// nothing. Commands fail with E32, as for an unnamed buffer.
+    /// `afterPrompt` is the mode Neovim returns to once the prompt is gone.
+    private func servePrompt(
+        _ fd: Int32, runsRequests: Bool, afterPrompt: String = "n",
+        until last: String? = nil
+    ) throws -> [PeerCall] {
+        var unpacker = MessagePackUnpacker()
+        var calls: [PeerCall] = []
+        var atPrompt = true
+        while true {
+            guard let message = try? readMessage(fd, unpacker: &unpacker)
+            else { return calls }
+            guard let values = message.arrayValue,
+                  let kind = values.first?.integer?.unsigned else {
+                XCTFail("unexpected message \(message)")
+                throw NeovimTestError()
+            }
+            let isRequest = kind == 0
+            let offset = isRequest ? 2 : 1
+            guard values.count == offset + 2,
+                  let method = values[offset].stringValue,
+                  let arguments = values[offset + 1].arrayValue else {
+                XCTFail("unexpected message \(message)")
+                throw NeovimTestError()
+            }
+            let call = PeerCall(method: method, arguments: arguments)
+            calls.append(call)
+            if isRequest, let id = values[1].integer?.unsigned {
+                switch method {
+                case "nvim_get_mode":
+                    try writeResponse(fd, id: id, result: .map([
+                        (.string("mode"),
+                         .string(atPrompt ? "r" : afterPrompt)),
+                        (.string("blocking"), .bool(false)),
+                    ]))
+                case "nvim__exec_lua_fast" where call.dismissesPrompt:
+                    let typed = runsRequests && atPrompt
+                    try writeResponse(fd, id: id, result: .bool(typed))
+                    if typed { atPrompt = false }
+                case "nvim_exec_lua":
+                    guard runsRequests else { break }
+                    try writeResponse(
+                        fd, id: id,
+                        result: .string(atPrompt ? "r" : afterPrompt))
+                case "nvim_command":
+                    guard runsRequests else { break }
+                    let e32 = "Vim(write):E32: No file name"
+                    try writeResponse(
+                        fd, id: id, error: .array([.int(0), .string(e32)]))
+                default:
+                    if runsRequests { try writeResponse(fd, id: id) }
+                }
+            }
+            if method == last { return calls }
+        }
+    }
+
+    /// A write runs through a hit-enter prompt that runs requests, as Neovim
+    /// 0.13's does, and leaves it up: an unnamed buffer's E32 reaches the
+    /// save panel with the message still in view, so cancelling the panel
+    /// loses nothing.
+    func testWriteRunsThroughAnsweringHitEnterPrompt() async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+
+        let write = Task { await process.writeBuffer(3) }
+        let calls = try servePrompt(pair.peer, runsRequests: true,
+                                    until: "nvim_command")
+
+        let outcome = await write.value
+        XCTAssertEqual(outcome, .needsFilename)
+        XCTAssertFalse(calls.contains { $0.dismissesPrompt })
+        XCTAssertEqual(calls.last?.method, "nvim_command")
+        XCTAssertEqual(calls.last?.arguments,
+                       [.string("buffer 3 | write")])
+        await process.disconnect()
+    }
+
+    /// Saving is permitted at a hit-enter prompt that runs requests, and the
+    /// check leaves the prompt up, so cancelling a save panel that follows
+    /// leaves the message too.
+    func testCanSaveLeavesAnsweringHitEnterPromptUp() async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+
+        let allowed = Task { await process.canSave() }
+        let calls = try servePrompt(pair.peer, runsRequests: true)
+
+        let saves = await allowed.value
+        XCTAssertTrue(saves)
+        XCTAssertFalse(calls.contains { $0.dismissesPrompt })
+        XCTAssertFalse(calls.contains { $0.method == "nvim_feedkeys" })
+        await process.disconnect()
+    }
+
+    /// A prompt whose deferred probe goes unanswered holds requests after
+    /// all, as 0.12 can when asked just as its prompt opens. The write is
+    /// refused at the prompt, as before, and never sent.
+    func testWriteIsNotSentWhenThePromptHoldsRequests() async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+
+        let write = Task { await process.writeBuffer(3) }
+        let calls = try servePrompt(pair.peer, runsRequests: false)
+
+        let outcome = await write.value
+        XCTAssertEqual(
+            outcome, .failed("Neovim did not complete the save."))
+        XCTAssertFalse(calls.contains { $0.method == "nvim_command" })
+        await process.disconnect()
+    }
+
+    /// Deleting a buffer dismisses a hit-enter prompt that runs requests
+    /// first, so the window shows the buffer that takes its place.
+    func testDeleteBufferDismissesAnsweringHitEnterPrompt() async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+
+        let deleted = Task { await process.deleteBuffer(3, force: false) }
+        let calls = try servePrompt(pair.peer, runsRequests: true,
+                                    until: "nvim_command")
+
+        let sent = await deleted.value
+        XCTAssertTrue(sent)
+        let dismissal = calls.firstIndex { $0.dismissesPrompt }
+        let command = calls.firstIndex { $0.method == "nvim_command" }
+        XCTAssertNotNil(dismissal)
+        XCTAssertLessThan(dismissal ?? .max, command ?? .min)
+        XCTAssertEqual(calls.last?.arguments, [.string("bdelete 3")])
+        await process.disconnect()
+    }
+
+    /// A prompt that blocks by the time the dismissal arrives, as 0.12's can
+    /// when asked just as it opens, is not dismissed, so nothing is
+    /// deleted.
+    func testDeleteBufferIsRefusedWhenThePromptHoldsRequests() async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+
+        let deleted = Task { await process.deleteBuffer(3, force: false) }
+        let calls = try servePrompt(pair.peer, runsRequests: false)
+
+        let sent = await deleted.value
+        XCTAssertFalse(sent)
+        XCTAssertFalse(calls.contains { $0.method == "nvim_command" })
+        await process.disconnect()
+    }
+
+    /// Neovim can return from the prompt to the mode it came from, such as
+    /// Insert after CTRL-O, so the command is prepared from there: back to
+    /// Normal mode before the buffer is deleted.
+    func testDeleteBufferReturnsToNormalModeAfterThePrompt() async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+
+        let deleted = Task { await process.deleteBuffer(3, force: false) }
+        let calls = try servePrompt(pair.peer, runsRequests: true,
+                                    afterPrompt: "i", until: "nvim_command")
+
+        let sent = await deleted.value
+        XCTAssertTrue(sent)
+        let escape = calls.firstIndex { $0.method == "nvim_feedkeys" }
+        let command = calls.firstIndex { $0.method == "nvim_command" }
+        XCTAssertNotNil(escape)
+        XCTAssertLessThan(escape ?? .max, command ?? .min)
+        await process.disconnect()
+    }
+
+    /// A prompt that gives way to another, such as a more-prompt for output
+    /// that follows, is not a dismissal: the paste is refused, not sent
+    /// into the new prompt.
+    func testPasteIsRefusedWhenAnotherPromptFollows() async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+
+        let refused = expectation(description: "the paste was reported")
+        let pasting = Task {
+            await process.perform(.paste("text", refused: {
+                refused.fulfill()
+            }))
+        }
+        let calls = try servePrompt(pair.peer, runsRequests: true,
+                                    afterPrompt: "rm")
+
+        await fulfillment(of: [refused], timeout: 2)
+        await pasting.value
+        XCTAssertFalse(calls.contains { $0.method == "nvim_paste" })
+        await process.disconnect()
+    }
+
+    /// A paste dismisses a hit-enter prompt that runs requests first, since
+    /// Neovim pastes nothing at the prompt.
+    func testPasteDismissesAnsweringHitEnterPrompt() async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+
+        let pasting = Task {
+            await process.perform(.paste("text", refused: {
+                XCTFail("paste was refused")
+            }))
+        }
+        let calls = try servePrompt(pair.peer, runsRequests: true,
+                                    until: "nvim_paste")
+        await pasting.value
+
+        let dismissal = calls.firstIndex { $0.dismissesPrompt }
+        let paste = calls.firstIndex { $0.method == "nvim_paste" }
+        XCTAssertNotNil(dismissal)
+        XCTAssertLessThan(dismissal ?? .max, paste ?? .min)
+        await process.disconnect()
+    }
+
     func testNewDocumentTypesItsCommand() async throws {
         let cases = [(true, "<Esc><C-\\><C-N>:hide enew<CR>"),
                      (false, "<Esc><C-\\><C-N>:tabnew<CR>")]
@@ -680,13 +929,16 @@ final class NeovimProcessTests: XCTestCase {
         let text = String(repeating: "a", count: nvimPasteChunkBytes + 1)
         let paste = Task { await process.perform(.paste(text, refused: {})) }
 
+        // The paste probes for a block, then for a hit-enter prompt.
         var unpacker = MessagePackUnpacker()
-        let probeID = try readRequest(peer, method: "nvim_get_mode",
-                                      unpacker: &unpacker)
-        try writeResponse(
-            peer, id: probeID,
-            result: .map([(.string("mode"), .string("n")),
-                          (.string("blocking"), .bool(false))]))
+        for _ in 0..<2 {
+            let probeID = try readRequest(peer, method: "nvim_get_mode",
+                                          unpacker: &unpacker)
+            try writeResponse(
+                peer, id: probeID,
+                result: .map([(.string("mode"), .string("n")),
+                              (.string("blocking"), .bool(false))]))
+        }
 
         // Read the opening chunk and never answer it.
         _ = try readRequest(peer, method: "nvim_paste", unpacker: &unpacker)
@@ -719,21 +971,24 @@ final class NeovimProcessTests: XCTestCase {
 
         let paste = Task { await process.perform(.paste(text, refused: {})) }
 
-        // The paste probes the input-block state first; answer it so the
-        // chunked nvim_paste requests proceed.
-        let probe = try readMessage(peer)
-        guard case .array(let probeValues) = probe, probeValues.count == 4,
-              let probeID = probeValues[1].integer?.unsigned,
-              probeValues[2].stringValue == "nvim_get_mode"
-        else {
-            return XCTFail("expected a leading nvim_get_mode probe: \(probe)")
+        // The paste probes the input-block state, then for a hit-enter
+        // prompt; answer both so the chunked nvim_paste requests proceed.
+        for _ in 0..<2 {
+            let probe = try readMessage(peer)
+            guard case .array(let probeValues) = probe,
+                  probeValues.count == 4,
+                  let probeID = probeValues[1].integer?.unsigned,
+                  probeValues[2].stringValue == "nvim_get_mode"
+            else {
+                return XCTFail("expected an nvim_get_mode probe: \(probe)")
+            }
+            var probeReply = MessagePackWriter()
+            probeReply.encodeResponse(
+                id: probeID, error: .null,
+                result: .map([(.string("mode"), .string("n")),
+                              (.string("blocking"), .bool(false))]))
+            try writeAll(peer, probeReply.bytes)
         }
-        var probeReply = MessagePackWriter()
-        probeReply.encodeResponse(
-            id: probeID, error: .null,
-            result: .map([(.string("mode"), .string("n")),
-                          (.string("blocking"), .bool(false))]))
-        try writeAll(peer, probeReply.bytes)
 
         var received: [String] = []
         var phases: [Int64] = []
@@ -1600,7 +1855,8 @@ final class NeovimProcessTests: XCTestCase {
             XCTAssertTrue(blocked)
 
             let start = ContinuousClock.now
-            let prepared = await process.prepareForCommand()
+            let prepared = await process.prepareForCommand(
+                dismissingHitEnter: false)
             XCTAssertTrue(prepared)
             // Normal mode is reported during the pause too, so the pause
             // must also have ended.
