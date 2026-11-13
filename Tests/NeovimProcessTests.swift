@@ -1187,7 +1187,10 @@ final class NeovimProcessTests: XCTestCase {
         ]
         try await withNvim { process in
             try await attachLinegridUI(process)
-            let policy = CompositionWidthPolicy()
+            let geometry = await process.getCompositionGeometry()
+            var policy = CompositionWidthPolicy()
+            policy.spacingMarksWiden = try XCTUnwrap(geometry?.spacingMarksWiden)
+
             let lua = """
                 local out = {}
                 for _, s in ipairs({...}) do
@@ -1209,6 +1212,28 @@ final class NeovimProcessTests: XCTestCase {
                 let neovim = reply.arrayValue?.compactMap { $0.integer?.signed }
                 XCTAssertEqual(neovim, [Int64(clusters.count), Int64(cells)], text)
             }
+        }
+    }
+
+    /// The geometry reports whether this Neovim widens a narrow base for a
+    /// spacing mark, and a `setcellwidths()` override of the first probe
+    /// base does not change the answer.
+    func testCompositionGeometryReportsSpacingMarkWidth() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            let width = try await process.request(
+                "nvim_strwidth", [.string("\u{0E17}\u{0E33}")])
+            let widens = width.result.integer?.signed == 2
+
+            let geometry = await process.getCompositionGeometry()
+            XCTAssertEqual(geometry?.spacingMarksWiden, widens)
+
+            let set = try await process.request("nvim_exec2", [
+                .string("call setcellwidths([[0x0E17, 0x0E17, 2]])"),
+                .map([])])
+            XCTAssertFalse(set.isError)
+            let overridden = await process.getCompositionGeometry()
+            XCTAssertEqual(overridden?.spacingMarksWiden, widens)
         }
     }
 

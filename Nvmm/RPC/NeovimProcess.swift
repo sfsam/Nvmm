@@ -43,7 +43,8 @@ private nonisolated enum Inbound: Sendable {
 /// The current window's editable-text geometry, in zero-based grid coordinates.
 /// `textCol`/`textWidth` exclude the gutters where a preedit must not displace
 /// buffer cells; `rightToLeft` marks a `rightleft` window; `cellwidthOverrides`
-/// carries the buffer's `getcellwidths()` entries.
+/// carries the buffer's `getcellwidths()` entries; `spacingMarksWiden` is
+/// whether this Neovim gives a spacing mark a cell of its own.
 nonisolated struct CompositionGeometry: Sendable, Equatable {
     var windowID: Int32 = 0
     var textRow: Int32 = 0
@@ -52,16 +53,18 @@ nonisolated struct CompositionGeometry: Sendable, Equatable {
     var textHeight: Int32 = 0
     var rightToLeft = false
     var cellwidthOverrides: [CellwidthOverride] = []
+    var spacingMarksWiden = false
 }
 
 /// Parses the `getCompositionGeometry` reply into normalized zero-based grid
 /// coordinates, returning nil for any malformed or out-of-range shape.
 ///
 /// Expected result array:
-/// `[winid, winrow, wincol, width, height, textoff, rightleft, cellwidths]`,
-/// with row/column values 1-based as the Vimscript-facing APIs report them.
+/// `[winid, winrow, wincol, width, height, textoff, rightleft, cellwidths,
+/// spacingmarkswiden]`, with row/column values 1-based as the
+/// Vimscript-facing APIs report them.
 nonisolated func parseCompositionGeometry(_ result: MPValue) -> CompositionGeometry? {
-    guard let values = result.arrayValue, values.count == 8,
+    guard let values = result.arrayValue, values.count == 9,
           let windowID = values[0].integer?.signed,
           let winRow = values[1].integer?.signed,
           let winCol = values[2].integer?.signed,
@@ -69,7 +72,8 @@ nonisolated func parseCompositionGeometry(_ result: MPValue) -> CompositionGeome
           let textHeight = values[4].integer?.signed,
           let textOffset = values[5].integer?.signed,
           let rightToLeft = values[6].boolValue,
-          let overrides = values[7].arrayValue
+          let overrides = values[7].arrayValue,
+          let spacingMarksWiden = values[8].boolValue
     else { return nil }
 
     let textRow = winRow - 1
@@ -82,6 +86,7 @@ nonisolated func parseCompositionGeometry(_ result: MPValue) -> CompositionGeome
     geometry.textRow = Int32(truncatingIfNeeded: textRow)
     geometry.textHeight = Int32(truncatingIfNeeded: textHeight)
     geometry.rightToLeft = rightToLeft
+    geometry.spacingMarksWiden = spacingMarksWiden
     // LTR windows draw text after the left gutter/textoff; RTL windows start the
     // editable text at wincol with the offset on the opposite edge.
     let textColumn = rightToLeft ? windowColumn : windowColumn + textOffset
@@ -721,13 +726,26 @@ actor NeovimProcess {
     /// errors, or the connection is down. This is `async`; the caller
     /// generation-checks the reply on the main actor and caches it, so the
     /// synchronous text-input geometry queries never block on the actor.
+    ///
+    /// Whether spacing marks widen is asked of Neovim rather than inferred
+    /// from its version: a narrow base followed by U+0E33, a spacing mark,
+    /// is two cells wide from 0.13. The first base still narrow under
+    /// `setcellwidths()` and `'ambiwidth'` decides; ASCII is never widened,
+    /// so it cannot be the probe.
     func getCompositionGeometry() async -> CompositionGeometry? {
         let lua = """
             local w = vim.api.nvim_get_current_win()
             local i = vim.fn.getwininfo(w)[1]
             if not i then return nil end
+            local widen = false
+            for _, b in ipairs({'\u{0E17}', '\u{0915}', '\u{00F1}'}) do
+              if vim.api.nvim_strwidth(b) == 1 then
+                widen = vim.api.nvim_strwidth(b .. '\u{0E33}') == 2
+                break
+              end
+            end
             return {w, i.winrow, i.wincol, i.width, i.height, i.textoff,
-                    vim.wo[w].rightleft, vim.fn.getcellwidths()}
+                    vim.wo[w].rightleft, vim.fn.getcellwidths(), widen}
             """
         guard let response = try? await request("nvim_exec_lua",
                                                 [.string(lua), .array([])]),

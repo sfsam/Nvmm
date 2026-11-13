@@ -2095,6 +2095,8 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             self.compositionRequest.pending = false
             if let geometry {
                 self.compositionWidthPolicy.overrides = geometry.cellwidthOverrides
+                self.compositionWidthPolicy.spacingMarksWiden =
+                    geometry.spacingMarksWiden
             }
             self.compositionGeometry = geometry
             self.updateCompositionLayout()

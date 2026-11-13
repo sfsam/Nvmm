@@ -61,10 +61,13 @@ nonisolated struct CellwidthOverride: Sendable, Equatable {
 
 /// The inputs that decide a grapheme's display width, matching Neovim's model.
 /// `ambiguousIsDouble` follows `ambiwidth`; `emojiIsDouble` follows `emoji`.
+/// `spacingMarksWiden` is whether this Neovim gives a spacing mark a cell of
+/// its own, as 0.13 does.
 nonisolated struct CompositionWidthPolicy: Sendable, Equatable {
     var ambiguousIsDouble = false
     var emojiIsDouble = true
     var overrides: [CellwidthOverride] = []
+    var spacingMarksWiden = false
 }
 
 private nonisolated func isEmojiLike(_ boundclass: UInt32) -> Bool {
@@ -72,11 +75,39 @@ private nonisolated func isEmojiLike(_ boundclass: UInt32) -> Bool {
     boundclass == UInt32(UTF8PROC_BOUNDCLASS_REGIONAL_INDICATOR.rawValue)
 }
 
+/// Whether `scalar` widens the narrow base of its grapheme: a spacing mark,
+/// or a halfwidth katakana sound mark (U+FF9E, U+FF9F).
+private nonisolated func isWideningMark(_ scalar: Unicode.Scalar) -> Bool {
+    if scalar.value & ~1 == 0xFF9E { return true }
+    guard let property = utf8proc_get_property(Int32(scalar.value))
+    else { return false }
+    return property.pointee.boundclass
+        == UInt32(UTF8PROC_BOUNDCLASS_SPACINGMARK.rawValue)
+}
+
 /// The Neovim-compatible display width, in cells, of one grapheme.
+///
+/// With `spacingMarksWiden`, a narrow base followed anywhere in its grapheme
+/// by a widening mark takes two cells, unless the base is ASCII.
 nonisolated func compositionGraphemeWidth(_ grapheme: String,
                                           _ policy: CompositionWidthPolicy) -> Int {
-    var scalars = grapheme.unicodeScalars.makeIterator()
-    guard let first = scalars.next() else { return 1 }
+    let scalars = grapheme.unicodeScalars
+    guard let first = scalars.first else { return 1 }
+    let rest = scalars.dropFirst()
+    let width = compositionBaseWidth(first, followedBy: rest.first, policy)
+    if width == 1, policy.spacingMarksWiden, first.value >= 0x80,
+       rest.contains(where: isWideningMark) {
+        return 2
+    }
+    return width
+}
+
+/// The width of a grapheme from its first scalar, and from the one after it
+/// for emoji presentation.
+private nonisolated func compositionBaseWidth(
+    _ first: Unicode.Scalar, followedBy next: Unicode.Scalar?,
+    _ policy: CompositionWidthPolicy
+) -> Int {
     let value = first.value
     let scalar = Int32(value)
 
@@ -100,8 +131,9 @@ nonisolated func compositionGraphemeWidth(_ grapheme: String,
     }
     // A narrow pictograph followed by U+FE0F (emoji variation selector) is
     // presented in emoji style and takes two cells.
-    if policy.emojiIsDouble && charwidth == 1 && emojiLike {
-        if let next = scalars.next(), next.value == 0xFE0F { return 2 }
+    if policy.emojiIsDouble && charwidth == 1 && emojiLike,
+       next?.value == 0xFE0F {
+        return 2
     }
     return 1
 }

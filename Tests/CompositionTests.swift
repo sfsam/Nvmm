@@ -70,6 +70,41 @@ final class CompositionTests: XCTestCase {
         }
     }
 
+    /// From Neovim 0.13 a narrow, non-ASCII base followed in its grapheme by
+    /// a spacing mark or a halfwidth katakana sound mark takes two cells;
+    /// 0.12 keeps it narrow. Widths as both versions report them.
+    func testCompositionWidthWidensSpacingMarks() {
+        let cases: [(String, Int, Int)] = [
+            ("\u{0E17}\u{0E33}", 1, 2),           // Thai SARA AM
+            ("\u{0915}\u{093F}", 1, 2),           // Devanagari vowel sign I
+            ("\u{FF76}\u{FF9E}", 1, 2),           // halfwidth voiced mark
+            ("\u{FF8A}\u{FF9F}", 1, 2),           // halfwidth semi-voiced
+            ("\u{0E01}\u{0E48}\u{0E33}", 1, 2),   // mark not adjacent
+            ("\u{00E9}\u{0903}", 1, 2),           // non-ASCII Latin base
+            ("a\u{0903}", 1, 1),                  // ASCII base
+            ("\u{0E01}\u{0E35}\u{0E48}", 1, 1),   // nonspacing marks only
+            ("\u{093E}", 1, 1),                   // lone spacing mark
+            ("\u{65E5}\u{093E}", 2, 2),           // already wide
+        ]
+        var policy = CompositionWidthPolicy()
+        for (grapheme, narrow, widened) in cases {
+            policy.spacingMarksWiden = false
+            XCTAssertEqual(compositionGraphemeWidth(grapheme, policy), narrow,
+                           grapheme)
+            policy.spacingMarksWiden = true
+            XCTAssertEqual(compositionGraphemeWidth(grapheme, policy), widened,
+                           grapheme)
+        }
+
+        // An override decides the base: a wide base made narrow is widened
+        // again by a spacing mark, only where marks widen.
+        policy.overrides = [CellwidthOverride(first: 0x65E5, last: 0x65E5,
+                                              width: 1)]
+        XCTAssertEqual(compositionGraphemeWidth("\u{65E5}\u{093E}", policy), 2)
+        policy.spacingMarksWiden = false
+        XCTAssertEqual(compositionGraphemeWidth("\u{65E5}\u{093E}", policy), 1)
+    }
+
     // MARK: Layout
 
     func testLayoutDisplacesInsertModeCellsWithinTextArea() {
@@ -243,7 +278,7 @@ final class CompositionTests: XCTestCase {
 
     func testGeometryParserReturnsAtomicTextAreaSnapshot() {
         let widths: MPValue = .array([.array([0x00B7, 0x00B7, 2])])
-        let result: MPValue = .array([17, 2, 11, 20, 8, 3, false, widths])
+        let result: MPValue = .array([17, 2, 11, 20, 8, 3, false, widths, true])
 
         let geometry = parseCompositionGeometry(result)
         XCTAssertNotNil(geometry)
@@ -254,20 +289,24 @@ final class CompositionTests: XCTestCase {
         XCTAssertEqual(geometry?.textHeight, 8)
         XCTAssertEqual(geometry?.rightToLeft, false)
         XCTAssertEqual(geometry?.cellwidthOverrides.count, 1)
+        XCTAssertEqual(geometry?.spacingMarksWiden, true)
     }
 
     func testGeometryParserRejectsMalformedShapes() {
         XCTAssertNil(parseCompositionGeometry(.array([17, 2, 11])))
         // width must exceed textoff.
         XCTAssertNil(parseCompositionGeometry(
-            .array([17, 2, 11, 3, 8, 3, false, .array([])])))
+            .array([17, 2, 11, 3, 8, 3, false, .array([]), false])))
         // window id must be positive.
         XCTAssertNil(parseCompositionGeometry(
-            .array([0, 2, 11, 20, 8, 3, false, .array([])])))
+            .array([0, 2, 11, 20, 8, 3, false, .array([]), false])))
         // an override width other than 1 or 2 is invalid.
         XCTAssertNil(parseCompositionGeometry(
             .array([17, 2, 11, 20, 8, 3, false,
-                    .array([.array([0x61, 0x61, 3])])])))
+                    .array([.array([0x61, 0x61, 3])]), false])))
+        // the spacing-mark answer must be a boolean.
+        XCTAssertNil(parseCompositionGeometry(
+            .array([17, 2, 11, 20, 8, 3, false, .array([]), 1])))
     }
 
     // MARK: Coordinator lifecycle
