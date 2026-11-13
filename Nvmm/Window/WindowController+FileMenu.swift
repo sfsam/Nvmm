@@ -78,7 +78,8 @@ extension WindowController {
     func open(paths: [String]) {
         guard let process, !paths.isEmpty else { return }
         Task {
-            await process.open(paths, inBuffers: Settings.openFilesInBuffers)
+            await process.openInView(
+                paths, inBuffers: Settings.openFilesInBuffers)
             window?.makeKeyAndOrderFront(nil)
         }
     }

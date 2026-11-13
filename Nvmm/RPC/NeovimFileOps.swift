@@ -405,6 +405,15 @@ extension NeovimProcess {
         if inBuffers { openBuffers(paths) } else { openTabs(paths) }
     }
 
+    /// Opens paths that arrive from outside the window: the Finder, the Dock,
+    /// `open`, Open Recent. A hit-enter prompt that runs requests is dismissed
+    /// first, so they open in view. If it stays up, they are opened anyway,
+    /// and show once the prompt is answered, as they always have.
+    func openInView(_ paths: [String], inBuffers: Bool) async {
+        _ = await dismissAnsweringHitEnterPrompt()
+        open(paths, inBuffers: inBuffers)
+    }
+
     /// How many of the given paths already have a buffer. Nil when the query
     /// timed out or failed, which the caller reads as "no idea", not zero.
     func openCount(_ paths: [String],
@@ -430,8 +439,11 @@ extension NeovimProcess {
     ///
     /// The mode is read once here and every branch decided from it, so the
     /// keypress that leaves the current mode and the command that follows it
-    /// are issued together, in order.
+    /// are issued together, in order. A hit-enter prompt that runs requests
+    /// is dismissed before then, so the drop is applied in view rather than
+    /// ignored.
     func drop(paths: [String], opensFiles: Bool, inBuffers: Bool) async {
+        _ = await dismissAnsweringHitEnterPrompt()
         let mode = await self.mode()
         if mode.isBusy || mode.isPrompt || mode.isExMode { return }
 

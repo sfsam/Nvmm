@@ -703,6 +703,95 @@ final class NeovimProcessTests: XCTestCase {
         await process.disconnect()
     }
 
+    /// Whether a call runs the Lua helper that opens files in tabs.
+    private func opensTabs(_ call: PeerCall) -> Bool {
+        call.method == "nvim_exec_lua"
+            && call.arguments.first?.stringValue?.contains("open_tabs") == true
+    }
+
+    /// Files opened from outside the window dismiss a hit-enter prompt that
+    /// runs requests first, so they open in view.
+    func testOpenInViewDismissesAnsweringHitEnterPrompt() async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+
+        let opening = Task {
+            await process.openInView(["/tmp/a.txt"], inBuffers: false)
+        }
+        let calls = try servePrompt(pair.peer, runsRequests: true,
+                                    until: "nvim_exec_lua")
+        await opening.value
+
+        let dismissal = calls.firstIndex { $0.dismissesPrompt }
+        let open = calls.firstIndex(where: opensTabs)
+        XCTAssertNotNil(dismissal)
+        XCTAssertLessThan(dismissal ?? .max, open ?? .min)
+        await process.disconnect()
+    }
+
+    /// A prompt that stays up does not lose the files: they are opened
+    /// anyway, as they were before prompts could be dismissed.
+    func testOpenInViewOpensWhenThePromptStays() async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+
+        let opening = Task {
+            await process.openInView(["/tmp/a.txt"], inBuffers: false)
+        }
+        let calls = try servePrompt(pair.peer, runsRequests: false,
+                                    until: "nvim_exec_lua")
+        await opening.value
+
+        XCTAssertTrue(calls.contains(where: opensTabs))
+        await process.disconnect()
+    }
+
+    /// A drop dismisses a hit-enter prompt that runs requests first, so it
+    /// is applied rather than ignored at the prompt.
+    func testDropDismissesAnsweringHitEnterPrompt() async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+
+        let dropping = Task {
+            await process.drop(paths: ["/tmp/a.txt"], opensFiles: true,
+                               inBuffers: false)
+        }
+        let calls = try servePrompt(pair.peer, runsRequests: true,
+                                    until: "nvim_exec_lua")
+        await dropping.value
+
+        let dismissal = calls.firstIndex { $0.dismissesPrompt }
+        let open = calls.firstIndex(where: opensTabs)
+        XCTAssertNotNil(dismissal)
+        XCTAssertLessThan(dismissal ?? .max, open ?? .min)
+        await process.disconnect()
+    }
+
+    /// A drop at a prompt that stays up is still ignored.
+    func testDropIsIgnoredWhenThePromptStays() async throws {
+        let pair = try makeSocketPair()
+        defer { close(pair.peer) }
+        let process = NeovimProcess()
+        await process.attach(readFD: pair.client, writeFD: pair.client)
+
+        let dropping = Task {
+            await process.drop(paths: ["/tmp/a.txt"], opensFiles: true,
+                               inBuffers: false)
+            await process.disconnect()
+        }
+        let calls = try servePrompt(pair.peer, runsRequests: false)
+        await dropping.value
+
+        XCTAssertFalse(calls.contains { $0.method == "nvim_exec_lua" })
+        XCTAssertFalse(calls.contains { $0.method == "nvim_feedkeys" })
+    }
+
     func testNewDocumentTypesItsCommand() async throws {
         let cases = [(true, "<Esc><C-\\><C-N>:hide enew<CR>"),
                      (false, "<Esc><C-\\><C-N>:tabnew<CR>")]
