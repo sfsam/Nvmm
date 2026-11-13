@@ -2020,12 +2020,9 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
             refreshCompositionWidthPolicy()
             let widthPolicy = compositionWidthPolicy
             var committedCells = 0
-            text.enumerateSubstrings(in: text.startIndex..<text.endIndex,
-                                     options: .byComposedCharacterSequences) {
-                substring, _, _, _ in
-                if let substring {
-                    committedCells += compositionGraphemeWidth(substring, widthPolicy)
-                }
+            for range in compositionClusters(text) {
+                committedCells += compositionGraphemeWidth(
+                    String(text[range]), widthPolicy)
             }
             let rightToLeft = compositionGeometry?.rightToLeft ?? false
             compositionSession.pendingAnchorAdvance +=
@@ -2162,12 +2159,10 @@ final class GridView: NSView, CALayerDelegate, NSTextInputClient,
         let marked = textInputCoordinator.markedText?.string ?? ""
         struct Grapheme { var text: String; var range: NSRange; var width: Int }
         var graphemes: [Grapheme] = []
-        marked.enumerateSubstrings(in: marked.startIndex..<marked.endIndex,
-                                   options: .byComposedCharacterSequences) {
-            substring, substringRange, _, _ in
-            guard let substring else { return }
-            let nsRange = NSRange(substringRange, in: marked)
-            let width = compositionGraphemeWidth(substring, self.compositionWidthPolicy)
+        for range in compositionClusters(marked) {
+            let substring = String(marked[range])
+            let nsRange = NSRange(range, in: marked)
+            let width = compositionGraphemeWidth(substring, compositionWidthPolicy)
             graphemes.append(Grapheme(text: substring, range: nsRange, width: width))
         }
 

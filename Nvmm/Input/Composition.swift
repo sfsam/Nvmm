@@ -8,12 +8,47 @@
 //  multi-scalar emoji, or an IME preedit with a candidate window — inside the
 //  Neovim grid before it commits. `layoutComposition` places that string on a
 //  single grid row without any AppKit, RPC, grid-mutation, or rendering
-//  dependency, so it is unit tested in isolation. `compositionGraphemeWidth`
-//  gives each grapheme the same display width Neovim would, using utf8proc for
-//  the East-Asian-width and emoji classification the standard library omits.
+//  dependency, so it is unit tested in isolation. `compositionClusters` splits
+//  text where Neovim does, and `compositionGraphemeWidth` gives each cluster
+//  the same display width Neovim would, using utf8proc for the segmentation
+//  and the East-Asian-width and emoji classification the standard library
+//  omits.
 //
 
 import Foundation
+
+// MARK: - Clusters
+
+/// The grapheme clusters of `text`, split as Neovim splits them: by
+/// utf8proc's stateful grapheme breaks, the state starting afresh with each
+/// cluster, and always before an ASCII character, which utf8proc would join
+/// to a prepended character before it. Neither `Character` nor NSString's
+/// composed character sequences agree with Neovim everywhere: NSString
+/// splits Thai SARA AM from its base, and `Character` splits a Khmer
+/// subscript consonant from its base.
+///
+/// Neovim also joins a lam and an alef while `'arabicshape'` is set. That is
+/// not followed, since the preedit does not track `'arabicshape'`.
+nonisolated func compositionClusters(_ text: String) -> [Range<String.Index>] {
+    let scalars = text.unicodeScalars
+    var clusters: [Range<String.Index>] = []
+    var start = scalars.startIndex
+    while start < scalars.endIndex {
+        var state: utf8proc_int32_t = 0
+        var previous = scalars[start]
+        var end = scalars.index(after: start)
+        while end < scalars.endIndex {
+            let next = scalars[end]
+            if next.isASCII || utf8proc_grapheme_break_stateful(
+                Int32(previous.value), Int32(next.value), &state) { break }
+            previous = next
+            end = scalars.index(after: end)
+        }
+        clusters.append(start..<end)
+        start = end
+    }
+    return clusters
+}
 
 // MARK: - Width policy
 

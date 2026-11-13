@@ -1170,6 +1170,48 @@ final class NeovimProcessTests: XCTestCase {
 
     // MARK: Real-Neovim cases
 
+    /// Preedit text splits into as many clusters, and takes as many cells,
+    /// as Neovim gives the same text.
+    func testCompositionClustersAndWidthsMatchNeovim() async throws {
+        let texts = [
+            "abc", "\u{65E5}\u{672C}", "\u{0E17}\u{0E33}",
+            "\u{0E01}\u{0E48}\u{0E33}", "\u{0E01}\u{0E35}\u{0E48}",
+            "\u{0E40}\u{0E01}", "\u{1780}\u{17D2}\u{1780}",
+            "\u{0600}\u{0661}", "\u{0600}12", "\u{0915}\u{093F}",
+            "\u{0915}\u{094D}\u{0937}", "\u{0995}\u{09BE}",
+            "\u{FF76}\u{FF9E}", "\u{00E9}\u{0903}", "a\u{0903}",
+            "\u{65E5}\u{093E}", "a\u{0308}\u{0301}b", "\u{0301}a",
+            "\u{1100}\u{1161}\u{11A8}", "\u{2708}\u{FE0F}",
+            "\u{1F1EF}\u{1F1F5}\u{1F1FA}\u{1F1F8}",
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+        ]
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            let policy = CompositionWidthPolicy()
+            let lua = """
+                local out = {}
+                for _, s in ipairs({...}) do
+                  out[#out + 1] = {vim.fn.strcharlen(s), vim.api.nvim_strwidth(s)}
+                end
+                return out
+                """
+            let response = try await process.request(
+                "nvim_exec_lua",
+                [.string(lua), .array(texts.map { .string($0) })])
+            let replies = try XCTUnwrap(response.result.arrayValue)
+            XCTAssertEqual(replies.count, texts.count)
+
+            for (text, reply) in zip(texts, replies) {
+                let clusters = compositionClusters(text)
+                let cells = clusters.reduce(0) {
+                    $0 + compositionGraphemeWidth(String(text[$1]), policy)
+                }
+                let neovim = reply.arrayValue?.compactMap { $0.integer?.signed }
+                XCTAssertEqual(neovim, [Int64(clusters.count), Int64(cells)], text)
+            }
+        }
+    }
+
     func testUIAttachCompletesRequiredLuaSetup() async throws {
         try await withNvim { process in
             try await attachLinegridUI(process)

@@ -43,6 +43,33 @@ final class CompositionTests: XCTestCase {
         XCTAssertEqual(compositionGraphemeWidth("", policy), 1)
     }
 
+    /// Text splits into clusters where Neovim 0.12 and 0.13 split it, which
+    /// neither `Character` nor NSString's composed sequences do everywhere.
+    func testCompositionClustersMatchNeovim() {
+        let cases: [(String, [String])] = [
+            ("\u{0E17}\u{0E33}", ["\u{0E17}\u{0E33}"]),   // Thai SARA AM
+            ("\u{0E01}\u{0E48}\u{0E33}", ["\u{0E01}\u{0E48}\u{0E33}"]),
+            ("\u{1780}\u{17D2}\u{1780}",                // Khmer coeng
+             ["\u{1780}\u{17D2}\u{1780}"]),
+            ("\u{0600}\u{0661}", ["\u{0600}\u{0661}"]),   // prepend
+            ("\u{0915}\u{094D}\u{0937}",                // conjunct
+             ["\u{0915}\u{094D}\u{0937}"]),
+            ("\u{0E40}\u{0E01}", ["\u{0E40}", "\u{0E01}"]),
+            ("\u{1F1EF}\u{1F1F5}\u{1F1FA}\u{1F1F8}",
+             ["\u{1F1EF}\u{1F1F5}", "\u{1F1FA}\u{1F1F8}"]),
+            ("\u{1F468}\u{200D}\u{1F469}", ["\u{1F468}\u{200D}\u{1F469}"]),
+            ("a\u{0308}\u{0301}b", ["a\u{0308}\u{0301}", "b"]),
+            ("\u{0301}a", ["\u{0301}", "a"]),
+            ("\u{0600}12", ["\u{0600}", "1", "2"]),     // ASCII after prepend
+            ("\r\n", ["\r", "\n"]),
+            ("", []),
+        ]
+        for (text, expected) in cases {
+            let clusters = compositionClusters(text).map { String(text[$0]) }
+            XCTAssertEqual(clusters, expected, text)
+        }
+    }
+
     // MARK: Layout
 
     func testLayoutDisplacesInsertModeCellsWithinTextArea() {
