@@ -24,7 +24,8 @@ enum Settings {
 
     /// Whether a document opens as a buffer in the current tabpage rather
     /// than in a new tabpage. Applies to Finder and drag-and-drop opens, the
-    /// Open panel, and New.
+    /// Open panel, files given to the `nvmm` command, and New Tab, which it
+    /// renames New Buffer.
     static let openFilesInBuffersKey = "NVOpenFilesInBuffersInsteadOfTabs"
 
     /// Whether closing the last window quits the app.
@@ -227,10 +228,10 @@ final class SettingsWindowController: NSWindowController {
             String(localized: "Option as Meta"))
 
         let buffers = Self.checkbox(
-            String(localized: "Open files in buffers instead of tabs"),
+            String(localized: "Use buffers instead of tabs"),
             key: Settings.openFilesInBuffersKey)
         let buffersNote = Self.note(String(localized:
-            "Applies to New, Open…, files opened from the Finder, and files dropped on a window with Option held."))
+            "Files from File ▸ Open…, the Finder, the nvmm command, or an Option-drop open as buffers."))
 
         let terminate = Self.checkbox(
             String(localized: "Terminate after last window closed"),

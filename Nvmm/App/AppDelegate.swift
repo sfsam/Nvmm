@@ -78,6 +78,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the app depends on — the utf8proc bridge and the bundled nvim binary.
         logUTF8ProcVersion()
         logBundledNeovim()
+        titleNewDocumentItem()
+        let changes = NotificationCenter.default.notifications(
+            named: UserDefaults.didChangeNotification)
+        Task { [weak self] in
+            for await _ in changes { self?.titleNewDocumentItem() }
+        }
         if !Self.isTestHost { updaterController.startUpdater() }
         if awaitingInitialCLIRequest {
             Task { [weak self] in
@@ -133,10 +139,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - File menu (no editor window in the responder chain)
 
-    /// New, with no window in the responder chain. A miniaturized window is
-    /// still a window to make a document in, so the oldest one that has shown
-    /// itself is restored and used. Only with no window at all is a new
-    /// window the answer.
+    /// New Tab (New Buffer), with no window in the responder chain. A
+    /// miniaturized window is still a window to make a document in, so the
+    /// oldest one that has shown itself is restored and used. Only with no
+    /// window at all is a new window the answer.
     @IBAction func newDocument(_ sender: Any?) {
         guard let controller = windows.first(where: { !$0.isAwaitingFirstShow })
         else {
@@ -148,6 +154,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.window?.deminiaturize(nil)
         controller.window?.makeKeyAndOrderFront(nil)
         controller.newDocument(sender)
+    }
+
+    /// Names the File menu's New item for what it makes, a buffer or a tab,
+    /// following the setting. Kept current as the setting changes, not only
+    /// when the menu opens, since Help's menu search shows the title too.
+    private func titleNewDocumentItem() {
+        guard let item = NSApp.mainMenu?.items.lazy
+                .compactMap({ $0.submenu })
+                .compactMap({ $0.items.first {
+                    $0.action == #selector(self.newDocument(_:)) } })
+                .first
+        else { return }
+        let title = Settings.openFilesInBuffers
+            ? String(localized: "New Buffer") : String(localized: "New Tab")
+        if item.title != title { item.title = title }
     }
 
     /// New Window. Always a new window, so it is only implemented here.
@@ -222,8 +243,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///
     /// A debug launch can deliver its activation/reopen and normal launch
     /// requests in either order. Both may ask for an untitled window, so this
-    /// callback must be idempotent. Explicit New and New Window actions bypass
-    /// it and always create another window.
+    /// callback must be idempotent. The New Window and New Tab menu actions
+    /// bypass it.
     func applicationOpenUntitledFile(_ sender: NSApplication) -> Bool {
         if windows.isEmpty { openWindow() }
         return true
