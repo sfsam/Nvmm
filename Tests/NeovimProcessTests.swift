@@ -2041,6 +2041,24 @@ final class NeovimProcessTests: XCTestCase {
         }
     }
 
+    /// A command-line window holds commands, not the document, so saving
+    /// there is refused rather than failing with E382.
+    func testSaveIsRefusedInACommandLineWindow() async throws {
+        try await withNvim { process in
+            try await attachLinegridUI(process)
+            await process.perform(.input("q:"))
+            let opened = await waitFor(process) {
+                let reply = try? await $0.request(
+                    "nvim_eval", [.string("getcmdwintype()")])
+                return reply?.result.stringValue == ":"
+            }
+            XCTAssertTrue(opened)
+
+            let allowed = await process.canSave()
+            XCTAssertFalse(allowed)
+        }
+    }
+
     /// The Help menu types its command rather than issuing it, so it reaches
     /// a Neovim blocked awaiting input — where an `nvim_command` would queue
     /// behind the block instead. The leading keys answer the pending wait.

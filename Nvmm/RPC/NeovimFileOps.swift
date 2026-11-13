@@ -349,8 +349,13 @@ extension NeovimProcess {
     /// the write runs at once and needs nothing redrawn to be seen to work,
     /// and an E32 for an unnamed buffer leads to a save panel that can still
     /// be cancelled with the message in view.
+    ///
+    /// A command-line window (`q:`, and Ex mode from 0.13) refuses a save:
+    /// its buffer holds commands, not the document, so there is nothing
+    /// there to save.
     func canSave() async -> Bool {
         let blocked = await staysBlockedAwaitingInput()
+        if !blocked, await isInCommandLineWindow() { return false }
         if !blocked, await isAtAnsweringHitEnterPrompt() { return true }
         let mode = await self.mode()
         if mode.isBusy || mode.isPrompt || mode.isExMode || mode.isTerminal {
@@ -359,6 +364,19 @@ extension NeovimProcess {
         if blocked { return true }
         if mode.isCommandLine || mode.isOperatorPending { feedkeys(Self.abort) }
         return true
+    }
+
+    /// Whether the current window is a command-line window. From 0.13 that
+    /// window stays open while others are used, so the current window's
+    /// type is read, not `getcmdwintype()`, which reports one open anywhere.
+    /// Asked only of a Neovim that is not blocked, since the request is
+    /// deferred; no answer reads as no.
+    private func isInCommandLineWindow() async -> Bool {
+        guard case .response(let response) = await queryBounded(
+                  "nvim_eval", [.string("win_gettype()")],
+                  timeout: .milliseconds(250)),
+              !response.isError else { return false }
+        return response.result.stringValue == "command"
     }
 
     /// Feeds raw control bytes literally, in the same no-remap mode the input

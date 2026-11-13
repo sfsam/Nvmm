@@ -45,8 +45,10 @@ nonisolated enum NvimMode: Sendable, Equatable {
         self == .cancelled || self == .timedOut || self == .unknown
     }
 
-    /// True in the Ex modes (`Q`, `gQ`), where a command would be typed into
-    /// the Ex prompt rather than executed.
+    /// True in Ex mode, where a command would be typed into the Ex prompt
+    /// rather than executed: `gQ` or `nvim -e` on Neovim 0.12, script mode
+    /// (`-es`) only from 0.13. Interactive Ex mode from 0.13 is a
+    /// command-line window, reported as Normal or Insert mode.
     var isExMode: Bool {
         self == .exMode || self == .exModeVim
     }
