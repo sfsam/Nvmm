@@ -575,13 +575,20 @@ actor NeovimProcess {
             // dragging a scrollbar is expected to do.
             notify("nvim_command", [.string("normal! \(line)Gzt")])
         case .quit(let force):
-            // `quitall`/`quitall!` end every window. The app checks for unsaved
+            // `qall`/`qall!` end every window. The app checks for unsaved
             // buffers and confirms with the user before a non-forced quit, so
             // this is only issued when it will succeed; `silent!` still guards
             // against another error (e.g. a running terminal) spilling a
             // press-a-key prompt into the editor.
-            notify("nvim_command",
-                   [.string(force ? "silent! quitall!" : "silent! quitall")])
+            //
+            // `qall`, not `quitall`: in Neovim 0.12's command-line window
+            // only `qall` is allowed, and it closes that window and quits
+            // from the command line. The close waits for Insert mode to end,
+            // so `stopinsert` follows, reached only if Neovim did not quit.
+            let bang = force ? "!" : ""
+            notify("nvim_command", [.string(
+                "silent! qall\(bang) | if win_gettype() ==# 'command' "
+                    + "| silent! stopinsert | endif")])
         }
     }
 

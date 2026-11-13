@@ -2011,6 +2011,40 @@ final class NeovimProcessTests: XCTestCase {
         }
     }
 
+    /// Quit's own sequence with a command-line window open, in Normal and
+    /// Insert mode, forced and not: Neovim quits rather than refusing.
+    func testQuitFromACommandLineWindow() async throws {
+        for (keys, mode, force) in [("q:", "n", false), ("q:i", "i", false),
+                                    ("q:i", "i", true)] {
+            try await withNvim { process in
+                try await attachLinegridUI(process)
+                if force {
+                    let changed = try await process.request(
+                        "nvim_buf_set_lines",
+                        [.int(0), .int(0), .int(-1), .bool(true),
+                         .array([.string("abc")])])
+                    XCTAssertFalse(changed.isError)
+                }
+                await process.perform(.input(keys))
+                let opened = await waitFor(process) {
+                    let reply = try? await $0.request(
+                        "nvim_eval",
+                        [.string("win_gettype() .. mode()")])
+                    return reply?.result.stringValue == "command" + mode
+                }
+                XCTAssertTrue(opened, keys)
+
+                let stays = await process.staysBlockedAwaitingInput()
+                XCTAssertFalse(stays, keys)
+                let unsaved = await process.hasUnsavedBuffers()
+                XCTAssertEqual(unsaved, force, keys)
+                await process.perform(.quit(force: force))
+                let exited = await waitForExit(process)
+                XCTAssertTrue(exited, "\(keys) force: \(force)")
+            }
+        }
+    }
+
     /// Waits for Neovim to end the connection, as it does once it quits.
     private func waitForExit(_ process: NeovimProcess) async -> Bool {
         await waitFor(process, timeout: .seconds(3)) {

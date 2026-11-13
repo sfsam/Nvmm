@@ -49,7 +49,7 @@ nonisolated enum NvimCommand: Sendable {
     /// scrollbar. Carries a line rather than a screen offset because that is
     /// what the scrollbar knows: Neovim reports its viewport in buffer lines.
     case scrollToLine(Int)
-    /// Quit all buffers (`quitall`), forcing (`quitall!`) when `force` is set.
+    /// Quit all buffers (`qall`), forcing (`qall!`) when `force` is set.
     /// A non-forced quit with unsaved buffers is refused by Neovim, so the
     /// process stays alive and the window is left open.
     case quit(force: Bool)
